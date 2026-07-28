@@ -11,6 +11,7 @@
     "run_worker_first": ["/api", "/api/*"]
   },
   "vars": {
+    "DEV_LOGIN_ENABLED": "false",
     "LGU_ENV": "local",
     "LGU_AUTH_HOST": "api.msghub-qa.uplus.co.kr",
     "LGU_SEND_HOST": "api-send.msghub-qa.uplus.co.kr",

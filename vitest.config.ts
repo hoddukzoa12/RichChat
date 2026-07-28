@@ -20,6 +20,7 @@ export default defineWorkersConfig(async () => {
               directory: '.',
             },
             bindings: {
+              DEV_LOGIN_ENABLED: 'true',
               TEST_MIGRATIONS: migrations,
             },
           },
