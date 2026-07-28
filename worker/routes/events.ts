@@ -1,8 +1,10 @@
 import type {
   EventActorKind,
+  JsonValue,
+} from '../../shared/domain'
+import type {
   EventCatchupResponse,
   EventEnvelope,
-  EventPayload,
 } from '../../shared/wire/event'
 import { error } from '../http/error'
 import { json } from '../http/respond'
@@ -84,7 +86,7 @@ function envelope(row: EventRow): EventEnvelope {
     conversationId: row.conversation_id,
     actorKind: row.actor_kind,
     actorId: row.actor_id,
-    payload: JSON.parse(row.payload) as EventPayload,
+    payload: JSON.parse(row.payload) as JsonValue,
     createdAt: row.created_at,
   }
 }
