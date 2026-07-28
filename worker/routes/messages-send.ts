@@ -8,8 +8,11 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
 } from '../../shared/wire/message-send'
-import { changes, executeBatch } from '../db/d1'
-import { publish } from '../db/events'
+import { changes } from '../db/d1'
+import {
+  publish,
+  type EventPublication,
+} from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route } from '../http/router'
@@ -25,6 +28,7 @@ import {
   type OutboundTextChannel,
 } from '../lgu/send'
 import { createId, type Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 type OutboundChannel = OutboundTextChannel
 type JsonObject = Record<string, unknown>
@@ -56,6 +60,11 @@ interface MessageSendDependencies {
   idFactory?: () => string
   lguRequest?: LguRequest
   timeoutMs?: number
+}
+
+interface MessageCreationPlan {
+  publication: EventPublication
+  statements: D1PreparedStatement[]
 }
 
 const MESSAGE_PATH = '/api/conversations/:id/messages'
@@ -236,7 +245,7 @@ function createStatements(
     now: number
     session: SessionContext
   },
-): D1PreparedStatement[] {
+): MessageCreationPlan {
   const {
     body,
     channel,
@@ -253,122 +262,127 @@ function createStatements(
               AND client_key = ?`,
     bindings: [messageId, clientKey],
   }
-
-  return [
-    db
-      .prepare(
-        `INSERT INTO messages (
-           id, office_id, conversation_id, direction, channel, title, body,
-           sender_user_id, occurred_at, created_at, mo_key, client_key,
-           msg_key, delivery_status
-         )
-         SELECT
-           ?, ?, id, 'out', ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, '대기'
-         FROM conversations
-         WHERE id = ?
-           AND office_id = ?
-         ON CONFLICT(client_key) WHERE client_key IS NOT NULL DO NOTHING`,
-      )
-      .bind(
-        messageId,
-        session.officeId,
+  const publication = publish(
+    db,
+    {
+      officeId: session.officeId,
+      type: MESSAGE_EVENT.created,
+      entity: MESSAGE_ENTITY,
+      entityId: messageId,
+      conversationId,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: {
+        direction: 'out',
         channel,
-        body,
-        session.userId,
-        now,
-        now,
-        clientKey,
-        conversationId,
-        session.officeId,
-      ),
-    db
-      .prepare(
-        `UPDATE conversations
-         SET
-           status = '처리중',
-           last_message_id = CASE
-             WHEN last_message_at IS NULL OR ? >= last_message_at THEN ?
-             ELSE last_message_id
-           END,
-           last_message_at = CASE
-             WHEN last_message_at IS NULL OR ? >= last_message_at THEN ?
-             ELSE last_message_at
-           END,
-           version = version + 1,
-           updated_at = MAX(updated_at, ?)
-         WHERE id = ?
-           AND office_id = ?
-           AND EXISTS (
+        deliveryStatus: '대기',
+      },
+      createdAt: now,
+    },
+    createdGuard,
+  )
+
+  return {
+    publication,
+    statements: [
+      db
+        .prepare(
+          `INSERT INTO messages (
+             id, office_id, conversation_id, direction, channel, title, body,
+             sender_user_id, occurred_at, created_at, mo_key, client_key,
+             msg_key, delivery_status
+           )
+           SELECT
+             ?, ?, id, 'out', ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, '대기'
+           FROM conversations
+           WHERE id = ?
+             AND office_id = ?
+           ON CONFLICT(client_key) WHERE client_key IS NOT NULL DO NOTHING`,
+        )
+        .bind(
+          messageId,
+          session.officeId,
+          channel,
+          body,
+          session.userId,
+          now,
+          now,
+          clientKey,
+          conversationId,
+          session.officeId,
+        ),
+      db
+        .prepare(
+          `UPDATE conversations
+           SET
+             status = '처리중',
+             last_message_id = CASE
+               WHEN last_message_at IS NULL OR ? >= last_message_at THEN ?
+               ELSE last_message_id
+             END,
+             last_message_at = CASE
+               WHEN last_message_at IS NULL OR ? >= last_message_at THEN ?
+               ELSE last_message_at
+             END,
+             version = version + 1,
+             updated_at = MAX(updated_at, ?)
+           WHERE id = ?
+             AND office_id = ?
+             AND EXISTS (
+               SELECT 1
+               FROM messages
+               WHERE id = ?
+                 AND client_key = ?
+             )`,
+        )
+        .bind(
+          now,
+          messageId,
+          now,
+          now,
+          now,
+          conversationId,
+          session.officeId,
+          messageId,
+          clientKey,
+        ),
+      db
+        .prepare(
+          `INSERT INTO conversation_assignees (
+             conversation_id, office_id, user_id, assigned_at, assigned_by
+           )
+           SELECT ?, ?, ?, ?, ?
+           WHERE EXISTS (
              SELECT 1
              FROM messages
              WHERE id = ?
                AND client_key = ?
-           )`,
-      )
-      .bind(
-        now,
-        messageId,
-        now,
-        now,
-        now,
-        conversationId,
-        session.officeId,
-        messageId,
-        clientKey,
-      ),
-    db
-      .prepare(
-        `INSERT INTO conversation_assignees (
-           conversation_id, office_id, user_id, assigned_at, assigned_by
-         )
-         SELECT ?, ?, ?, ?, ?
-         WHERE EXISTS (
-           SELECT 1
-           FROM messages
-           WHERE id = ?
-             AND client_key = ?
-         )
-           AND NOT EXISTS (
-             SELECT 1
-             FROM conversation_assignees
-             WHERE conversation_id = ?
            )
-         ON CONFLICT(conversation_id, user_id) DO NOTHING`,
-      )
-      .bind(
-        conversationId,
-        session.officeId,
-        session.userId,
-        now,
-        session.userId,
-        messageId,
-        clientKey,
-        conversationId,
-      ),
-    ...publish(
-      db,
-      {
-        officeId: session.officeId,
-        type: MESSAGE_EVENT.created,
-        entity: MESSAGE_ENTITY,
-        entityId: messageId,
-        conversationId,
-        actorKind: 'user',
-        actorId: session.userId,
-        payload: {
-          direction: 'out',
-          channel,
-          deliveryStatus: '대기',
-        },
-        createdAt: now,
-      },
-      createdGuard,
-    ),
-  ]
+             AND NOT EXISTS (
+               SELECT 1
+               FROM conversation_assignees
+               WHERE conversation_id = ?
+             )
+           ON CONFLICT(conversation_id, user_id) DO NOTHING`,
+        )
+        .bind(
+          conversationId,
+          session.officeId,
+          session.userId,
+          now,
+          session.userId,
+          messageId,
+          clientKey,
+          conversationId,
+        ),
+      ...publication,
+    ],
+  }
 }
 
 async function recordDeliveryResult(
-  db: D1Database,
+  env: Env,
+  ctx: ExecutionContext | undefined,
   values: {
     conversationId: string
     messageId: string
@@ -390,7 +404,7 @@ async function recordDeliveryResult(
               AND delivery_status = '대기'`,
     bindings: [messageId, session.officeId],
   }
-  const mutation = db
+  const mutation = env.DB
     .prepare(
       `UPDATE messages
        SET
@@ -411,26 +425,34 @@ async function recordDeliveryResult(
       session.officeId,
     )
 
-  await executeBatch(db, [
-    ...publish(
-      db,
-      {
-        officeId: session.officeId,
-        type: MESSAGE_EVENT.deliveryUpdated,
-        entity: MESSAGE_ENTITY,
-        entityId: messageId,
-        conversationId,
-        actorKind: 'system',
-        payload: {
-          deliveryStatus,
-          resultCode: result.code,
-        },
-        createdAt: now,
+  const publication = publish(
+    env.DB,
+    {
+      officeId: session.officeId,
+      type: MESSAGE_EVENT.deliveryUpdated,
+      entity: MESSAGE_ENTITY,
+      entityId: messageId,
+      conversationId,
+      actorKind: 'system',
+      payload: {
+        deliveryStatus,
+        resultCode: result.code,
       },
-      guard,
-    ),
+      createdAt: now,
+    },
+    guard,
+  )
+  const statements = [
+    ...publication,
     mutation,
-  ])
+  ]
+  await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
 }
 
 function messageResponse(
@@ -456,6 +478,7 @@ export function createMessageSendRoutes(
     request: Request,
     env: Env,
     params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
@@ -488,17 +511,21 @@ export function createMessageSendRoutes(
     const now = clock()
     let creationResults: D1Result[]
     try {
-      creationResults = await executeBatch(
+      const plan = createStatements(env.DB, {
+        body: input.body,
+        channel: input.channel,
+        clientKey: input.clientKey,
+        conversationId: params.id,
+        messageId,
+        now,
+        session,
+      })
+      creationResults = await executeBatchAndBroadcast(
         env.DB,
-        createStatements(env.DB, {
-          body: input.body,
-          channel: input.channel,
-          clientKey: input.clientKey,
-          conversationId: params.id,
-          messageId,
-          now,
-          session,
-        }),
+        plan.statements,
+        [plan.publication],
+        ctx,
+        env,
       )
     } catch {
       return error('INTERNAL_ERROR', '메시지를 저장하지 못했습니다.')
@@ -532,7 +559,7 @@ export function createMessageSendRoutes(
 
     if (sendResult.kind !== 'uncertain') {
       try {
-        await recordDeliveryResult(env.DB, {
+        await recordDeliveryResult(env, ctx, {
           conversationId: params.id,
           messageId,
           now: clock(),

@@ -1,6 +1,7 @@
 import type { DeliveryStatus } from '../../shared/domain'
-import { changes, executeBatch } from './d1'
+import { changes } from './d1'
 import { publish } from './events'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 export type ReportDeliveryStatus =
   | '접수'
@@ -28,6 +29,11 @@ interface MessageIdentity {
   conversation_id: string
   id: string
   office_id: string
+}
+
+export interface DeliveryBroadcastContext {
+  ctx?: ExecutionContext
+  env: Pick<Env, 'OFFICE_HUB'>
 }
 
 const PREVIOUS_DELIVERY_STATUSES: Record<
@@ -98,6 +104,7 @@ function reportIdentityGuard(report: DeliveryReport): {
 async function applyDeliveryReport(
   db: D1Database,
   report: DeliveryReport,
+  broadcast?: DeliveryBroadcastContext,
 ): Promise<'changed' | 'unchanged' | 'unknown'> {
   const message = await findMessage(db, report)
   if (message === null) return 'unknown'
@@ -139,26 +146,34 @@ async function applyDeliveryReport(
       ...identityGuard.bindings,
       ...previousStatuses,
     )
-  const results = await executeBatch(db, [
-    ...publish(
-      db,
-      {
-        officeId: message.office_id,
-        type: 'message.delivery_updated',
-        entity: 'message',
-        entityId: message.id,
-        conversationId: message.conversation_id,
-        actorKind: 'system',
-        payload: {
-          deliveryStatus: report.status,
-          resultCode: report.resultCode,
-        },
-        createdAt: report.eventAt,
+  const publication = publish(
+    db,
+    {
+      officeId: message.office_id,
+      type: 'message.delivery_updated',
+      entity: 'message',
+      entityId: message.id,
+      conversationId: message.conversation_id,
+      actorKind: 'system',
+      payload: {
+        deliveryStatus: report.status,
+        resultCode: report.resultCode,
       },
-      transitionGuard,
-    ),
+      createdAt: report.eventAt,
+    },
+    transitionGuard,
+  )
+  const statements = [
+    ...publication,
     mutation,
-  ])
+  ]
+  const results = await executeBatchAndBroadcast(
+    db,
+    statements,
+    [publication],
+    broadcast?.ctx,
+    broadcast?.env,
+  )
 
   return changes(results[results.length - 1]) === 1
     ? 'changed'
@@ -168,6 +183,7 @@ async function applyDeliveryReport(
 export async function applyDeliveryReports(
   db: D1Database,
   reports: readonly DeliveryReport[],
+  broadcast?: DeliveryBroadcastContext,
 ): Promise<DeliveryReportSummary> {
   const summary: DeliveryReportSummary = {
     changed: 0,
@@ -176,7 +192,7 @@ export async function applyDeliveryReports(
   }
 
   for (const report of reports) {
-    const outcome = await applyDeliveryReport(db, report)
+    const outcome = await applyDeliveryReport(db, report, broadcast)
     if (outcome === 'unknown') {
       summary.unknown.push(report.msgKey ?? report.clientKey ?? '(키 없음)')
       continue

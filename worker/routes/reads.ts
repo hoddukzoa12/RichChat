@@ -1,9 +1,10 @@
-import { changes, executeBatch } from '../db/d1'
+import { changes } from '../db/d1'
 import { publish } from '../db/events'
 import { error } from '../http/error'
 import type { Route } from '../http/router'
 import { requireSession } from '../http/session'
 import type { Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 const READ_EVENT_TYPE = 'conversation.read'
 const READ_ENTITY = 'conversation'
@@ -53,7 +54,7 @@ export function createReadRoutes(clock: Clock = Date.now): Route[] {
     {
       method: 'POST',
       path: '/api/conversations/:id/read',
-      async handler(request, env, params): Promise<Response> {
+      async handler(request, env, params, ctx): Promise<Response> {
         const session = await requireSession(request, env)
         if (session instanceof Response) return session
 
@@ -137,10 +138,17 @@ export function createReadRoutes(clock: Clock = Date.now): Route[] {
           session.officeId,
           updatedAt,
         )
-        const results = await executeBatch(env.DB, [
+        const statements = [
           ...publication,
           mutation,
-        ])
+        ]
+        const results = await executeBatchAndBroadcast(
+          env.DB,
+          statements,
+          [publication],
+          ctx,
+          env,
+        )
         const mutationResult = results[publication.length]
 
         if (!mutationResult) {

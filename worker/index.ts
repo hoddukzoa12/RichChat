@@ -48,7 +48,11 @@ function isApiPath(pathname: string): boolean {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const pathname = new URL(request.url).pathname
 
     if (!isApiPath(pathname)) {
@@ -56,15 +60,15 @@ export default {
     }
 
     return (
-      (await dispatch(request, env, routes)) ??
+      (await dispatch(request, env, routes, ctx)) ??
       error('NOT_FOUND', '요청한 API를 찾을 수 없습니다.')
     )
   },
   async scheduled(
     _controller: ScheduledController,
     env: Env,
-    _ctx: ExecutionContext,
+    ctx: ExecutionContext,
   ): Promise<void> {
-    await runScheduledTasks(env)
+    await runScheduledTasks(env, undefined, ctx)
   },
 }

@@ -8,7 +8,7 @@ import type {
   ConversationWriteState,
 } from '../../shared/wire/conversation'
 import type { ApiError } from '../../shared/wire/error'
-import { changes, executeBatch } from '../db/d1'
+import { changes } from '../db/d1'
 import {
   publish,
   type EventInput,
@@ -17,6 +17,7 @@ import {
 import { error, ERROR_STATUS } from '../http/error'
 import { json } from '../http/respond'
 import type { Route } from '../http/router'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 import {
   requireSession,
   type SessionContext,
@@ -55,13 +56,21 @@ type JsonObject = Record<string, unknown>
  * 마지막 문장이 실패하면 앞선 이벤트도 함께 롤백된다.
  */
 async function executeGuardedMutation(
-  db: D1Database,
+  env: Env,
+  ctx: ExecutionContext | undefined,
   event: EventInput,
   guard: EventPublishGuard,
   mutation: D1PreparedStatement,
 ): Promise<D1Result> {
-  const publication = publish(db, event, guard)
-  const results = await executeBatch(db, [...publication, mutation])
+  const publication = publish(env.DB, event, guard)
+  const statements = [...publication, mutation]
+  const results = await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
   const mutationResult = results[publication.length]
 
   if (!mutationResult) {
@@ -197,6 +206,7 @@ async function patchConversation(
   env: Env,
   conversationId: string,
   now: () => number,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -237,7 +247,8 @@ async function patchConversation(
   )
 
   const result = await executeGuardedMutation(
-    env.DB,
+    env,
+    ctx,
     {
       officeId: session.officeId,
       type: 'conversation.updated',
@@ -328,6 +339,7 @@ async function assignConversation(
   conversationId: string,
   userId: string,
   now: () => number,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -351,7 +363,8 @@ async function assignConversation(
   )
 
   const result = await executeGuardedMutation(
-    env.DB,
+    env,
+    ctx,
     {
       officeId: session.officeId,
       type: 'conversation.assignee_assigned',
@@ -393,6 +406,7 @@ async function unassignConversation(
   conversationId: string,
   userId: string,
   now: () => number,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -410,7 +424,8 @@ async function unassignConversation(
   ).bind(conversationId, session.officeId, userId)
 
   const result = await executeGuardedMutation(
-    env.DB,
+    env,
+    ctx,
     {
       officeId: session.officeId,
       type: 'conversation.assignee_unassigned',
@@ -447,31 +462,33 @@ export function createConversationWriteRoutes(
     {
       method: 'PATCH',
       path: '/api/conversations/:id',
-      handler: (request, env, params) =>
-        patchConversation(request, env, params.id, now),
+      handler: (request, env, params, ctx) =>
+        patchConversation(request, env, params.id, now, ctx),
     },
     {
       method: 'POST',
       path: '/api/conversations/:id/assignees/:userId',
-      handler: (request, env, params) =>
+      handler: (request, env, params, ctx) =>
         assignConversation(
           request,
           env,
           params.id,
           params.userId,
           now,
+          ctx,
         ),
     },
     {
       method: 'DELETE',
       path: '/api/conversations/:id/assignees/:userId',
-      handler: (request, env, params) =>
+      handler: (request, env, params, ctx) =>
         unassignConversation(
           request,
           env,
           params.id,
           params.userId,
           now,
+          ctx,
         ),
     },
   ]

@@ -1,4 +1,5 @@
 import type { EventActorKind, JsonValue } from '../../shared/domain'
+import type { EventEnvelope } from '../../shared/wire/event'
 
 export interface EventInput {
   officeId: string
@@ -21,6 +22,41 @@ export interface EventPublishGuard {
   bindings?: readonly unknown[]
 }
 
+export interface EventRow {
+  office_seq: number
+  type: string
+  entity: string
+  entity_id: string
+  conversation_id: string | null
+  actor_kind: EventActorKind
+  actor_id: string | null
+  payload: string
+  created_at: number
+}
+
+export interface PublishedEventRow extends EventRow {
+  office_id: string
+}
+
+export type EventPublication = readonly [
+  D1PreparedStatement,
+  D1PreparedStatement,
+]
+
+export function eventEnvelope(row: EventRow): EventEnvelope {
+  return {
+    officeSeq: row.office_seq,
+    type: row.type,
+    entity: row.entity,
+    entityId: row.entity_id,
+    conversationId: row.conversation_id,
+    actorKind: row.actor_kind,
+    actorId: row.actor_id,
+    payload: JSON.parse(row.payload) as JsonValue,
+    createdAt: row.created_at,
+  }
+}
+
 /**
  * 도메인 변경과 같은 batch에 펼쳐 넣을 이벤트 문장들을 만든다.
  * 여기서 batch를 실행하면 원인 변경과 감사 이벤트 사이의 원자성이 깨진다.
@@ -29,7 +65,7 @@ export function publish(
   db: Pick<D1Database, 'prepare'>,
   event: EventInput,
   guard?: EventPublishGuard,
-): D1PreparedStatement[] {
+): EventPublication {
   const payload = JSON.stringify(event.payload)
 
   if (payload === undefined) {
@@ -58,7 +94,18 @@ export function publish(
         SELECT
           ?, (SELECT event_seq FROM offices WHERE id = ?), ?, ?, ?, ?, ?, ?, ?,
           ?
-        ${insertGuard}`,
+        ${insertGuard}
+        RETURNING
+          office_id,
+          office_seq,
+          type,
+          entity,
+          entity_id,
+          conversation_id,
+          actor_kind,
+          actor_id,
+          payload,
+          created_at`,
       )
       .bind(
         event.officeId,
@@ -73,5 +120,5 @@ export function publish(
         event.createdAt,
         ...guardBindings,
       ),
-  ]
+  ] as const
 }

@@ -19,7 +19,7 @@ import {
   type OfficeSettingsPatch,
   type OfficeSettingsResponse,
 } from '../../shared/wire/office'
-import { changes, executeBatch } from '../db/d1'
+import { changes } from '../db/d1'
 import { publish } from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
@@ -29,6 +29,7 @@ import {
   type SessionContext,
 } from '../http/session'
 import { createId, type Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 interface OfficeDependencies {
   clock?: Clock
@@ -290,6 +291,8 @@ export function createOfficeRoutes(
   async function updateSettings(
     request: Request,
     env: Env,
+    _params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
@@ -309,6 +312,23 @@ export function createOfficeRoutes(
       payload.retentionYears = patch.retentionYears
     }
 
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: SETTINGS_UPDATED_EVENT,
+        entity: SETTINGS_ENTITY,
+        entityId: session.officeId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload,
+        createdAt: now,
+      },
+      {
+        // 직전 UPDATE가 실제로 바꾼 경우에만 이어지는 두 이벤트 문장이 실행된다.
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
     const statements = [
       env.DB.prepare(
         `UPDATE office_settings
@@ -336,27 +356,17 @@ export function createOfficeRoutes(
         session.userId,
         ADMIN_ROLE,
       ),
-      ...publish(
-        env.DB,
-        {
-          officeId: session.officeId,
-          type: SETTINGS_UPDATED_EVENT,
-          entity: SETTINGS_ENTITY,
-          entityId: session.officeId,
-          actorKind: 'user',
-          actorId: session.userId,
-          payload,
-          createdAt: now,
-        },
-        {
-          // 직전 UPDATE가 실제로 바꾼 경우에만 이어지는 두 이벤트 문장이 실행된다.
-          query: 'SELECT 1 WHERE changes() = 1',
-        },
-      ),
+      ...publication,
       adminAuthorizationProbe(env.DB, session.userId),
     ]
     const [updateResult, , , authorizationResult] =
-      await executeBatch(env.DB, statements)
+      await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
 
     if (
       changes(updateResult) === 0 &&
@@ -414,6 +424,8 @@ export function createOfficeRoutes(
   async function inviteMember(
     request: Request,
     env: Env,
+    _params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
@@ -423,6 +435,30 @@ export function createOfficeRoutes(
 
     const memberId = idFactory()
     const now = clock()
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: MEMBER_INVITED_EVENT,
+        entity: MEMBER_ENTITY,
+        entityId: memberId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: {
+          email: invite.email,
+          role: invite.role,
+          status: INVITED_STATUS,
+        },
+        createdAt: now,
+      },
+      {
+        query: `SELECT 1
+                FROM users
+                WHERE id = ?
+                  AND office_id = ?`,
+        bindings: [memberId, session.officeId],
+      },
+    )
     const statements = [
       env.DB.prepare(
         `INSERT INTO users (
@@ -452,34 +488,17 @@ export function createOfficeRoutes(
         session.userId,
         ADMIN_ROLE,
       ),
-      ...publish(
-        env.DB,
-        {
-          officeId: session.officeId,
-          type: MEMBER_INVITED_EVENT,
-          entity: MEMBER_ENTITY,
-          entityId: memberId,
-          actorKind: 'user',
-          actorId: session.userId,
-          payload: {
-            email: invite.email,
-            role: invite.role,
-            status: INVITED_STATUS,
-          },
-          createdAt: now,
-        },
-        {
-          query: `SELECT 1
-                  FROM users
-                  WHERE id = ?
-                    AND office_id = ?`,
-          bindings: [memberId, session.officeId],
-        },
-      ),
+      ...publication,
       adminAuthorizationProbe(env.DB, session.userId),
     ]
     const [result, , , authorizationResult] =
-      await executeBatch(env.DB, statements)
+      await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
     if (
       changes(result) === 0 &&
       changes(authorizationResult) === 0
