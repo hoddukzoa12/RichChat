@@ -17,6 +17,7 @@ import { routes as notesRoutes } from './routes/notes'
 import { routes as officeRoutes } from './routes/office'
 import { routes as readsRoutes } from './routes/reads'
 import { routes as tasksRoutes } from './routes/tasks'
+import { runScheduledTasks } from './scheduled'
 
 export { OfficeHub } from './office-hub'
 
@@ -56,5 +57,12 @@ export default {
       (await dispatch(request, env, routes)) ??
       error('NOT_FOUND', '요청한 API를 찾을 수 없습니다.')
     )
+  },
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    _ctx: ExecutionContext,
+  ): Promise<void> {
+    await runScheduledTasks(env)
   },
 }

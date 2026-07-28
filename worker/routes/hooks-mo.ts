@@ -525,15 +525,15 @@ async function processItem(
   const messageInsertIndex = statements.length - 1
 
   // 일회성 contentUrl은 보관하지 않는다. 대기 행은 7일 보관 API로 복구한다.
-  for (const content of item.contentInfoLst) {
+  for (const [contentIndex, content] of item.contentInfoLst.entries()) {
     statements.push(
       db
         .prepare(
           `INSERT INTO message_attachments (
              id, office_id, message_id, original_filename, byte_size,
-             mime_type, r2_key, download_status, created_at
+             mime_type, r2_key, download_status, created_at, content_index
            )
-           SELECT ?, ?, id, ?, ?, ?, NULL, '대기', ?
+           SELECT ?, ?, id, ?, ?, ?, NULL, '대기', ?, ?
            FROM messages
            WHERE id = ? AND mo_key = ?`,
         )
@@ -544,6 +544,7 @@ async function processItem(
           content.contentSize,
           mimeType(content),
           receivedAt,
+          contentIndex,
           messageId,
           item.moKey,
         ),

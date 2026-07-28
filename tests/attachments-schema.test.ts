@@ -159,4 +159,30 @@ describe('Attachment D1 schema', () => {
         .run(),
     ).rejects.toThrow(/CHECK constraint failed/)
   })
+
+  it('keeps legacy attachment rows valid with additive defaults', async () => {
+    const seed = await seedMessage('additive-defaults')
+
+    await insertPendingAttachment(
+      'attachment-additive-defaults',
+      seed.officeId,
+      seed.messageId,
+    ).run()
+
+    const attachment = await env.DB.prepare(
+      `SELECT download_lease_until, content_index
+       FROM message_attachments
+       WHERE id = ?`,
+    )
+      .bind('attachment-additive-defaults')
+      .first<{
+        download_lease_until: number
+        content_index: number
+      }>()
+
+    expect(attachment).toEqual({
+      download_lease_until: 0,
+      content_index: 0,
+    })
+  })
 })
