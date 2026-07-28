@@ -1,6 +1,7 @@
 import { useInbox } from '../../state/InboxContext'
 import type { CardTab } from '../../types'
 import type { Breakpoint } from '../../hooks/useBreakpoint'
+import { useCustomerCard } from '../../hooks/useCustomerCard'
 import { AiComposer, AiTab } from './AiTab'
 import { FolderTab } from './FolderTab'
 import { InfoTab } from './InfoTab'
@@ -13,6 +14,15 @@ function tabClass(active: boolean): string {
 
 export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
   const { state, dispatch } = useInbox()
+  const customerCard = useCustomerCard()
+  const editing =
+    customerCard.data.editDraft?.conversationId ===
+    customerCard.conversationId
+  const customerLoaded = customerCard.conversationId
+    ? Boolean(
+        customerCard.data.cardEntries[customerCard.conversationId]?.detail,
+      )
+    : false
   const overlay = breakpoint !== 'desktop'
 
   const shell = overlay
@@ -39,28 +49,39 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
       <div className={shell}>
         <div className="h-[66px] flex-none px-[18px] border-b border-line flex items-center">
           <span className="text-[15px] font-bold tracking-[-0.3px]">고객 카드</span>
-          {state.editDraft ? (
+          {editing ? (
             <span className="ml-auto flex gap-[7px]">
               <button
                 type="button"
-                onClick={() => dispatch({ type: 'cancelEdit' })}
+                disabled={customerCard.data.savingCustomer}
+                onClick={() =>
+                  customerCard.dispatchData({ type: 'cancelEdit' })
+                }
                 className="h-7 px-2.5 border border-line-strong rounded-lg flex items-center text-[12.5px] font-semibold text-ink-600"
               >
                 취소
               </button>
               <button
                 type="button"
-                onClick={() => dispatch({ type: 'saveEdit' })}
-                className="h-7 px-3 rounded-lg bg-brand text-white flex items-center text-[12.5px] font-semibold hover:bg-brand-hover"
+                disabled={customerCard.data.savingCustomer}
+                onClick={customerCard.saveCustomer}
+                className="h-7 px-3 rounded-lg bg-brand text-white flex items-center text-[12.5px] font-semibold hover:bg-brand-hover disabled:opacity-50"
               >
-                저장
+                {customerCard.data.savingCustomer ? '저장 중' : '저장'}
               </button>
             </span>
           ) : (
             <button
               type="button"
-              onClick={() => dispatch({ type: 'startEdit' })}
-              className="ml-auto text-[13px] text-brand font-semibold"
+              disabled={!customerLoaded}
+              onClick={() => {
+                if (!customerCard.conversationId) return
+                customerCard.dispatchData({
+                  type: 'startEdit',
+                  conversationId: customerCard.conversationId,
+                })
+              }}
+              className="ml-auto text-[13px] text-brand font-semibold disabled:text-ink-300"
             >
               편집
             </button>
@@ -96,7 +117,7 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
-          {state.tab === 'info' && <InfoTab />}
+          {state.tab === 'info' && <InfoTab controller={customerCard} />}
           {state.tab === 'folder' && <FolderTab />}
           {state.tab === 'ai' && <AiTab />}
         </div>

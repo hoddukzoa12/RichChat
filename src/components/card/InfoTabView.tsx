@@ -2,15 +2,10 @@ import type {
   CustomerCardDataAction,
   CustomerCardDataState,
 } from '../../state/customerCardModel'
+import { TASK_KINDS } from '../../../shared/domain'
 import { formatCalendarDate, formatClockTime } from '../../lib/time'
 import { TASK_KIND_VIEW } from '../../theme'
 import { Avatar, Card } from '../ui'
-
-const TASK_KIND_OPTIONS = [
-  { key: 'warn', label: '진행 중' },
-  { key: 'idle', label: '대기' },
-  { key: 'done', label: '완료' },
-] as const
 
 const inputClass =
   'w-full text-[13.5px] text-ink border border-line-strong rounded-[7px] px-2 py-[5px] outline-none focus:border-brand'
@@ -112,23 +107,23 @@ function TaskForm({
         className={`${inputClass} text-[12.5px] text-ink-700`}
       />
       <div className="mt-2 flex gap-[5px]">
-        {TASK_KIND_OPTIONS.map((option) => (
+        {TASK_KINDS.map((kind) => (
           <button
-            key={option.key}
+            key={kind}
             type="button"
             onClick={() =>
               dispatchData({
                 type: 'setTaskDraft',
-                patch: { kind: option.key },
+                patch: { kind },
               })
             }
             className={`px-[11px] py-1 rounded-[14px] text-xs font-semibold border ${
-              draft.kind === option.key
+              draft.kind === kind
                 ? 'border-brand text-brand-text bg-brand-100'
                 : 'border-line-strong text-ink-500 bg-white'
             }`}
           >
-            {option.label}
+            {TASK_KIND_VIEW[kind].optionLabel}
           </button>
         ))}
       </div>
