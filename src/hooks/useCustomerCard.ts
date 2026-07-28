@@ -37,12 +37,19 @@ export interface CustomerCardController {
 }
 
 function mutationError(
+  conversationId: string,
   scope: CardMutationScope,
   error: unknown,
 ): CardMutationError {
   return error instanceof ApiRequestError
-    ? { scope, message: error.message, status: error.status }
+    ? {
+        conversationId,
+        scope,
+        message: error.message,
+        status: error.status,
+      }
     : {
+        conversationId,
         scope,
         message: '요청을 처리하는 중 알 수 없는 오류가 발생했습니다.',
       }
@@ -53,11 +60,7 @@ function conflictCustomer(error: unknown): CustomerCard | undefined {
     return undefined
   }
   const detail = error.detail
-  if (
-    typeof detail !== 'object' ||
-    detail === null ||
-    !('current' in detail)
-  ) {
+  if (typeof detail !== 'object' || detail === null || !('current' in detail)) {
     return undefined
   }
   const current = detail.current
@@ -81,37 +84,31 @@ export function useCustomerCard(): CustomerCardController {
   const { me } = useAuth()
   const conversationId = state.selected
   const data: CustomerCardDataState = state
-  const entry = conversationId
-    ? data.cardEntries[conversationId]
-    : undefined
+  const entry = conversationId ? data.cardEntries[conversationId] : undefined
 
   const dispatchData = useCallback(
-    (action: CustomerCardDataAction) =>
-      dispatch({ type: 'cardData', action }),
+    (action: CustomerCardDataAction) => dispatch({ type: 'cardData', action }),
     [dispatch],
   )
 
-  const load = useCallback(
-    () => {
-      if (!conversationId) return
-      dispatchData({ type: 'cardLoadStarted', conversationId })
-      getConversationDetail(conversationId)
-        .then(({ conversation }) =>
-          dispatchData({
-            type: 'cardLoadSucceeded',
-            detail: conversation,
-          }),
-        )
-        .catch((error: unknown) => {
-          dispatchData({
-            type: 'cardLoadFailed',
-            conversationId,
-            message: mutationError('customer', error).message,
-          })
+  const load = useCallback(() => {
+    if (!conversationId) return
+    dispatchData({ type: 'cardLoadStarted', conversationId })
+    getConversationDetail(conversationId)
+      .then(({ conversation }) =>
+        dispatchData({
+          type: 'cardLoadSucceeded',
+          detail: conversation,
+        }),
+      )
+      .catch((error: unknown) => {
+        dispatchData({
+          type: 'cardLoadFailed',
+          conversationId,
+          message: mutationError(conversationId, 'customer', error).message,
         })
-    },
-    [conversationId, dispatchData],
-  )
+      })
+  }, [conversationId, dispatchData])
 
   useEffect(() => {
     if (!conversationId || entry) return
@@ -127,7 +124,7 @@ export function useCustomerCard(): CustomerCardController {
       return
     }
 
-    dispatchData({ type: 'customerSaveStarted' })
+    dispatchData({ type: 'customerSaveStarted', conversationId })
     updateCustomer(draft.id, request)
       .then(({ customer }) =>
         dispatchData({
@@ -140,10 +137,10 @@ export function useCustomerCard(): CustomerCardController {
         const current = conflictCustomer(error)
         dispatchData(
           current
-            ? { type: 'customerConflict', current }
+            ? { type: 'customerConflict', conversationId, current }
             : {
                 type: 'cardMutationFailed',
-                error: mutationError('customer', error),
+                error: mutationError(conversationId, 'customer', error),
               },
         )
       })
@@ -160,6 +157,7 @@ export function useCustomerCard(): CustomerCardController {
       sub: data.taskDraft.sub.trim(),
       kind: data.taskDraft.kind,
     }
+    if (data.taskEditorConversationId !== conversationId) return
     if (!draft.name) {
       dispatchData({ type: 'cancelTask' })
       return
@@ -188,7 +186,7 @@ export function useCustomerCard(): CustomerCardController {
             type: 'taskUpdateFailed',
             conversationId,
             previous,
-            error: mutationError('task', error),
+            error: mutationError(conversationId, 'task', error),
           }),
         )
       return
@@ -225,7 +223,7 @@ export function useCustomerCard(): CustomerCardController {
           type: 'taskCreateFailed',
           conversationId,
           optimisticId,
-          error: mutationError('task', error),
+          error: mutationError(conversationId, 'task', error),
         }),
       )
   }, [
@@ -233,6 +231,7 @@ export function useCustomerCard(): CustomerCardController {
     data.cardEntries,
     data.taskDraft,
     data.taskEditId,
+    data.taskEditorConversationId,
     dispatchData,
     me.user.id,
   ])
@@ -253,7 +252,7 @@ export function useCustomerCard(): CustomerCardController {
           dispatchData({
             type: 'taskDeleteFailed',
             taskId,
-            error: mutationError('task', error),
+            error: mutationError(conversationId, 'task', error),
           }),
         )
     },
@@ -271,6 +270,7 @@ export function useCustomerCard(): CustomerCardController {
       dispatchData({ type: 'cancelNote' })
       return
     }
+    if (data.noteEditorConversationId !== conversationId) return
 
     const editingId = data.noteEditId
     if (editingId) {
@@ -296,7 +296,7 @@ export function useCustomerCard(): CustomerCardController {
             type: 'noteUpdateFailed',
             conversationId,
             previous,
-            error: mutationError('note', error),
+            error: mutationError(conversationId, 'note', error),
           }),
         )
       return
@@ -332,7 +332,7 @@ export function useCustomerCard(): CustomerCardController {
           type: 'noteCreateFailed',
           conversationId,
           optimisticId,
-          error: mutationError('note', error),
+          error: mutationError(conversationId, 'note', error),
         }),
       )
   }, [
@@ -340,6 +340,7 @@ export function useCustomerCard(): CustomerCardController {
     data.cardEntries,
     data.noteDraft,
     data.noteEditId,
+    data.noteEditorConversationId,
     dispatchData,
     me.user.id,
     me.user.name,
@@ -361,7 +362,7 @@ export function useCustomerCard(): CustomerCardController {
           dispatchData({
             type: 'noteDeleteFailed',
             noteId,
-            error: mutationError('note', error),
+            error: mutationError(conversationId, 'note', error),
           }),
         )
     },

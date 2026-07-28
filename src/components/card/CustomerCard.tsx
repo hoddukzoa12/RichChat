@@ -8,7 +8,9 @@ import { InfoTab } from './InfoTab'
 
 function tabClass(active: boolean): string {
   return `py-[11px] px-0.5 text-[13.5px] cursor-pointer border-b-2 flex items-center gap-1.5 ${
-    active ? 'font-bold text-ink border-brand' : 'font-medium text-ink-500 border-transparent'
+    active
+      ? 'font-bold text-ink border-brand'
+      : 'font-medium text-ink-500 border-transparent'
   }`
 }
 
@@ -16,13 +18,15 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
   const { state, dispatch } = useInbox()
   const customerCard = useCustomerCard()
   const editing =
-    customerCard.data.editDraft?.conversationId ===
-    customerCard.conversationId
+    customerCard.data.editDraft?.conversationId === customerCard.conversationId
   const customerLoaded = customerCard.conversationId
     ? Boolean(
         customerCard.data.cardEntries[customerCard.conversationId]?.detail,
       )
     : false
+  const savingCustomer =
+    customerCard.data.savingCustomerConversationId ===
+    customerCard.conversationId
   const overlay = breakpoint !== 'desktop'
 
   const shell = overlay
@@ -31,10 +35,25 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
       } border-l border-line bg-surface-sunken flex flex-col shadow-[-8px_0_28px_rgba(16,24,40,.16)]`
     : 'w-[340px] flex-none border-l border-line bg-surface-sunken flex flex-col'
 
-  const tabs: { key: CardTab; label: string; badge?: string; badgeClass?: string }[] = [
+  const tabs: {
+    key: CardTab
+    label: string
+    badge?: string
+    badgeClass?: string
+  }[] = [
     { key: 'info', label: '정보' },
-    { key: 'folder', label: '폴더', badge: '웍스', badgeClass: 'text-works-fg bg-works-bg' },
-    { key: 'ai', label: 'AI', badge: '요약·질문', badgeClass: 'text-brand-text bg-brand-100' },
+    {
+      key: 'folder',
+      label: '폴더',
+      badge: '웍스',
+      badgeClass: 'text-works-fg bg-works-bg',
+    },
+    {
+      key: 'ai',
+      label: 'AI',
+      badge: '요약·질문',
+      badgeClass: 'text-brand-text bg-brand-100',
+    },
   ]
 
   return (
@@ -48,12 +67,14 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
 
       <div className={shell}>
         <div className="h-[66px] flex-none px-[18px] border-b border-line flex items-center">
-          <span className="text-[15px] font-bold tracking-[-0.3px]">고객 카드</span>
+          <span className="text-[15px] font-bold tracking-[-0.3px]">
+            고객 카드
+          </span>
           {editing ? (
             <span className="ml-auto flex gap-[7px]">
               <button
                 type="button"
-                disabled={customerCard.data.savingCustomer}
+                disabled={savingCustomer}
                 onClick={() =>
                   customerCard.dispatchData({ type: 'cancelEdit' })
                 }
@@ -63,11 +84,11 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
               </button>
               <button
                 type="button"
-                disabled={customerCard.data.savingCustomer}
+                disabled={savingCustomer}
                 onClick={customerCard.saveCustomer}
                 className="h-7 px-3 rounded-lg bg-brand text-white flex items-center text-[12.5px] font-semibold hover:bg-brand-hover disabled:opacity-50"
               >
-                {customerCard.data.savingCustomer ? '저장 중' : '저장'}
+                {savingCustomer ? '저장 중' : '저장'}
               </button>
             </span>
           ) : (

@@ -94,23 +94,30 @@ function run(actions: CustomerCardDataAction[]): CustomerCardDataState {
 }
 
 describe('Customer card model', () => {
-  it('resets only transient card editors when the selected conversation changes', () => {
+  it('keeps details keyed by conversation and scopes editors to their owner', () => {
+    const other = {
+      ...DETAIL,
+      id: 'conversation-2',
+      customer: { ...DETAIL.customer, id: 'customer-2' },
+    }
     const state = run([
       { type: 'cardLoadSucceeded', detail: DETAIL },
+      { type: 'cardLoadSucceeded', detail: other },
       { type: 'startEdit', conversationId: DETAIL.id },
-      { type: 'addTask' },
-      { type: 'addNote' },
-      { type: 'cardSelectionChanged' },
+      { type: 'addTask', conversationId: DETAIL.id },
+      { type: 'addNote', conversationId: DETAIL.id },
     ])
 
     expect(state.cardEntries[DETAIL.id].detail).toBe(DETAIL)
+    expect(state.cardEntries[other.id].detail).toBe(other)
     expect(state).toMatchObject({
-      editDraft: null,
-      customerConflict: null,
+      editDraft: { conversationId: DETAIL.id },
+      taskEditorConversationId: DETAIL.id,
       taskEditId: null,
-      addingTask: false,
+      addingTask: true,
+      noteEditorConversationId: DETAIL.id,
       noteEditId: null,
-      addingNote: false,
+      addingNote: true,
     })
   })
 
@@ -300,10 +307,11 @@ describe('Customer card model', () => {
         fieldId: 'field-3',
         patch: { value: '내 업종' },
       },
-      { type: 'customerConflict', current },
+      { type: 'customerConflict', conversationId: DETAIL.id, current },
     ])
     const rebased = reduceCustomerCardData(conflicted, {
       type: 'rebaseCustomerEdit',
+      conversationId: DETAIL.id,
     })
 
     expect(rebased.editDraft).toMatchObject({
@@ -325,6 +333,7 @@ describe('Customer card model', () => {
 
     const accepted = reduceCustomerCardData(conflicted, {
       type: 'useServerCustomer',
+      conversationId: DETAIL.id,
     })
     expect(accepted.editDraft).toBeNull()
     expect(accepted.cardEntries[DETAIL.id].detail?.customer).toMatchObject({
@@ -341,6 +350,7 @@ describe('Customer card model', () => {
         type: 'taskDeleteFailed',
         taskId: 'task-2',
         error: {
+          conversationId: DETAIL.id,
           scope: 'task',
           status: 500,
           message: '업무를 삭제하지 못했습니다.',
@@ -351,6 +361,7 @@ describe('Customer card model', () => {
         type: 'noteDeleteFailed',
         noteId: 'note-2',
         error: {
+          conversationId: DETAIL.id,
           scope: 'note',
           status: 403,
           message: '메모를 변경할 수 없습니다.',

@@ -40,10 +40,12 @@ export interface CustomerEditDraft extends EditableCustomer {
 }
 
 export interface CustomerConflict {
+  conversationId: string
   current: CustomerCard
 }
 
 export interface CardMutationError {
+  conversationId: string
   scope: CardMutationScope
   message: string
   status?: number
@@ -67,11 +69,13 @@ export interface CustomerCardDataState {
   cardEntries: Record<string, CardEntry>
   editDraft: CustomerEditDraft | null
   customerConflict: CustomerConflict | null
-  savingCustomer: boolean
+  savingCustomerConversationId: string | null
+  taskEditorConversationId: string | null
   taskEditId: string | null
   addingTask: boolean
   taskDraft: TaskDraft
   pendingTaskDeletes: string[]
+  noteEditorConversationId: string | null
   noteEditId: string | null
   addingNote: boolean
   noteDraft: string
@@ -89,11 +93,13 @@ export const initialCustomerCardDataState: CustomerCardDataState = {
   cardEntries: {},
   editDraft: null,
   customerConflict: null,
-  savingCustomer: false,
+  savingCustomerConversationId: null,
+  taskEditorConversationId: null,
   taskEditId: null,
   addingTask: false,
   taskDraft: { ...EMPTY_TASK_DRAFT },
   pendingTaskDeletes: [],
+  noteEditorConversationId: null,
   noteEditId: null,
   addingNote: false,
   noteDraft: '',
@@ -102,7 +108,6 @@ export const initialCustomerCardDataState: CustomerCardDataState = {
 }
 
 export type CustomerCardDataAction =
-  | { type: 'cardSelectionChanged' }
   | { type: 'cardLoadStarted'; conversationId: string }
   | { type: 'cardLoadSucceeded'; detail: ConversationDetail }
   | {
@@ -122,16 +127,20 @@ export type CustomerCardDataAction =
     }
   | { type: 'addEditField'; fieldId: string }
   | { type: 'removeEditField'; fieldId: string }
-  | { type: 'customerSaveStarted' }
+  | { type: 'customerSaveStarted'; conversationId: string }
   | {
       type: 'customerSaved'
       conversationId: string
       customer: CustomerCard
     }
-  | { type: 'customerConflict'; current: CustomerCard }
-  | { type: 'useServerCustomer' }
-  | { type: 'rebaseCustomerEdit' }
-  | { type: 'addTask' }
+  | {
+      type: 'customerConflict'
+      conversationId: string
+      current: CustomerCard
+    }
+  | { type: 'useServerCustomer'; conversationId: string }
+  | { type: 'rebaseCustomerEdit'; conversationId: string }
+  | { type: 'addTask'; conversationId: string }
   | { type: 'editTask'; conversationId: string; taskId: string }
   | { type: 'cancelTask' }
   | { type: 'setTaskDraft'; patch: Partial<TaskDraft> }
@@ -183,7 +192,7 @@ export type CustomerCardDataAction =
       taskId: string
       error: CardMutationError
     }
-  | { type: 'addNote' }
+  | { type: 'addNote'; conversationId: string }
   | { type: 'editNote'; conversationId: string; noteId: string }
   | { type: 'cancelNote' }
   | { type: 'setNoteDraft'; value: string }
@@ -320,6 +329,7 @@ function resetTaskEditor<State extends CustomerCardDataState>(
 ): State {
   return {
     ...state,
+    taskEditorConversationId: null,
     addingTask: false,
     taskEditId: null,
     taskDraft: { ...EMPTY_TASK_DRAFT },
@@ -331,6 +341,7 @@ function resetNoteEditor<State extends CustomerCardDataState>(
 ): State {
   return {
     ...state,
+    noteEditorConversationId: null,
     addingNote: false,
     noteEditId: null,
     noteDraft: '',
@@ -485,16 +496,6 @@ type CustomerCardDataHandlers = {
 }
 
 export const customerCardDataHandlers = {
-  cardSelectionChanged: (state, _action) => {
-    return {
-      ...resetNoteEditor(resetTaskEditor(state)),
-      editDraft: null,
-      customerConflict: null,
-      savingCustomer: false,
-      cardMutationError: null,
-    }
-  },
-
   cardLoadStarted: (state, action) => {
     const current = state.cardEntries[action.conversationId]
     return {
@@ -643,7 +644,7 @@ export const customerCardDataHandlers = {
   customerSaveStarted: (state, _action) => {
     return {
       ...state,
-      savingCustomer: true,
+      savingCustomerConversationId: _action.conversationId,
       cardMutationError: null,
     }
   },
@@ -653,28 +654,50 @@ export const customerCardDataHandlers = {
       ...detail,
       customer: conversationCustomer(action.customer),
     }))
+    const ownsDraft =
+      updated.editDraft?.conversationId === action.conversationId
+    const ownsConflict =
+      updated.customerConflict?.conversationId === action.conversationId
+    const ownsSaving =
+      updated.savingCustomerConversationId === action.conversationId
     return {
       ...updated,
-      editDraft: null,
-      customerConflict: null,
-      savingCustomer: false,
+      editDraft: ownsDraft ? null : updated.editDraft,
+      customerConflict: ownsConflict ? null : updated.customerConflict,
+      savingCustomerConversationId: ownsSaving
+        ? null
+        : updated.savingCustomerConversationId,
       cardMutationError: null,
     }
   },
 
   customerConflict: (state, action) => {
+    if (state.editDraft?.conversationId !== action.conversationId) return state
     return {
       ...state,
-      customerConflict: { current: action.current },
-      savingCustomer: false,
+      customerConflict: {
+        conversationId: action.conversationId,
+        current: action.current,
+      },
+      savingCustomerConversationId:
+        state.savingCustomerConversationId === action.conversationId
+          ? null
+          : state.savingCustomerConversationId,
       cardMutationError: null,
     }
   },
 
-  useServerCustomer: (state, _action) => {
+  useServerCustomer: (state, action) => {
     const draft = state.editDraft
     const conflict = state.customerConflict
-    if (!draft || !conflict) return state
+    if (
+      !draft ||
+      !conflict ||
+      draft.conversationId !== action.conversationId ||
+      conflict.conversationId !== action.conversationId
+    ) {
+      return state
+    }
     const updated = updateDetail(state, draft.conversationId, (detail) => ({
       ...detail,
       customer: conversationCustomer(conflict.current),
@@ -683,12 +706,13 @@ export const customerCardDataHandlers = {
       ...updated,
       editDraft: null,
       customerConflict: null,
-      savingCustomer: false,
+      savingCustomerConversationId: null,
     }
   },
 
-  rebaseCustomerEdit: (state, _action) => {
-    return state.editDraft && state.customerConflict
+  rebaseCustomerEdit: (state, action) => {
+    return state.editDraft?.conversationId === action.conversationId &&
+      state.customerConflict?.conversationId === action.conversationId
       ? {
           ...state,
           editDraft: rebasedDraft(
@@ -700,9 +724,10 @@ export const customerCardDataHandlers = {
       : state
   },
 
-  addTask: (state, _action) => {
+  addTask: (state, action) => {
     return {
       ...resetTaskEditor(state),
+      taskEditorConversationId: action.conversationId,
       addingTask: true,
       cardMutationError: null,
     }
@@ -715,6 +740,7 @@ export const customerCardDataHandlers = {
     if (!task) return state
     return {
       ...state,
+      taskEditorConversationId: action.conversationId,
       addingTask: false,
       taskEditId: task.id,
       taskDraft: {
@@ -829,9 +855,10 @@ export const customerCardDataHandlers = {
     }
   },
 
-  addNote: (state, _action) => {
+  addNote: (state, action) => {
     return {
       ...resetNoteEditor(state),
+      noteEditorConversationId: action.conversationId,
       addingNote: true,
       cardMutationError: null,
     }
@@ -844,6 +871,7 @@ export const customerCardDataHandlers = {
     if (!note) return state
     return {
       ...state,
+      noteEditorConversationId: action.conversationId,
       addingNote: false,
       noteEditId: note.id,
       noteDraft: note.body,
@@ -960,7 +988,10 @@ export const customerCardDataHandlers = {
   cardMutationFailed: (state, action) => {
     return {
       ...state,
-      savingCustomer: false,
+      savingCustomerConversationId:
+        state.savingCustomerConversationId === action.error.conversationId
+          ? null
+          : state.savingCustomerConversationId,
       cardMutationError: action.error,
     }
   },

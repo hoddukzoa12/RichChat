@@ -65,10 +65,13 @@ function loadedState(): CustomerCardDataState {
   })
 }
 
-function render(data: CustomerCardDataState): string {
+function render(
+  data: CustomerCardDataState,
+  conversationId = DETAIL.id,
+): string {
   return renderToStaticMarkup(
     <InfoTabView
-      conversationId={DETAIL.id}
+      conversationId={conversationId}
       data={data}
       sessionUserId="user-1"
       dispatchData={vi.fn()}
@@ -117,6 +120,7 @@ describe('Info tab view', () => {
     })
     data = reduceCustomerCardData(data, {
       type: 'customerConflict',
+      conversationId: DETAIL.id,
       current: {
         ...DETAIL.customer,
         updatedAt: 2,
@@ -130,6 +134,7 @@ describe('Info tab view', () => {
     data = {
       ...data,
       cardMutationError: {
+        conversationId: DETAIL.id,
         scope: 'note',
         status: 403,
         message: '메모를 변경할 수 없습니다.',
@@ -141,5 +146,31 @@ describe('Info tab view', () => {
     expect(markup).toContain('서버 값 사용')
     expect(markup).toContain('내 변경 이어서 편집')
     expect(markup).toContain('메모를 변경할 수 없습니다.')
+  })
+
+  it('does not render editors owned by another conversation', () => {
+    const other = {
+      ...DETAIL,
+      id: 'conversation-2',
+      customer: { ...DETAIL.customer, id: 'customer-2' },
+      tasks: [],
+      notes: [],
+    }
+    let data = reduceCustomerCardData(loadedState(), {
+      type: 'addTask',
+      conversationId: DETAIL.id,
+    })
+    data = reduceCustomerCardData(data, {
+      type: 'addNote',
+      conversationId: DETAIL.id,
+    })
+    data = reduceCustomerCardData(data, {
+      type: 'cardLoadSucceeded',
+      detail: other,
+    })
+
+    const markup = render(data, other.id)
+    expect(markup).not.toContain('placeholder="업무 이름"')
+    expect(markup).not.toContain('placeholder="메모를 입력하세요"')
   })
 })
