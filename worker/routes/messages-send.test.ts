@@ -24,6 +24,7 @@ const LGU_SEND_ORIGIN = 'https://api-send.msghub-qa.uplus.co.kr'
 const DEFAULT_CALLBACK = '0255550000'
 
 interface Fixture {
+  accessToken: string
   actorId: string
   callback: string | null
   conversationId: string
@@ -61,10 +62,12 @@ interface LguRequestBody {
 }
 
 interface MockLguOptions {
+  accessToken?: string
   channel?: 'SMS' | 'LMS'
   clientKey: string
   data?: string | Record<string, unknown>
   delay?: number
+  persistent?: boolean
   response?: (providerKey: string) => Record<string, unknown>
   status?: number
 }
@@ -97,6 +100,7 @@ async function seedFixture(
   const customerId = `customer-${suffix}`
   const conversationId = `conversation-${suffix}`
   const customerPhone = `+8210${String(seedSequence).padStart(8, '0')}`
+  const accessToken = `access-token-${suffix}`
   const callback =
     options.callback === undefined ? DEFAULT_CALLBACK : options.callback
   const now = Date.now()
@@ -151,7 +155,7 @@ async function seedFixture(
        ) VALUES (?, ?, ?, ?, 0)`,
     ).bind(
       officeId,
-      `access-token-${suffix}`,
+      accessToken,
       now,
       now + 60 * 60 * 1_000,
     ),
@@ -196,6 +200,7 @@ async function seedFixture(
   )
 
   return {
+    accessToken,
     actorId,
     callback,
     conversationId,
@@ -264,7 +269,9 @@ function mockLgu(options: MockLguOptions): void {
       method: 'POST',
       path,
       headers: {
-        authorization: /^Bearer access-token-message-send-\d+$/,
+        authorization: options.accessToken
+          ? `Bearer ${options.accessToken}`
+          : /^Bearer access-token-message-send-\d+$/,
         'content-type': 'application/json',
       },
       body: (raw) =>
@@ -291,6 +298,7 @@ function mockLgu(options: MockLguOptions): void {
     )
 
   if (options.delay !== undefined) scope.delay(options.delay)
+  if (options.persistent) scope.persist()
 }
 
 function mockNetworkFailure(): void {
@@ -379,7 +387,11 @@ describe('Message send route', () => {
   it('inserts and calls LGU+ exactly once for duplicate client keys', async () => {
     const fixture = await seedFixture()
     const clientKey = 'c6176dc3-08bc-4e81-b373-4683be50b64e'
-    mockLgu({ clientKey })
+    mockLgu({
+      accessToken: fixture.accessToken,
+      clientKey,
+      persistent: true,
+    })
 
     const first = await postMessage(
       fixture.conversationId,
@@ -412,7 +424,12 @@ describe('Message send route', () => {
   it('serializes concurrent duplicate requests before calling LGU+', async () => {
     const fixture = await seedFixture()
     const clientKey = 'concurrent-idempotency'
-    mockLgu({ clientKey, delay: 50 })
+    mockLgu({
+      accessToken: fixture.accessToken,
+      clientKey,
+      delay: 50,
+      persistent: true,
+    })
 
     const responses = await Promise.all([
       postMessage(
