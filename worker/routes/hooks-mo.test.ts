@@ -1,6 +1,9 @@
 import { env, SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
-import { parseMoRecvDt } from './hooks-mo'
+import {
+  INVALID_ITEM_KEY_PREFIX,
+  parseMoRecvDt,
+} from './hooks-mo'
 
 declare module 'cloudflare:test' {
   interface ProvidedEnv extends Env {}
@@ -46,7 +49,7 @@ function mo(input: MoInput) {
   }
 }
 
-function payload(...items: ReturnType<typeof mo>[]): string {
+function payload(...items: unknown[]): string {
   return JSON.stringify({ moCnt: items.length, moLst: items })
 }
 
@@ -75,6 +78,17 @@ async function expectSuccess(response: Response): Promise<void> {
   await expect(response.json()).resolves.toEqual({
     code: '10000',
     message: 'success',
+  })
+}
+
+async function expectRetry(
+  response: Response,
+  status = 500,
+): Promise<void> {
+  expect(response.status).toBe(status)
+  await expect(response.json()).resolves.toEqual({
+    code: '99999',
+    message: 'retry',
   })
 }
 
@@ -286,50 +300,135 @@ describe('LGU+ MO webhook', () => {
     ])
   })
 
-  it('returns retry twice then quarantines the third write failure', async () => {
-    await insertOffice('office-mo-poison')
+  it('quarantines the third deterministic payload failure', async () => {
+    await insertOffice('office-mo-deterministic-poison')
+    const body = payload(
+      mo({
+        moKey: 'mo-deterministic-poison',
+        moRecvDt: '20260229000000',
+      }),
+    )
+
+    await expectRetry(await post(body), 400)
+    await expectRetry(await post(body), 400)
+    await expectSuccess(await post(body))
+
+    const failure = await env.DB.prepare(
+      'SELECT attempts, raw_json FROM mo_failures WHERE mo_key = ?',
+    )
+      .bind('mo-deterministic-poison')
+      .first<{ attempts: number; raw_json: string }>()
+    const message = await env.DB.prepare(
+      'SELECT id FROM messages WHERE mo_key = ?',
+    )
+      .bind('mo-deterministic-poison')
+      .first<{ id: string }>()
+
+    expect(failure?.attempts).toBe(3)
+    expect(JSON.parse(failure?.raw_json ?? '{}')).toMatchObject({
+      moKey: 'mo-deterministic-poison',
+      moRecvDt: '20260229000000',
+    })
+    expect(message).toBeNull()
+  })
+
+  it('never quarantines transient D1 failures and stores after recovery', async () => {
+    await insertOffice('office-mo-transient')
     await env.DB.prepare(
       `CREATE TRIGGER fail_test_mo
        BEFORE INSERT ON messages
-       WHEN NEW.mo_key = 'mo-poison'
+       WHEN NEW.mo_key = 'mo-transient'
        BEGIN
          SELECT RAISE(FAIL, 'forced test failure');
        END`,
     ).run()
-    const body = payload(mo({ moKey: 'mo-poison' }))
+    const body = payload(mo({ moKey: 'mo-transient' }))
 
     const first = await post(body)
     const second = await post(body)
     const third = await post(body)
 
-    expect(first.status).toBe(500)
-    expect(second.status).toBe(500)
-    await expect(first.json()).resolves.toEqual({
-      code: '99999',
-      message: 'retry',
-    })
-    await expect(second.json()).resolves.toEqual({
-      code: '99999',
-      message: 'retry',
-    })
-    await expectSuccess(third)
+    await expectRetry(first)
+    await expectRetry(second)
+    await expectRetry(third)
 
-    const failure = await env.DB.prepare(
-      'SELECT attempts, raw_json FROM mo_failures WHERE mo_key = ?',
-    )
-      .bind('mo-poison')
-      .first<{ attempts: number; raw_json: string }>()
+    const failuresDuringOutage = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM mo_failures',
+    ).first<{ count: number }>()
+    expect(failuresDuringOutage?.count).toBe(0)
+
+    await env.DB.prepare('DROP TRIGGER fail_test_mo').run()
+    await expectSuccess(await post(body))
+
     const message = await env.DB.prepare(
-      'SELECT id FROM messages WHERE mo_key = ?',
+      'SELECT COUNT(*) AS count FROM messages WHERE mo_key = ?',
     )
-      .bind('mo-poison')
-      .first<{ id: string }>()
+      .bind('mo-transient')
+      .first<{ count: number }>()
+    const failuresAfterRecovery = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM mo_failures',
+    ).first<{ count: number }>()
 
-    expect(failure?.attempts).toBe(3)
-    expect(JSON.parse(failure?.raw_json ?? '{}')).toMatchObject({
-      moKey: 'mo-poison',
+    expect(message?.count).toBe(1)
+    expect(failuresAfterRecovery?.count).toBe(0)
+  })
+
+  it('uses a stable synthetic key so a missing moKey cannot block siblings', async () => {
+    await insertOffice('office-mo-missing-key')
+    const valid = mo({
+      moKey: 'mo-valid-sibling',
+      moCallback: '01077776666',
     })
-    expect(message).toBeNull()
+    const invalid: Record<string, unknown> = {
+      ...mo({ moKey: 'removed-before-post' }),
+    }
+    delete invalid.moKey
+    const reorderedInvalid = Object.fromEntries(
+      Object.entries(invalid).reverse(),
+    )
+    const originalOrderBody = payload(valid, invalid)
+
+    await expectRetry(await post(originalOrderBody), 400)
+    await expectRetry(await post(originalOrderBody), 400)
+    await expectSuccess(await post(originalOrderBody))
+    await expectSuccess(await post(payload(valid, reorderedInvalid)))
+
+    const conversation = await env.DB.prepare(
+      `SELECT conversations.inbound_count
+       FROM conversations
+       JOIN customers ON customers.id = conversations.customer_id
+       WHERE customers.phone_e164 = ?`,
+    )
+      .bind('+821077776666')
+      .first<{ inbound_count: number }>()
+    const message = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM messages WHERE mo_key = ?',
+    )
+      .bind('mo-valid-sibling')
+      .first<{ count: number }>()
+    const { results: failures } = await env.DB.prepare(
+      `SELECT mo_key, attempts, raw_json
+       FROM mo_failures
+       WHERE mo_key LIKE ?`,
+    )
+      .bind(`${INVALID_ITEM_KEY_PREFIX}%`)
+      .all<{
+        mo_key: string
+        attempts: number
+        raw_json: string
+      }>()
+
+    expect(conversation?.inbound_count).toBe(1)
+    expect(message?.count).toBe(1)
+    expect(failures).toHaveLength(1)
+    expect(failures[0].mo_key.startsWith(INVALID_ITEM_KEY_PREFIX)).toBe(
+      true,
+    )
+    expect(
+      failures[0].mo_key.slice(INVALID_ITEM_KEY_PREFIX.length),
+    ).toMatch(/^[0-9a-f]{64}$/)
+    expect(failures[0].attempts).toBe(3)
+    expect(JSON.parse(failures[0].raw_json)).not.toHaveProperty('moKey')
   })
 
   it('hides the webhook route when the secret is wrong', async () => {
@@ -348,29 +447,54 @@ describe('LGU+ MO webhook', () => {
     expect(parseMoRecvDt('20260229000000')).toBeNull()
   })
 
-  it('falls back to the server receive time for excessive clock skew', async () => {
-    await insertOffice('office-mo-clock-skew')
-    const before = Date.now()
+  it('preserves an old valid timestamp without promoting a delayed message', async () => {
+    await insertOffice('office-mo-delayed')
+    const now = Date.now()
+    const currentTimestamp = kstTimestamp(now - 1_000)
+    const oldTimestamp = kstTimestamp(now - 2 * 24 * 60 * 60 * 1_000)
 
     await expectSuccess(
       await post(
         payload(
           mo({
-            moKey: 'mo-clock-skew',
-            moRecvDt: '20200101000000',
+            moKey: 'mo-current',
+            moMsg: '현재 최신 메시지',
+            moRecvDt: currentTimestamp,
           }),
         ),
       ),
     )
-    const after = Date.now()
+    await expectSuccess(
+      await post(
+        payload(
+          mo({
+            moKey: 'mo-two-days-old',
+            moMsg: '이틀 전 지연 메시지',
+            moRecvDt: oldTimestamp,
+          }),
+        ),
+      ),
+    )
 
-    const message = await env.DB.prepare(
+    const delayed = await env.DB.prepare(
       'SELECT occurred_at FROM messages WHERE mo_key = ?',
     )
-      .bind('mo-clock-skew')
+      .bind('mo-two-days-old')
       .first<{ occurred_at: number }>()
-    expect(message?.occurred_at).toBeGreaterThanOrEqual(before)
-    expect(message?.occurred_at).toBeLessThanOrEqual(after)
+    const conversation = await env.DB.prepare(
+      `SELECT messages.body, conversations.last_message_at
+       FROM conversations
+       JOIN messages ON messages.id = conversations.last_message_id
+       WHERE conversations.office_id = ?`,
+    )
+      .bind('office-mo-delayed')
+      .first<{ body: string; last_message_at: number }>()
+
+    expect(delayed?.occurred_at).toBe(parseMoRecvDt(oldTimestamp))
+    expect(conversation).toEqual({
+      body: '현재 최신 메시지',
+      last_message_at: parseMoRecvDt(currentTimestamp),
+    })
   })
 
   it('stores attachment metadata in the pending state', async () => {
