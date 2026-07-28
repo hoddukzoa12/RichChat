@@ -7,6 +7,7 @@ import { MySettings } from './components/MySettings'
 import { OfficeSettings } from './components/OfficeSettings'
 import { MobileTabBar, Rail } from './components/Rail'
 import { Toast } from './components/Toast'
+import { AuthGate } from './api/AuthGate'
 
 function Workspace() {
   const { state } = useInbox()
@@ -43,8 +44,10 @@ function Workspace() {
 
 export default function App() {
   return (
-    <InboxProvider>
-      <Workspace />
-    </InboxProvider>
+    <AuthGate>
+      <InboxProvider>
+        <Workspace />
+      </InboxProvider>
+    </AuthGate>
   )
 }

@@ -1,6 +1,7 @@
 import { useInbox } from '../state/InboxContext'
 import { statusCounts } from '../state/selectors'
 import type { Page } from '../types'
+import { useAuth } from '../api/AuthGate'
 
 function railClass(active: boolean): string {
   return `w-11 py-2 rounded-[10px] flex flex-col items-center gap-[3px] text-[10px] relative cursor-pointer ${
@@ -39,6 +40,7 @@ function RailButton({
 
 export function Rail() {
   const { state } = useInbox()
+  const { me } = useAuth()
   const counts = statusCounts(state)
 
   return (
@@ -54,10 +56,10 @@ export function Rail() {
       <RailButton page="chat" emoji="💬" label="대화" badge={counts.미처리} />
 
       <div className="mt-auto flex flex-col items-center gap-2.5">
-        {state.isAdmin && <RailButton page="office" emoji="🏢" label="사무소" />}
+        {me.isAdmin && <RailButton page="office" emoji="🏢" label="사무소" />}
         <RailButton page="settings" emoji="⚙️" label="설정" />
         <div className="w-8 h-8 rounded-full bg-ink-700 text-white flex items-center justify-center text-xs font-semibold border-2 border-ink shadow-[0_0_0_2px_#12B76A]">
-          {state.profile.name[0]}
+          {me.user.name[0]}
         </div>
       </div>
     </div>
