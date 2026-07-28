@@ -6,6 +6,7 @@ export type ErrorCode =
   | 'FORBIDDEN'
   | 'NOT_FOUND'
   | 'CONFLICT'
+  | 'CONFLICT_VERSION'
   | 'GONE'
   | 'INTERNAL_ERROR'
 
@@ -15,6 +16,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   FORBIDDEN: 403,
   NOT_FOUND: 404,
   CONFLICT: 409,
+  CONFLICT_VERSION: 409,
   GONE: 410,
   INTERNAL_ERROR: 500,
 }
