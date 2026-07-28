@@ -16,6 +16,7 @@ import { routes as messagesSendRoutes } from './routes/messages-send'
 import { routes as notesRoutes } from './routes/notes'
 import { routes as officeRoutes } from './routes/office'
 import { routes as readsRoutes } from './routes/reads'
+import { routes as realtimeRoutes } from './routes/realtime'
 import { routes as tasksRoutes } from './routes/tasks'
 import { runScheduledTasks } from './scheduled'
 
@@ -39,6 +40,7 @@ const routes: Route[] = [
   ...hooksMoRoutes,
   ...hooksReportRoutes,
   ...eventsRoutes,
+  ...realtimeRoutes,
 ]
 
 function isApiPath(pathname: string): boolean {
