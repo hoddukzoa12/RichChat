@@ -1,5 +1,5 @@
 import { DESKTOP_MIN } from '../../shared/breakpoints'
-import type { CardTab, MobileView, OpenMenu, Page, Status, Toast } from '../types'
+import type { CardTab, MobileView, OpenMenu, Page, Toast } from '../types'
 import type { ActionHandlers, InboxState } from './inbox'
 
 export interface ViewState {
@@ -37,12 +37,6 @@ const cardOpenAfterMobileView: Record<MobileView, (current: boolean) => boolean>
   chat: (current) => current,
 }
 
-const statusAfterIncoming: Record<Status, Status> = {
-  미처리: '미처리',
-  처리중: '처리중',
-  완료: '처리중',
-}
-
 export const viewHandlers = {
   setPage: (state, action) => ({ ...state, page: action.page, menu: null }),
 
@@ -58,37 +52,17 @@ export const viewHandlers = {
 
   setMenu: (state, action) => ({ ...state, menu: action.value }),
 
-  toastArrive: (state, action) => ({
-    ...state,
-    toast: action.toast,
-    convs: state.convs.map((conversation) =>
-      conversation.id === action.toast.id
-        ? {
-            ...conversation,
-            messages: [
-              ...conversation.messages,
-              { dir: 'in' as const, text: action.toast.text, time: '방금' },
-            ],
-            time: '방금',
-            unread: conversation.unread + 1,
-            status: statusAfterIncoming[conversation.status],
-          }
-        : conversation,
-    ),
-  }),
+  // F7가 채운다.
+  toastArrive: (state, action) => ({ ...state, toast: action.toast }),
 
   openToast: (state) => {
     const toast = state.toast
     if (!toast) return state
     return {
       ...state,
-      selected: toast.id,
       toast: null,
       page: 'chat',
       mobileView: 'chat',
-      convs: state.convs.map((conversation) =>
-        conversation.id === toast.id ? { ...conversation, unread: 0 } : conversation,
-      ),
     }
   },
 

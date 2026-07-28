@@ -8,8 +8,8 @@ import {
   useRef,
   type ReactNode,
 } from 'react'
+import type { ConversationListItem } from '../../shared/wire/conversation'
 import type { Conversation } from '../types'
-import { INCOMING } from '../data/seed'
 import { answerFor } from './selectors'
 import { currentConv, initialState, reducer, type Action, type InboxState } from './inbox'
 
@@ -22,11 +22,49 @@ interface InboxContextValue {
 
 const InboxContext = createContext<InboxContextValue | null>(null)
 
+function emptyConversation(
+  conversation: ConversationListItem | undefined,
+): Conversation {
+  const name = conversation?.customer.name ?? ''
+  return {
+    // F4/F5가 문자열 대화 ID를 쓰는 상세 상태로 교체한다.
+    id: 0,
+    name,
+    company: conversation?.customer.company ?? '',
+    orgLine: conversation?.customer.company ?? '',
+    initial: name[0] ?? '',
+    phone: conversation?.customer.phoneE164 ?? '',
+    time: '',
+    status: conversation?.status ?? '미처리',
+    label: conversation?.label ?? '',
+    assignees:
+      conversation?.assignees.map((assignee) => assignee.name) ?? [],
+    archived: conversation?.archived ?? false,
+    unread: conversation?.unreadCount ?? 0,
+    folderPath: '',
+    folderLinked: false,
+    docCount: 0,
+    fields: [],
+    summary: '',
+    todos: [],
+    tasks: [],
+    docs: [],
+    notes: [],
+    draft: '',
+    // F4가 채운다.
+    messages: [],
+  }
+}
+
 export function InboxProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState)
   const aiTimer = useRef<number | undefined>(undefined)
 
-  const cur = currentConv(state)
+  // F4/F5가 상세 읽기 모델로 교체한다.
+  const cur = useMemo(
+    () => emptyConversation(currentConv(state)),
+    [state.convs, state.selected],
+  )
 
   // `askAi` needs the conversation as it is *now*, so the answer is resolved up
   // front and only its delivery is delayed.
@@ -40,16 +78,13 @@ export function InboxProvider({ children }: { children: ReactNode }) {
     const text = answerFor(conv, q)
     dispatch({ type: 'askAi', question: q })
     window.clearTimeout(aiTimer.current)
-    aiTimer.current = window.setTimeout(() => dispatch({ type: 'aiReply', id: conv.id, text }), 1100)
+    aiTimer.current = window.setTimeout(
+      () => dispatch({ type: 'aiReply', id: String(conv.id), text }),
+      1100,
+    )
   }, [])
 
   useEffect(() => () => window.clearTimeout(aiTimer.current), [])
-
-  // Demo: a new message lands 3.5s after mount and toasts for 6s.
-  useEffect(() => {
-    const arrive = window.setTimeout(() => dispatch({ type: 'toastArrive', toast: INCOMING }), 3500)
-    return () => window.clearTimeout(arrive)
-  }, [])
 
   useEffect(() => {
     if (!state.toast) return

@@ -6,7 +6,6 @@ import {
   onUnauthorized,
 } from './client'
 import {
-  conversationsEndpoint,
   customersEndpoint,
   eventsEndpoint,
   messagesEndpoint,
@@ -118,7 +117,6 @@ describe('API client', () => {
 describe('Endpoint stubs', () => {
   it('fails explicitly for every endpoint owned by later slices', () => {
     const stubs = [
-      conversationsEndpoint,
       messagesEndpoint,
       customersEndpoint,
       notesEndpoint,

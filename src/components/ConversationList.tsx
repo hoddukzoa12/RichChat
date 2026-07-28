@@ -1,23 +1,21 @@
 import { useInbox } from '../state/InboxContext'
-import {
-  archivedCount,
-  assigneeLabel,
-  preview,
-  scopeCount,
-  statusCounts,
-  visibleList,
-} from '../state/selectors'
-import type { Conversation, Scope, StatusFilter } from '../types'
+import { assigneeLabel } from '../state/selectors'
 import { Avatar, MenuItem, Popover, StatusBadge } from './ui'
 import type { Breakpoint } from '../hooks/useBreakpoint'
+import {
+  CONVERSATION_SCOPES,
+  CONVERSATION_STATUS_FILTERS,
+  type ConversationListItem,
+  type ConversationScope,
+} from '../../shared/wire/conversation'
+import { useConversationList } from '../hooks/useConversationList'
+import { formatRelativeTime } from '../lib/time'
 
-const FILTERS: StatusFilter[] = ['전체', '미처리', '처리중', '완료']
-
-const SCOPE_OPTIONS: { key: Scope; label: string }[] = [
-  { key: 'all', label: '전체 담당' },
-  { key: 'mine', label: '내 담당' },
-  { key: 'none', label: '미배정' },
-]
+const SCOPE_LABELS: Record<ConversationScope, string> = {
+  all: '전체 담당',
+  mine: '내 담당',
+  none: '미배정',
+}
 
 function pillClass(active: boolean): string {
   return `flex items-center gap-[5px] text-[12.5px] font-semibold px-[9px] py-1 rounded-2xl cursor-pointer whitespace-nowrap border ${
@@ -33,11 +31,13 @@ function chipClass(active: boolean): string {
   }`
 }
 
-function Row({ conv }: { conv: Conversation }) {
+function Row({ conv }: { conv: ConversationListItem }) {
   const { state, dispatch } = useInbox()
   const selected = conv.id === state.selected
-  const unread = conv.unread > 0
+  const unread = conv.unreadCount > 0
   const label = assigneeLabel(conv)
+  const lastMessageTime =
+    conv.lastMessageAt === null ? '' : formatRelativeTime(conv.lastMessageAt)
 
   return (
     <button
@@ -54,13 +54,17 @@ function Row({ conv }: { conv: Conversation }) {
         <span
           className={`text-[14.5px] tracking-[-0.2px] ${unread ? 'font-extrabold' : 'font-bold'}`}
         >
-          {conv.name}
+          {conv.customer.name}
         </span>
-        {conv.company && <span className="text-[13px] text-ink-400">{conv.company}</span>}
+        {conv.customer.company && (
+          <span className="text-[13px] text-ink-400">
+            {conv.customer.company}
+          </span>
+        )}
         <span
           className={`ml-auto text-xs ${unread ? 'font-bold text-brand' : 'font-normal text-ink-400'}`}
         >
-          {conv.time}
+          {lastMessageTime}
         </span>
       </div>
 
@@ -70,11 +74,11 @@ function Row({ conv }: { conv: Conversation }) {
             unread ? 'text-ink font-semibold' : 'text-ink-600 font-normal'
           }`}
         >
-          {preview(conv)}
+          {conv.preview}
         </span>
         {unread && (
           <span className="ml-auto flex-none min-w-[19px] h-[19px] rounded-[10px] bg-brand text-white text-[11px] font-bold flex items-center justify-center px-1.5">
-            {conv.unread}
+            {conv.unreadCount}
           </span>
         )}
       </div>
@@ -88,7 +92,10 @@ function Row({ conv }: { conv: Conversation }) {
         )}
         {label ? (
           <span className="ml-auto flex items-center gap-[5px] text-xs text-ink-500">
-            <Avatar initial={conv.assignees[0][0]} className="w-[18px] h-[18px] text-[10px]" />
+            <Avatar
+              initial={conv.assignees[0].name[0]}
+              className="w-[18px] h-[18px] text-[10px]"
+            />
             {label}
           </span>
         ) : (
@@ -101,8 +108,9 @@ function Row({ conv }: { conv: Conversation }) {
 
 export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
   const { state, dispatch } = useInbox()
-  const list = visibleList(state)
-  const counts = statusCounts(state)
+  const { loadMore, retry } = useConversationList(state, dispatch)
+  const list = state.convs
+  const counts = state.facets.status
 
   const width =
     breakpoint === 'mobile'
@@ -111,7 +119,9 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
         ? 'w-[292px] flex-none border-r border-line'
         : 'w-[328px] flex-none border-r border-line'
 
-  const scopeLabel = SCOPE_OPTIONS.find((o) => o.key === state.scope)!.label
+  const scopeLabel = SCOPE_LABELS[state.scope]
+  const firstLoading =
+    state.listLoadStatus === 'idle' || state.listLoadStatus === 'loading'
 
   return (
     <div className={`bg-surface-sunken flex flex-col ${width}`}>
@@ -137,14 +147,16 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
               onClose={() => dispatch({ type: 'setMenu', value: null })}
               className="top-9 left-0 w-[150px]"
             >
-              {SCOPE_OPTIONS.map((o) => (
+              {CONVERSATION_SCOPES.map((scope) => (
                 <MenuItem
-                  key={o.key}
-                  active={state.scope === o.key}
-                  onClick={() => dispatch({ type: 'setScope', value: o.key })}
+                  key={scope}
+                  active={state.scope === scope}
+                  onClick={() => dispatch({ type: 'setScope', value: scope })}
                 >
-                  {o.label}
-                  <span className="ml-auto text-xs text-ink-400">{scopeCount(state, o.key)}</span>
+                  {SCOPE_LABELS[scope]}
+                  <span className="ml-auto text-xs text-ink-400">
+                    {state.facets.scope[scope]}
+                  </span>
                 </MenuItem>
               ))}
             </Popover>
@@ -156,7 +168,7 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
             onClick={() => dispatch({ type: 'toggleArchivedView' })}
           >
             <span className="w-3 h-2.5 border-[1.5px] border-current rounded-sm block" />
-            보관 {archivedCount(state)}
+            보관 {state.facets.archive.archived}
           </button>
         </div>
 
@@ -171,26 +183,83 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
         </div>
 
         <div className="flex gap-1 flex-wrap">
-          {FILTERS.map((f) => (
+          {CONVERSATION_STATUS_FILTERS.map((filter) => (
             <button
-              key={f}
+              key={filter}
               type="button"
-              className={chipClass(state.filter === f)}
-              onClick={() => dispatch({ type: 'setFilter', value: f })}
+              className={chipClass(state.filter === filter)}
+              onClick={() => dispatch({ type: 'setFilter', value: filter })}
             >
-              {f === '전체' ? '전체' : `${f} ${counts[f]}`}
+              {filter === '전체'
+                ? '전체'
+                : `${filter} ${counts[filter]}`}
             </button>
           ))}
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2.5 pb-3.5 flex flex-col gap-1">
+      <div
+        className="flex-1 overflow-y-auto px-2.5 pb-3.5 flex flex-col gap-1"
+        onScroll={(event) => {
+          const listElement = event.currentTarget
+          const remaining =
+            listElement.scrollHeight -
+            listElement.scrollTop -
+            listElement.clientHeight
+          if (remaining < 80) loadMore()
+        }}
+      >
+        {firstLoading && (
+          <div className="px-3 py-9 text-center text-[13px] text-ink-400 leading-relaxed">
+            대화 목록을 불러오고 있습니다
+          </div>
+        )}
+
+        {state.listLoadStatus === 'failed' && (
+          <div
+            role="alert"
+            className="px-3 py-9 text-center text-[13px] text-open-fg leading-relaxed"
+          >
+            <div>{state.listError}</div>
+            <button
+              type="button"
+              onClick={retry}
+              className="mt-3 rounded-lg border border-open-fg px-3 py-1.5 font-semibold"
+            >
+              다시 시도
+            </button>
+          </div>
+        )}
+
         {list.map((c) => (
           <Row key={c.id} conv={c} />
         ))}
-        {list.length === 0 && (
+
+        {state.listLoadStatus === 'loaded' && list.length === 0 && (
           <div className="px-3 py-9 text-center text-[13px] text-ink-400 leading-relaxed">
             조건에 맞는 대화가 없습니다
+          </div>
+        )}
+
+        {state.loadingMore && (
+          <div className="px-3 py-4 text-center text-[12px] text-ink-400">
+            대화를 더 불러오고 있습니다
+          </div>
+        )}
+
+        {state.listError && list.length > 0 && (
+          <div
+            role="alert"
+            className="px-3 py-4 text-center text-[12px] text-open-fg"
+          >
+            <div>{state.listError}</div>
+            <button
+              type="button"
+              onClick={loadMore}
+              className="mt-2 rounded-lg border border-open-fg px-2.5 py-1 font-semibold"
+            >
+              다시 시도
+            </button>
           </div>
         )}
       </div>

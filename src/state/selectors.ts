@@ -1,48 +1,21 @@
-import type { Conversation, Status, StatusFilter } from '../types'
-import { ME } from '../data/seed'
-import type { InboxState } from './inbox'
+import type { ConversationListAssignee } from '../../shared/wire/conversation'
+import type { Conversation } from '../types'
 
-/** Last message text — the list preview is always derived, never stored. */
-export function preview(c: Conversation): string {
-  return c.messages.length ? c.messages[c.messages.length - 1].text : ''
+type AssigneeSource = {
+  assignees: Array<string | ConversationListAssignee>
 }
 
-export function assigneeLabel(c: Conversation): string {
-  if (c.assignees.length > 1) return `${c.assignees[0]} 외 ${c.assignees.length - 1}`
-  return c.assignees[0] ?? ''
+function assigneeName(assignee: string | ConversationListAssignee): string {
+  return typeof assignee === 'string' ? assignee : assignee.name
 }
 
-function inScope(c: Conversation, scope: InboxState['scope']): boolean {
-  if (scope === 'all') return true
-  if (scope === 'mine') return c.assignees.includes(ME)
-  return c.assignees.length === 0
-}
-
-export function visibleList(state: InboxState): Conversation[] {
-  const q = state.query.trim()
-  return state.convs.filter(
-    (c) =>
-      c.archived === state.archivedView &&
-      inScope(c, state.scope) &&
-      (state.filter === '전체' || c.status === state.filter) &&
-      (!q || c.name.includes(q) || c.company.includes(q) || c.phone.includes(q)),
-  )
-}
-
-export type StatusCounts = Record<StatusFilter, number>
-
-export function statusCounts(state: InboxState): StatusCounts {
-  const counts: StatusCounts = { 전체: state.convs.length, 미처리: 0, 처리중: 0, 완료: 0 }
-  for (const c of state.convs) counts[c.status as Status] += 1
-  return counts
-}
-
-export function scopeCount(state: InboxState, key: InboxState['scope']): number {
-  return state.convs.filter((c) => inScope(c, key)).length
-}
-
-export function archivedCount(state: InboxState): number {
-  return state.convs.filter((c) => c.archived).length
+export function assigneeLabel(c: AssigneeSource): string {
+  const first = c.assignees[0]
+  if (!first) return ''
+  const name = assigneeName(first)
+  return c.assignees.length > 1
+    ? `${name} 외 ${c.assignees.length - 1}`
+    : name
 }
 
 /** Canned AI answers, keyed off what the question mentions. */
