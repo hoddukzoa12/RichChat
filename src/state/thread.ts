@@ -7,6 +7,10 @@ import {
   type MessageType,
 } from '../../shared/sms'
 import type {
+  ConversationListAssignee,
+  ConversationListItem,
+} from '../../shared/wire/conversation'
+import type {
   ConversationMessage,
   MessageSender,
 } from '../../shared/wire/message'
@@ -181,6 +185,11 @@ export type ThreadSliceAction =
       message: ConversationMessage
     }
   | {
+      type: 'thread/retryStarted'
+      conversationId: string
+      clientKey: string
+    }
+  | {
       type: 'thread/sendFailed'
       conversationId: string
       clientKey: string
@@ -304,19 +313,41 @@ const threadSliceHandlers = {
       ),
     })),
 
+  'thread/retryStarted': (state, action) =>
+    patchThread(
+      { ...state, composerError: null },
+      action.conversationId,
+      (thread) => ({
+        ...thread,
+        messages: thread.messages.map((message) =>
+          message.clientKey === action.clientKey
+            ? {
+                ...message,
+                requestState: 'sending',
+                requestError: undefined,
+              }
+            : message,
+        ),
+      }),
+    ),
+
   'thread/sendFailed': (state, action) =>
-    patchThread(state, action.conversationId, (thread) => ({
-      ...thread,
-      messages: thread.messages.map((message) =>
-        message.clientKey === action.clientKey
-          ? {
-              ...message,
-              requestState: 'failed',
-              requestError: action.error,
-            }
-          : message,
-      ),
-    })),
+    patchThread(
+      { ...state, composerError: action.error },
+      action.conversationId,
+      (thread) => ({
+        ...thread,
+        messages: thread.messages.map((message) =>
+          message.clientKey === action.clientKey
+            ? {
+                ...message,
+                requestState: 'failed',
+                requestError: action.error,
+              }
+            : message,
+        ),
+      }),
+    ),
 
   'thread/composerError': (state, action) => ({
     ...state,
@@ -337,9 +368,39 @@ export function threadSliceReducer(
 
 export type ThreadAction =
   | { type: 'select'; id: string }
-  | { type: 'setDraft'; value: string }
-  | { type: 'send'; now: number }
   | { type: 'draftReply' }
+  | {
+      type: 'assigneeAssigned'
+      conversationId: string
+      assignee: ConversationListAssignee
+    }
+  | {
+      type: 'assigneeUnassigned'
+      conversationId: string
+      userId: string
+    }
+  | ThreadSliceAction
+
+function reduceInboxThread(
+  state: InboxState,
+  action: ThreadSliceAction,
+): InboxState {
+  return threadSliceReducer(state, action) as InboxState
+}
+
+function patchConversation(
+  conversations: ConversationListItem[],
+  conversationId: string,
+  update: (
+    conversation: ConversationListItem,
+  ) => ConversationListItem,
+): ConversationListItem[] {
+  return conversations.map((conversation) =>
+    conversation.id === conversationId
+      ? update(conversation)
+      : conversation,
+  )
+}
 
 export const threadHandlers = {
   select: (state, action) => ({
@@ -347,27 +408,71 @@ export const threadHandlers = {
     selected: action.id,
     menu: null,
     draft: '',
+    composerError: null,
     mobileView: 'chat',
     editDraft: null,
-    taskEdit: null,
-    addingTask: false,
-    noteEdit: null,
-    addingNote: false,
   }),
 
-  setDraft: (state, action) => ({ ...state, draft: action.value }),
-
-  send: (state, action) => {
-    const text = state.draft.trim()
-    if (!text) return state
-    // F4가 채운다.
-    void action.now
-    return {
-      ...state,
-      draft: '',
-    }
-  },
-
-  // F4가 채운다.
   draftReply: (state) => ({ ...state, draft: '확인 후 회신드리겠습니다.' }),
+
+  assigneeAssigned: (state, action) => ({
+    ...state,
+    convs: patchConversation(
+      state.convs,
+      action.conversationId,
+      (conversation) =>
+        conversation.assignees.some(
+          (assignee) => assignee.id === action.assignee.id,
+        )
+          ? conversation
+          : {
+              ...conversation,
+              assignees: [
+                ...conversation.assignees,
+                action.assignee,
+              ],
+            },
+    ),
+  }),
+
+  assigneeUnassigned: (state, action) => ({
+    ...state,
+    convs: patchConversation(
+      state.convs,
+      action.conversationId,
+      (conversation) => ({
+        ...conversation,
+        assignees: conversation.assignees.filter(
+          (assignee) => assignee.id !== action.userId,
+        ),
+      }),
+    ),
+  }),
+
+  'thread/loadStarted': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/loadSucceeded': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/loadFailed': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/draftChanged': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/sendStarted': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/sendSucceeded': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/retryStarted': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/sendFailed': (state, action) =>
+    reduceInboxThread(state, action),
+
+  'thread/composerError': (state, action) =>
+    reduceInboxThread(state, action),
 } satisfies ActionHandlers<InboxState, ThreadAction>
