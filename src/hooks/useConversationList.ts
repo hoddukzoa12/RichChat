@@ -6,11 +6,11 @@ import {
   type Dispatch,
 } from 'react'
 import {
-  CONVERSATION_LIST_DEFAULT_LIMIT,
   type ConversationListParams,
 } from '../../shared/wire/conversation'
 import { getConversations } from '../api/endpoints/conversations'
 import type { Action, InboxState } from '../state/inbox'
+import { conversationListParams } from '../state/selectors'
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -47,13 +47,7 @@ export function useConversationList(
     paginationController.current?.abort()
     paginationController.current = null
     const requestId = ++requestSequence.current
-    const params: ConversationListParams = {
-      archived: state.archivedView,
-      scope: state.scope,
-      status: state.filter,
-      q: debouncedQuery || undefined,
-      limit: CONVERSATION_LIST_DEFAULT_LIMIT,
-    }
+    const params = conversationListParams(state, debouncedQuery)
 
     dispatch({
       type: 'conversationListLoadStarted',
@@ -113,12 +107,8 @@ export function useConversationList(
     paginationController.current = controller
     const requestId = ++requestSequence.current
     const params: ConversationListParams = {
-      archived: state.archivedView,
-      scope: state.scope,
-      status: state.filter,
-      q: debouncedQuery || undefined,
+      ...conversationListParams(state, debouncedQuery),
       cursor: state.nextCursor,
-      limit: CONVERSATION_LIST_DEFAULT_LIMIT,
     }
 
     dispatch({
