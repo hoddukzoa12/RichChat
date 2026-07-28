@@ -15,10 +15,18 @@
     "LGU_ENV": "local",
     "LGU_AUTH_HOST": "api.msghub-qa.uplus.co.kr",
     "LGU_SEND_HOST": "api-send.msghub-qa.uplus.co.kr",
-    "LGU_CONTENT_HOST": "mnt-api.msghub-qa.uplus.co.kr"
+    "LGU_CONTENT_HOST": "mnt-api.msghub-qa.uplus.co.kr",
+    "WORKS_CLIENT_ID": "",
+    "WORKS_ISSUER": "https://auth.worksmobile.com"
   },
   "secrets": {
-    "required": ["LGU_API_KEY", "LGU_API_PASSWORD"]
+    "required": [
+      "LGU_API_KEY",
+      "LGU_API_PASSWORD",
+      "LGU_MO_WEBHOOK_SECRET",
+      "LGU_REPORT_WEBHOOK_SECRET",
+      "WORKS_CLIENT_SECRET"
+    ]
   },
   "d1_databases": [
     {
