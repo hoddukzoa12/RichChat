@@ -70,17 +70,18 @@ function ErrorBanner({
 
 function TaskForm({
   data,
+  editingId,
   dispatchData,
   onDelete,
   onSave,
 }: {
   data: CustomerCardDataState
+  editingId: string | null
   dispatchData: InfoTabViewProps['dispatchData']
   onDelete: (taskId: string) => void
   onSave: () => void
 }) {
   const draft = data.taskDraft
-  const editingId = data.taskEditId
 
   return (
     <div className="border border-brand rounded-[9px] px-[11px] py-2.5 bg-brand-50">
@@ -159,17 +160,17 @@ function TaskForm({
 
 function NoteForm({
   data,
+  editingId,
   dispatchData,
   onDelete,
   onSave,
 }: {
   data: CustomerCardDataState
+  editingId: string | null
   dispatchData: InfoTabViewProps['dispatchData']
   onDelete: (noteId: string) => void
   onSave: () => void
 }) {
-  const editingId = data.noteEditId
-
   return (
     <div className={editingId ? 'mt-[5px]' : 'mt-[11px]'}>
       <input
@@ -258,6 +259,30 @@ export function InfoTabView({
   const customer = detail.customer
   const edit =
     data.editDraft?.conversationId === conversationId ? data.editDraft : null
+  const conflict =
+    data.customerConflict?.conversationId === conversationId
+      ? data.customerConflict
+      : null
+  const mutationError =
+    data.cardMutationError?.conversationId === conversationId
+      ? data.cardMutationError
+      : null
+  const taskEditorActive = data.taskEditorConversationId === conversationId
+  const taskEditId =
+    taskEditorActive &&
+    data.taskEditId !== null &&
+    detail.tasks.some(({ id }) => id === data.taskEditId)
+      ? data.taskEditId
+      : null
+  const addingTask = taskEditorActive && data.addingTask
+  const noteEditorActive = data.noteEditorConversationId === conversationId
+  const noteEditId =
+    noteEditorActive &&
+    data.noteEditId !== null &&
+    detail.notes.some(({ id }) => id === data.noteEditId)
+      ? data.noteEditId
+      : null
+  const addingNote = noteEditorActive && data.addingNote
   const fields = edit?.fields ?? customer.fields
 
   return (
@@ -270,14 +295,14 @@ export function InfoTabView({
 
       {entry.error && <ErrorBanner message={entry.error} onClose={onReload} />}
 
-      {data.cardMutationError && (
+      {mutationError && (
         <ErrorBanner
-          message={data.cardMutationError.message}
+          message={mutationError.message}
           onClose={() => dispatchData({ type: 'clearCardMutationError' })}
         />
       )}
 
-      {data.customerConflict && edit && (
+      {conflict && edit && (
         <div
           role="alert"
           className="rounded-lg border border-warn-border bg-warn-bg px-3 py-3 text-[12.5px] text-ink-700"
@@ -292,14 +317,18 @@ export function InfoTabView({
           <div className="mt-2.5 flex gap-1.5">
             <button
               type="button"
-              onClick={() => dispatchData({ type: 'useServerCustomer' })}
+              onClick={() =>
+                dispatchData({ type: 'useServerCustomer', conversationId })
+              }
               className="h-7 px-2.5 rounded-lg border border-line-strong bg-white font-semibold"
             >
               서버 값 사용
             </button>
             <button
               type="button"
-              onClick={() => dispatchData({ type: 'rebaseCustomerEdit' })}
+              onClick={() =>
+                dispatchData({ type: 'rebaseCustomerEdit', conversationId })
+              }
               className="h-7 px-2.5 rounded-lg bg-brand text-white font-semibold"
             >
               내 변경 이어서 편집
@@ -463,10 +492,10 @@ export function InfoTabView({
       <Card className="px-[15px] py-3.5">
         <div className="flex items-center mb-2.5">
           <span className="text-[13px] font-bold">진행 중인 업무</span>
-          {!data.addingTask && data.taskEditId === null && (
+          {!addingTask && taskEditId === null && (
             <button
               type="button"
-              onClick={() => dispatchData({ type: 'addTask' })}
+              onClick={() => dispatchData({ type: 'addTask', conversationId })}
               className="ml-auto text-[12.5px] text-brand font-semibold"
             >
               ＋ 추가
@@ -475,10 +504,11 @@ export function InfoTabView({
         </div>
         <div className="flex flex-col gap-[7px]">
           {detail.tasks.map((task) =>
-            data.taskEditId === task.id ? (
+            taskEditId === task.id ? (
               <TaskForm
                 key={task.id}
                 data={data}
+                editingId={taskEditId}
                 dispatchData={dispatchData}
                 onDelete={onDeleteTask}
                 onSave={onSaveTask}
@@ -520,9 +550,10 @@ export function InfoTabView({
               </div>
             ),
           )}
-          {data.addingTask && (
+          {addingTask && (
             <TaskForm
               data={data}
+              editingId={null}
               dispatchData={dispatchData}
               onDelete={onDeleteTask}
               onSave={onSaveTask}
@@ -553,7 +584,7 @@ export function InfoTabView({
                   <span className="text-[11.5px] text-ink-400">
                     {noteTime(note.createdAt, note.updatedAt)}
                   </span>
-                  {data.noteEditId !== note.id &&
+                  {noteEditId !== note.id &&
                     note.authorId === sessionUserId && (
                       <button
                         type="button"
@@ -573,9 +604,10 @@ export function InfoTabView({
                       </button>
                     )}
                 </div>
-                {data.noteEditId === note.id ? (
+                {noteEditId === note.id ? (
                   <NoteForm
                     data={data}
+                    editingId={noteEditId}
                     dispatchData={dispatchData}
                     onDelete={onDeleteNote}
                     onSave={onSaveNote}
@@ -589,9 +621,10 @@ export function InfoTabView({
             </div>
           ))}
         </div>
-        {data.addingNote ? (
+        {addingNote ? (
           <NoteForm
             data={data}
+            editingId={null}
             dispatchData={dispatchData}
             onDelete={onDeleteNote}
             onSave={onSaveNote}
@@ -599,7 +632,7 @@ export function InfoTabView({
         ) : (
           <button
             type="button"
-            onClick={() => dispatchData({ type: 'addNote' })}
+            onClick={() => dispatchData({ type: 'addNote', conversationId })}
             className="mt-[11px] w-full h-8 border border-dashed border-line-soft rounded-lg flex items-center justify-center text-[12.5px] text-ink-500 hover:border-brand hover:text-brand"
           >
             ＋ 메모 추가
