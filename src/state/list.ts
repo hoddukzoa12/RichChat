@@ -71,8 +71,6 @@ export type ListAction =
       message: string
     }
   | { type: 'setStatus'; value: Status }
-  | { type: 'toggleAssignee'; name: string }
-  | { type: 'clearAssignees' }
   | { type: 'archive' }
   | { type: 'unarchive' }
 
@@ -162,25 +160,6 @@ export const listHandlers = {
     ...state,
     menu: null,
     convs: patchSelectedConversation(state, () => ({ status: action.value })),
-  }),
-
-  toggleAssignee: (state, action) => ({
-    ...state,
-    convs: patchSelectedConversation(state, (conversation) => ({
-      assignees: conversation.assignees.some(
-        (assignee) => assignee.name === action.name,
-      )
-        ? conversation.assignees.filter(
-            (assignee) => assignee.name !== action.name,
-          )
-        : [...conversation.assignees, { id: action.name, name: action.name }],
-    })),
-  }),
-
-  clearAssignees: (state) => ({
-    ...state,
-    menu: null,
-    convs: patchSelectedConversation(state, () => ({ assignees: [] })),
   }),
 
   archive: (state) => ({

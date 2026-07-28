@@ -120,7 +120,15 @@ describe('thread state', () => {
       clientKey: 'key-1',
       error: { message: '네트워크 연결을 확인해 주세요.' },
     })
-    state = threadSliceReducer(state, started)
+    state = threadSliceReducer(state, {
+      type: 'thread/draftChanged',
+      value: '작성 중인 다른 답장',
+    })
+    state = threadSliceReducer(state, {
+      type: 'thread/retryStarted',
+      conversationId: 'conversation-1',
+      clientKey: 'key-1',
+    })
 
     expect(threadFor(state, 'conversation-1').messages).toHaveLength(1)
     expect(
@@ -129,6 +137,8 @@ describe('thread state', () => {
       clientKey: 'key-1',
       requestState: 'sending',
     })
+    expect(state.draft).toBe('작성 중인 다른 답장')
+    expect(state.composerError).toBeNull()
   })
 
   it('prepends ascending older pages without duplicate ids', () => {

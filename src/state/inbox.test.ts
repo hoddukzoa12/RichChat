@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ConversationListResponse } from '../../shared/wire/conversation'
+import type { ConversationMessage } from '../../shared/wire/message'
 import {
   ACTION_TYPES,
   initialState,
@@ -7,6 +8,7 @@ import {
   type Action,
   type InboxState,
 } from './inbox'
+import { threadFor } from './thread'
 
 const ACTION_TYPES_AFTER_LIST_API = [
   'select',
@@ -23,12 +25,19 @@ const ACTION_TYPES_AFTER_LIST_API = [
   'conversationListLoadSucceeded',
   'conversationListLoadFailed',
   'setStatus',
-  'toggleAssignee',
-  'clearAssignees',
   'archive',
   'unarchive',
-  'setDraft',
-  'send',
+  'assigneeAssigned',
+  'assigneeUnassigned',
+  'thread/loadStarted',
+  'thread/loadSucceeded',
+  'thread/loadFailed',
+  'thread/draftChanged',
+  'thread/sendStarted',
+  'thread/sendSucceeded',
+  'thread/retryStarted',
+  'thread/sendFailed',
+  'thread/composerError',
   'draftReply',
   'toggleTodo',
   'linkFolder',
@@ -105,6 +114,27 @@ function listResponse(
       scope: { all: ids.length, mine: 0, none: ids.length },
       archive: { active: ids.length, archived: 12 },
     },
+  }
+}
+
+function message(
+  id: string,
+  overrides: Partial<ConversationMessage> = {},
+): ConversationMessage {
+  return {
+    id,
+    direction: 'in',
+    channel: 'SMS',
+    title: null,
+    body: id,
+    sender: null,
+    occurredAt: 1_785_233_160_000,
+    deliveryStatus: '수신',
+    resultCode: null,
+    deliveredAt: null,
+    errorText: null,
+    attachments: [],
+    ...overrides,
   }
 }
 
@@ -195,6 +225,143 @@ describe('inbox reducer', () => {
     ])
     expect(state.convs[1].preview).toBe('갱신된 미리보기')
     expect(state.facets).toBe(second.facets)
+  })
+
+  it('applies assignee directions by immutable user id', () => {
+    const response = listResponse(['conversation-1'])
+    const state = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+      {
+        type: 'assigneeAssigned',
+        conversationId: 'conversation-1',
+        assignee: { id: 'user-1', name: '김세무' },
+      },
+      {
+        type: 'assigneeAssigned',
+        conversationId: 'conversation-1',
+        assignee: { id: 'user-1', name: '바뀐 이름' },
+      },
+      {
+        type: 'assigneeAssigned',
+        conversationId: 'conversation-1',
+        assignee: { id: 'user-2', name: '박상담' },
+      },
+      {
+        type: 'assigneeUnassigned',
+        conversationId: 'conversation-1',
+        userId: 'user-1',
+      },
+    ])
+
+    expect(state.convs[0].assignees).toEqual([
+      { id: 'user-2', name: '박상담' },
+    ])
+  })
+
+  it('keeps the thread separate and replaces an optimistic retry by clientKey', () => {
+    const response = listResponse(['conversation-1'])
+    const state = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+      {
+        type: 'thread/loadStarted',
+        conversationId: 'conversation-1',
+        older: false,
+      },
+      {
+        type: 'thread/loadSucceeded',
+        conversationId: 'conversation-1',
+        messages: [message('inbound-1')],
+        nextCursor: null,
+        older: false,
+      },
+      {
+        type: 'thread/draftChanged',
+        value: '확인했습니다.',
+      },
+      {
+        type: 'thread/sendStarted',
+        conversationId: 'conversation-1',
+        clientKey: 'client-key-1',
+        body: '확인했습니다.',
+        occurredAt: 1_785_233_160_001,
+        sender: {
+          id: 'user-park',
+          name: '박상담',
+          title: '상담 담당',
+        },
+      },
+      {
+        type: 'thread/sendFailed',
+        conversationId: 'conversation-1',
+        clientKey: 'client-key-1',
+        error: { message: '네트워크 오류' },
+      },
+      {
+        type: 'thread/retryStarted',
+        conversationId: 'conversation-1',
+        clientKey: 'client-key-1',
+      },
+      {
+        type: 'thread/sendSucceeded',
+        conversationId: 'conversation-1',
+        clientKey: 'client-key-1',
+        message: message('outbound-1', {
+          direction: 'out',
+          body: '확인했습니다.',
+          sender: {
+            id: 'user-park',
+            name: '박상담',
+            title: '상담 담당',
+          },
+          occurredAt: 1_785_233_160_001,
+          deliveryStatus: '접수',
+        }),
+      },
+    ])
+
+    expect(state.convs[0]).not.toHaveProperty('messages')
+    expect(
+      threadFor(state, 'conversation-1').messages,
+    ).toEqual([
+      message('inbound-1'),
+      {
+        ...message('outbound-1', {
+          direction: 'out',
+          body: '확인했습니다.',
+          sender: {
+            id: 'user-park',
+            name: '박상담',
+            title: '상담 담당',
+          },
+          occurredAt: 1_785_233_160_001,
+          deliveryStatus: '접수',
+        }),
+        clientKey: 'client-key-1',
+        requestState: null,
+      },
+    ])
+    expect(state.draft).toBe('')
+    expect(state.composerError).toBeNull()
   })
 
   it('discards a response from an older request', () => {
