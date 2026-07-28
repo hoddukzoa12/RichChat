@@ -21,3 +21,13 @@ export interface EventCatchupResponse {
   hasMore: boolean
   nextCursor: number
 }
+
+export interface EventCursorGoneResponse {
+  error: {
+    code: 'GONE'
+    message: string
+    detail: {
+      currentCursor: number
+    }
+  }
+}

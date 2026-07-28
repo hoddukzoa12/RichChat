@@ -27,12 +27,17 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   INTERNAL_ERROR: 500,
 }
 
-export function error(code: ErrorCode, message: string): Response {
+export function error(
+  code: ErrorCode,
+  message: string,
+  detail?: unknown,
+): Response {
   return json(
     {
       error: {
         code,
         message,
+        ...(detail === undefined ? {} : { detail }),
       },
     },
     {

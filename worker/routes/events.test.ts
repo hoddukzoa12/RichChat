@@ -1,6 +1,9 @@
 import { env, SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
-import type { EventCatchupResponse } from '../../shared/wire/event'
+import type {
+  EventCatchupResponse,
+  EventCursorGoneResponse,
+} from '../../shared/wire/event'
 import {
   createSession,
   SESSION_COOKIE_NAME,
@@ -133,6 +136,15 @@ async function body(response: Response): Promise<EventCatchupResponse> {
   return response.json<EventCatchupResponse>()
 }
 
+async function eventSequence(officeId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    'SELECT event_seq FROM offices WHERE id = ?',
+  )
+    .bind(officeId)
+    .first<{ event_seq: number }>()
+  return row?.event_seq ?? 0
+}
+
 describe('Event catchup route', () => {
   it('requires a session cookie', async () => {
     const response = await catchup(0)
@@ -151,11 +163,7 @@ describe('Event catchup route', () => {
     )
       .bind(session.officeId)
       .first<{ count: number }>()
-    const beforeOffice = await env.DB.prepare(
-      'SELECT event_seq FROM offices WHERE id = ?',
-    )
-      .bind(session.officeId)
-      .first<{ event_seq: number }>()
+    const beforeSequence = await eventSequence(session.officeId)
 
     const response = await catchup(0, session.token)
 
@@ -198,13 +206,9 @@ describe('Event catchup route', () => {
     )
       .bind(session.officeId)
       .first<{ count: number }>()
-    const afterOffice = await env.DB.prepare(
-      'SELECT event_seq FROM offices WHERE id = ?',
-    )
-      .bind(session.officeId)
-      .first<{ event_seq: number }>()
+    const afterSequence = await eventSequence(session.officeId)
     expect(afterCount).toEqual(beforeCount)
-    expect(afterOffice).toEqual(beforeOffice)
+    expect(afterSequence).toBe(beforeSequence)
   })
 
   it('returns only events after the cursor in ascending order', async () => {
@@ -274,25 +278,56 @@ describe('Event catchup route', () => {
     )
       .bind(session.officeId, 3)
       .run()
+    const beforeSequence = await eventSequence(session.officeId)
 
     const response = await catchup(0, session.token)
 
     expect(response.status).toBe(410)
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'GONE' },
+    const result = await response.json<EventCursorGoneResponse>()
+    expect(result).toMatchObject({
+      error: {
+        code: 'GONE',
+      },
     })
+    expect(result.error.detail.currentCursor).toBe(beforeSequence)
+    expect(await eventSequence(session.officeId)).toBe(
+      beforeSequence,
+    )
   })
 
   it('returns gone when the cursor is ahead of the server', async () => {
     const session = await seedSession()
     await appendEvents(session.officeId, 1, 2)
+    const beforeSequence = await eventSequence(session.officeId)
 
     const response = await catchup(3, session.token)
 
     expect(response.status).toBe(410)
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: 'GONE' },
+    const result = await response.json<EventCursorGoneResponse>()
+    expect(result).toMatchObject({
+      error: {
+        code: 'GONE',
+      },
     })
+    expect(result.error.detail.currentCursor).toBe(beforeSequence)
+    expect(await eventSequence(session.officeId)).toBe(
+      beforeSequence,
+    )
+
+    const emptySession = await seedSession()
+    const emptySequence = await eventSequence(emptySession.officeId)
+    const emptyResponse = await catchup(1, emptySession.token)
+
+    expect(emptyResponse.status).toBe(410)
+    const emptyResult =
+      await emptyResponse.json<EventCursorGoneResponse>()
+    expect(emptyResult.error.detail.currentCursor).toBe(
+      emptySequence,
+    )
+    expect(emptySequence).toBe(0)
+    expect(await eventSequence(emptySession.officeId)).toBe(
+      emptySequence,
+    )
   })
 
   it('returns gone instead of emitting a sequence gap', async () => {
