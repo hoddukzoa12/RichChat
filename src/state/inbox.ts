@@ -77,4 +77,4 @@ export function reducer(state: InboxState, action: Action): InboxState {
 }
 
 export { currentConv }
-export type { AiSettings, NotifySettings, OfficeSettings } from './settings'
+export type { AiSettings, OfficeSettings } from './settings'

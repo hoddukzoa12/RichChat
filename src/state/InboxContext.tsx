@@ -9,12 +9,21 @@ import {
   type ReactNode,
 } from 'react'
 import type { ConversationListItem } from '../../shared/wire/conversation'
+import type { MeUser } from '../../shared/wire/settings'
+import { ApiRequestError } from '../api/client'
+import { useAuth } from '../api/AuthGate'
+import { getOfficeMembers } from '../api/endpoints'
 import type { Conversation } from '../types'
 import { answerFor } from './selectors'
 import { currentConv, initialState, reducer, type Action, type InboxState } from './inbox'
 
+interface InboxViewState extends InboxState {
+  /** `/api/me` 정본을 기존 소비자에게 노출하는 읽기 전용 뷰다. */
+  profile: MeUser
+}
+
 interface InboxContextValue {
-  state: InboxState
+  state: InboxViewState
   dispatch: React.Dispatch<Action>
   cur: Conversation
   askAi: (question: string) => void
@@ -58,6 +67,7 @@ function emptyConversation(
 
 export function InboxProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState)
+  const { me } = useAuth()
   const aiTimer = useRef<number | undefined>(undefined)
 
   // F4/F5가 상세 읽기 모델로 교체한다.
@@ -87,12 +97,34 @@ export function InboxProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => window.clearTimeout(aiTimer.current), [])
 
   useEffect(() => {
+    const controller = new AbortController()
+    getOfficeMembers(controller.signal)
+      .then(({ members }) => dispatch({ type: 'loadTeam', members }))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        const message =
+          error instanceof ApiRequestError
+            ? error.message
+            : '직원 목록을 불러오지 못했습니다.'
+        dispatch({ type: 'failTeam', message })
+      })
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
     if (!state.toast) return
     const hide = window.setTimeout(() => dispatch({ type: 'dismissToast' }), 6000)
     return () => window.clearTimeout(hide)
   }, [state.toast])
 
-  const value = useMemo(() => ({ state, dispatch, cur, askAi }), [state, cur, askAi])
+  const viewState = useMemo(
+    () => ({ ...state, profile: me.user }),
+    [state, me.user],
+  )
+  const value = useMemo(
+    () => ({ state: viewState, dispatch, cur, askAi }),
+    [viewState, cur, askAi],
+  )
 
   return <InboxContext.Provider value={value}>{children}</InboxContext.Provider>
 }

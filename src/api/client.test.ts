@@ -10,7 +10,6 @@ import {
   eventsEndpoint,
   messagesEndpoint,
   notesEndpoint,
-  officeEndpoint,
   tasksEndpoint,
 } from './endpoints'
 import { EndpointStubError } from './endpointStub'
@@ -121,7 +120,6 @@ describe('Endpoint stubs', () => {
       customersEndpoint,
       notesEndpoint,
       tasksEndpoint,
-      officeEndpoint,
       eventsEndpoint,
     ]
 

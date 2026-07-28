@@ -1,19 +1,56 @@
+import { useEffect, useState } from 'react'
+import { useAuth } from '../api/AuthGate'
+import {
+  updateMe,
+  updateMeSettings,
+  type MeResponse,
+  type UserSettingField,
+  type UserSettings,
+} from '../api/endpoints'
 import { useInbox } from '../state/InboxContext'
-import type { AiSettings, NotifySettings } from '../state/inbox'
-import type { Profile } from '../types'
+import type { AiSettings } from '../state/inbox'
 import { Card, ToggleRow } from './ui'
 
-const PROFILE_FIELDS: { key: keyof Profile; label: string }[] = [
-  { key: 'name', label: '이름' },
-  { key: 'title', label: '직함' },
-  { key: 'email', label: '이메일' },
-  { key: 'phone', label: '연락처' },
+type ProfileDraft = Pick<MeResponse['user'], 'name' | 'title' | 'email'>
+
+function profileDraftFrom(me: MeResponse): ProfileDraft {
+  return {
+    name: me.user.name,
+    title: me.user.title,
+    email: me.user.email,
+  }
+}
+
+const PROFILE_FIELDS: Array<{
+  key: keyof ProfileDraft
+  label: string
+  readOnly: boolean
+}> = [
+  { key: 'name', label: '이름', readOnly: false },
+  { key: 'title', label: '직함', readOnly: false },
+  { key: 'email', label: '이메일', readOnly: true },
 ]
 
-const NOTIFY_TOGGLES: { key: keyof NotifySettings; name: string; sub: string }[] = [
-  { key: 'newChat', name: '새 대화 알림', sub: '미배정 대화가 들어오면 알립니다' },
-  { key: 'mineOnly', name: '내 담당만 알림', sub: '내가 담당인 대화의 새 메시지만 알립니다' },
-  { key: 'sound', name: '알림음', sub: '데스크톱 알림에 소리를 함께 재생합니다' },
+const NOTIFY_TOGGLES: Array<{
+  key: UserSettingField
+  name: string
+  sub: string
+}> = [
+  {
+    key: 'notifyNewChat',
+    name: '새 대화 알림',
+    sub: '미배정 대화가 들어오면 알립니다',
+  },
+  {
+    key: 'notifyMineOnly',
+    name: '내 담당만 알림',
+    sub: '내가 담당인 대화의 새 메시지만 알립니다',
+  },
+  {
+    key: 'notifySound',
+    name: '알림음',
+    sub: '데스크톱 알림에 소리를 함께 재생합니다',
+  },
 ]
 
 const AI_TOGGLES: { key: keyof AiSettings; name: string; sub: string }[] = [
@@ -24,6 +61,69 @@ const AI_TOGGLES: { key: keyof AiSettings; name: string; sub: string }[] = [
 
 export function MySettings() {
   const { state, dispatch } = useInbox()
+  const { me, applyMeResponse } = useAuth()
+  const [profileDraft, setProfileDraft] = useState<ProfileDraft>(
+    profileDraftFrom(me),
+  )
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileMessage, setProfileMessage] = useState<string | null>(
+    null,
+  )
+  const [notify, setNotify] = useState<UserSettings>(me.settings)
+  const [notifySaving, setNotifySaving] = useState(false)
+  const [notifyError, setNotifyError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setProfileDraft(profileDraftFrom(me))
+    setNotify(me.settings)
+  }, [me])
+
+  const saveProfile = async () => {
+    const optimistic = { ...profileDraft }
+    setProfileSaving(true)
+    setProfileMessage(null)
+    try {
+      const response = await updateMe({
+        name: optimistic.name,
+        title: optimistic.title,
+      })
+      applyMeResponse(response)
+      setProfileDraft(profileDraftFrom(response))
+      setProfileMessage('저장했습니다.')
+    } catch (error: unknown) {
+      setProfileDraft(profileDraftFrom(me))
+      setProfileMessage(
+        error instanceof Error
+          ? error.message
+          : '프로필을 저장하지 못했습니다.',
+      )
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
+  const flipNotify = async (key: UserSettingField) => {
+    if (notifySaving) return
+    const previous = notify
+    const nextValue = !previous[key]
+    setNotify({ ...previous, [key]: nextValue })
+    setNotifySaving(true)
+    setNotifyError(null)
+    try {
+      const response = await updateMeSettings({ [key]: nextValue })
+      applyMeResponse(response)
+      setNotify(response.settings)
+    } catch (error: unknown) {
+      setNotify(previous)
+      setNotifyError(
+        error instanceof Error
+          ? error.message
+          : '알림 설정을 저장하지 못했습니다.',
+      )
+    } finally {
+      setNotifySaving(false)
+    }
+  }
 
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-white">
@@ -37,7 +137,7 @@ export function MySettings() {
             <div className="text-sm font-bold mb-3.5">프로필</div>
             <div className="flex items-center gap-3.5 mb-4">
               <div className="w-14 h-14 flex-none rounded-full bg-brand-200 text-brand-text flex items-center justify-center text-[21px] font-bold">
-                {state.profile.name[0]}
+                {me.user.name[0]}
               </div>
               <button
                 type="button"
@@ -55,56 +155,81 @@ export function MySettings() {
                 <div key={p.key} className="flex items-center gap-3">
                   <span className="w-24 flex-none text-[13px] text-ink-500">{p.label}</span>
                   <input
-                    value={state.profile[p.key]}
-                    onChange={(e) =>
-                      dispatch({ type: 'setProfile', key: p.key, value: e.target.value })
+                    value={profileDraft[p.key]}
+                    readOnly={p.readOnly}
+                    onChange={
+                      p.readOnly
+                        ? undefined
+                        : (event) =>
+                            setProfileDraft((current) => ({
+                              ...current,
+                              [p.key]: event.target.value,
+                            }))
                     }
-                    className="flex-1 min-w-0 text-[13.5px] text-ink border border-line-strong rounded-lg px-[11px] py-2 outline-none focus:border-brand"
+                    className={`flex-1 min-w-0 text-[13.5px] border border-line-strong rounded-lg px-[11px] py-2 outline-none ${
+                      p.readOnly
+                        ? 'text-ink-500 bg-fill cursor-not-allowed'
+                        : 'text-ink focus:border-brand'
+                    }`}
                   />
                 </div>
               ))}
-              <div className="flex items-start gap-3">
-                <span className="w-24 flex-none text-[13px] text-ink-500 pt-2">답장 서명</span>
-                <textarea
-                  value={state.profile.signature}
-                  onChange={(e) =>
-                    dispatch({ type: 'setProfile', key: 'signature', value: e.target.value })
-                  }
-                  placeholder="예: 세무법인 리치 박상담 드림"
-                  className="flex-1 min-w-0 h-16 resize-none text-[13.5px] text-ink border border-line-strong rounded-lg px-[11px] py-[9px] outline-none focus:border-brand font-sans leading-normal"
-                />
-              </div>
             </div>
 
             <div className="mt-4 flex gap-2">
               <button
                 type="button"
+                disabled={profileSaving}
+                onClick={() => void saveProfile()}
                 className="h-[34px] px-4 rounded-[9px] bg-brand text-white flex items-center text-[13.5px] font-semibold hover:bg-brand-hover"
               >
-                저장
+                {profileSaving ? '저장 중…' : '저장'}
               </button>
               <button
                 type="button"
+                disabled={profileSaving}
+                onClick={() => {
+                  setProfileDraft(profileDraftFrom(me))
+                  setProfileMessage(null)
+                }}
                 className="h-[34px] px-3.5 border border-line-strong rounded-[9px] flex items-center text-[13.5px] font-medium text-ink-600"
               >
                 취소
               </button>
+              {profileMessage && (
+                <span
+                  role="status"
+                  className="self-center text-[12.5px] text-ink-500"
+                >
+                  {profileMessage}
+                </span>
+              )}
             </div>
           </Card>
 
           <Card className="p-[18px]">
             <div className="text-sm font-bold mb-3.5">알림</div>
-            <div className="flex flex-col gap-1">
-              {NOTIFY_TOGGLES.map((t) => (
-                <ToggleRow
-                  key={t.key}
-                  name={t.name}
-                  sub={t.sub}
-                  on={state.notify[t.key]}
-                  onFlip={() => dispatch({ type: 'toggleNotify', key: t.key })}
-                />
-              ))}
-            </div>
+            <fieldset
+              disabled={notifySaving}
+              className={notifySaving ? 'opacity-70' : ''}
+            >
+              <div className="flex flex-col gap-1">
+                {NOTIFY_TOGGLES.map((t) => (
+                  <ToggleRow
+                    key={t.key}
+                    name={t.name}
+                    sub={t.sub}
+                    on={notify[t.key]}
+                    onFlip={() => void flipNotify(t.key)}
+                  />
+                ))}
+              </div>
+            </fieldset>
+            {notifyError && (
+              <div role="alert" className="mt-2 text-[12.5px] text-open-fg">
+                {notifyError}
+              </div>
+            )}
           </Card>
 
           <Card className="p-[18px]">

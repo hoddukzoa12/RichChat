@@ -1,4 +1,5 @@
 import {
+  useCallback,
   createContext,
   useContext,
   useEffect,
@@ -11,6 +12,7 @@ import { getMe, type MeResponse } from './endpoints'
 
 interface AuthContextValue {
   me: MeResponse
+  applyMeResponse: (me: MeResponse) => void
 }
 
 type AuthState =
@@ -24,6 +26,9 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthGate({ children }: { children: ReactNode }) {
   const [attempt, setAttempt] = useState(0)
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' })
+  const applyMeResponse = useCallback((me: MeResponse) => {
+    setAuth({ status: 'authenticated', me })
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -77,7 +82,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ me: auth.me }}>
+    <AuthContext.Provider value={{ me: auth.me, applyMeResponse }}>
       {children}
     </AuthContext.Provider>
   )
