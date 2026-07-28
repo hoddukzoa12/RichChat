@@ -1,12 +1,4 @@
-export type EventActorKind = 'user' | 'customer' | 'system'
-
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue }
+import type { EventActorKind, JsonValue } from '../../shared/domain'
 
 export interface EventInput {
   officeId: string
@@ -20,6 +12,15 @@ export interface EventInput {
   createdAt: number
 }
 
+export interface EventPublishGuard {
+  /**
+   * 변경 결과가 존재할 때 행을 반환하는 SELECT 문이다.
+   * 사용자 입력은 문자열에 보간하지 말고 bindings로만 전달한다.
+   */
+  query: string
+  bindings?: readonly unknown[]
+}
+
 /**
  * 도메인 변경과 같은 batch에 펼쳐 넣을 이벤트 문장들을 만든다.
  * 여기서 batch를 실행하면 원인 변경과 감사 이벤트 사이의 원자성이 깨진다.
@@ -27,6 +28,7 @@ export interface EventInput {
 export function publish(
   db: Pick<D1Database, 'prepare'>,
   event: EventInput,
+  guard?: EventPublishGuard,
 ): D1PreparedStatement[] {
   const payload = JSON.stringify(event.payload)
 
@@ -34,22 +36,29 @@ export function publish(
     throw new TypeError('이벤트 payload는 JSON 값이어야 합니다.')
   }
 
+  const guardCondition = guard ? `EXISTS (${guard.query})` : null
+  const updateGuard = guardCondition ? ` AND ${guardCondition}` : ''
+  const insertGuard = guardCondition ? ` WHERE ${guardCondition}` : ''
+  const guardBindings = guard?.bindings ?? []
+
   return [
     db
       .prepare(
-        'UPDATE offices SET event_seq = event_seq + 1 WHERE id = ?',
+        `UPDATE offices
+         SET event_seq = event_seq + 1
+         WHERE id = ?${updateGuard}`,
       )
-      .bind(event.officeId),
+      .bind(event.officeId, ...guardBindings),
     db
       .prepare(
         `INSERT INTO events (
           office_id, office_seq, type, entity, entity_id, conversation_id,
           actor_kind, actor_id, payload, created_at
         )
-        VALUES (
+        SELECT
           ?, (SELECT event_seq FROM offices WHERE id = ?), ?, ?, ?, ?, ?, ?, ?,
           ?
-        )`,
+        ${insertGuard}`,
       )
       .bind(
         event.officeId,
@@ -62,6 +71,7 @@ export function publish(
         event.actorId ?? null,
         payload,
         event.createdAt,
+        ...guardBindings,
       ),
   ]
 }
