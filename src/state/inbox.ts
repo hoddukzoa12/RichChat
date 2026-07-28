@@ -1,8 +1,6 @@
 import type {
   AiChatMessage,
   CardTab,
-  Channel,
-  ChannelFilter,
   Conversation,
   EditDraft,
   MobileView,
@@ -49,7 +47,6 @@ export interface InboxState {
   query: string
   filter: StatusFilter
   scope: Scope
-  chan: ChannelFilter
   archivedView: boolean
   menu: OpenMenu
 
@@ -95,7 +92,6 @@ export const initialState: InboxState = {
   query: '',
   filter: '전체',
   scope: 'all',
-  chan: 'all',
   archivedView: false,
   menu: null,
 
@@ -136,7 +132,6 @@ export type Action =
   | { type: 'setQuery'; value: string }
   | { type: 'setFilter'; value: StatusFilter }
   | { type: 'setScope'; value: Scope }
-  | { type: 'setChan'; value: ChannelFilter }
   | { type: 'setMenu'; value: OpenMenu }
   | { type: 'toggleArchivedView' }
   | { type: 'setStatus'; value: Status }
@@ -201,8 +196,8 @@ function clockLabel(now: Date): string {
   return `${h < 12 ? '오전' : '오후'} ${h % 12 || 12}:${String(now.getMinutes()).padStart(2, '0')}`
 }
 
-function outboundStamp(channel: Channel, now: Date): string {
-  return `${channel === '카톡' ? '채널톡' : 'SMS'} · ${clockLabel(now)}`
+function outboundStamp(now: Date): string {
+  return `SMS · ${clockLabel(now)}`
 }
 
 function noteStamp(now: Date): string {
@@ -253,9 +248,6 @@ export function reducer(state: InboxState, action: Action): InboxState {
     case 'setScope':
       return { ...state, scope: action.value, menu: null }
 
-    case 'setChan':
-      return { ...state, chan: action.value, menu: null }
-
     case 'setMenu':
       return { ...state, menu: action.value }
 
@@ -303,7 +295,7 @@ export function reducer(state: InboxState, action: Action): InboxState {
         ...state,
         draft: '',
         convs: patch(state, (c) => ({
-          messages: [...c.messages, { dir: 'out' as const, text, time: outboundStamp(c.channel, now) }],
+          messages: [...c.messages, { dir: 'out' as const, text, time: outboundStamp(now) }],
           time: '방금',
           status: c.status === '미처리' ? '처리중' : c.status,
           assignees: c.assignees.length ? c.assignees : [ME],

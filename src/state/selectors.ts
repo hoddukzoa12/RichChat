@@ -24,7 +24,6 @@ export function visibleList(state: InboxState): Conversation[] {
     (c) =>
       c.archived === state.archivedView &&
       inScope(c, state.scope) &&
-      (state.chan === 'all' || c.channel === state.chan) &&
       (state.filter === '전체' || c.status === state.filter) &&
       (!q || c.name.includes(q) || c.company.includes(q) || c.phone.includes(q)),
   )
@@ -36,10 +35,6 @@ export function statusCounts(state: InboxState): StatusCounts {
   const counts: StatusCounts = { 전체: state.convs.length, 미처리: 0, 처리중: 0, 완료: 0 }
   for (const c of state.convs) counts[c.status as Status] += 1
   return counts
-}
-
-export function channelCount(state: InboxState, key: 'all' | Conversation['channel']): number {
-  return key === 'all' ? state.convs.length : state.convs.filter((c) => c.channel === key).length
 }
 
 export function scopeCount(state: InboxState, key: InboxState['scope']): number {

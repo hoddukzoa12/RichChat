@@ -1,7 +1,6 @@
 import { env } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import {
-  CHANNELS,
   DELIVERY_STATUSES,
   DIRECTIONS,
   ROLES,
@@ -240,13 +239,12 @@ async function seedConversation(suffix: string): Promise<SeedIds> {
     ),
     env.DB.prepare(
       `INSERT INTO conversations (
-        id, office_id, customer_id, channel, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
+        id, office_id, customer_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?)`,
     ).bind(
       ids.conversationId,
       ids.officeId,
       ids.customerId,
-      '문자',
       NOW,
       NOW,
     ),
@@ -324,8 +322,8 @@ async function seedTenantGraph(suffix: string): Promise<TenantGraph> {
     ),
     env.DB.prepare(
       `INSERT INTO conversations (
-        id, office_id, customer_id, channel, created_at, updated_at
-      ) VALUES (?, ?, ?, '문자', ?, ?), (?, ?, ?, '문자', ?, ?)`,
+        id, office_id, customer_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
     ).bind(
       graph.conversationId,
       graph.officeId,
@@ -460,8 +458,8 @@ const TENANT_INSERT_BUILDERS: Record<string, TenantInsertBuilder> = {
   conversations: (graph, relation, ordinal) =>
     env.DB.prepare(
       `INSERT INTO conversations (
-        id, office_id, customer_id, channel, created_at, updated_at
-      ) VALUES (?, ?, ?, '문자', ?, ?)`,
+        id, office_id, customer_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?)`,
     ).bind(
       `conversation-tenant-${ordinal}`,
       graph.officeId,
@@ -672,11 +670,11 @@ describe('Initial D1 schema', () => {
     ).rejects.toThrow()
   })
 
-  it('allows one default sender per office and kind', async () => {
+  it('allows one default sender per office', async () => {
     const { officeId } = await seedConversation('default-channel')
     const sql = `INSERT INTO office_channels (
-      id, office_id, kind, value, is_default, active, created_at
-    ) VALUES (?, ?, 'sms_callback', ?, 1, 1, ?)`
+      id, office_id, value, is_default, active, created_at
+    ) VALUES (?, ?, ?, 1, 1, ?)`
 
     await env.DB.prepare(sql)
       .bind('channel-default-1', officeId, '0211111111', NOW)
@@ -695,8 +693,8 @@ describe('Initial D1 schema', () => {
     await expect(
       env.DB.prepare(
         `INSERT INTO conversations (
-          id, office_id, customer_id, channel, created_at, updated_at
-        ) VALUES (?, ?, ?, '문자', ?, ?)`,
+          id, office_id, customer_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)`,
       )
         .bind(
           'conversation-duplicate',
@@ -735,8 +733,8 @@ describe('Initial D1 schema', () => {
     await expect(
       env.DB.prepare(
         `INSERT INTO conversations (
-          id, office_id, customer_id, channel, created_at, updated_at
-        ) VALUES (?, ?, ?, '문자', ?, ?)`,
+          id, office_id, customer_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)`,
       )
         .bind(
           'conversation-cross-office',
@@ -889,8 +887,8 @@ describe('Initial D1 schema', () => {
       ),
       env.DB.prepare(
         `INSERT INTO conversations (
-          id, office_id, customer_id, channel, created_at, updated_at
-        ) VALUES (?, ?, ?, '문자', ?, ?)`,
+          id, office_id, customer_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)`,
       ).bind(
         otherConversationId,
         ids.officeId,
@@ -1039,7 +1037,6 @@ describe('Initial D1 schema', () => {
 
     expect(usersSql).toContain(`role IN (${sqlValues(ROLES)})`)
     expect(usersSql).toContain(`status IN (${sqlValues(USER_STATUSES)})`)
-    expect(conversationsSql).toContain(`channel IN (${sqlValues(CHANNELS)})`)
     expect(conversationsSql).toContain(`status IN (${sqlValues(STATUSES)})`)
     expect(messagesSql).toContain(`direction IN (${sqlValues(DIRECTIONS)})`)
     expect(messagesSql).toContain(`channel IN (${sqlValues(SEND_CHANNELS)})`)
@@ -1096,13 +1093,13 @@ describe('Initial D1 schema', () => {
       ),
       env.DB.prepare(
         `INSERT INTO office_channels (
-          id, office_id, kind, value, is_default, active, created_at
-        ) VALUES (?, ?, 'sms_callback', ?, 0, 1, ?)`,
+          id, office_id, value, is_default, active, created_at
+        ) VALUES (?, ?, ?, 0, 1, ?)`,
       ).bind('channel-partial-null-1', ids.officeId, '0211111111', NOW),
       env.DB.prepare(
         `INSERT INTO office_channels (
-          id, office_id, kind, value, is_default, active, created_at
-        ) VALUES (?, ?, 'sms_callback', ?, 0, 1, ?)`,
+          id, office_id, value, is_default, active, created_at
+        ) VALUES (?, ?, ?, 0, 1, ?)`,
       ).bind('channel-partial-null-2', ids.officeId, '0222222222', NOW),
     ])
     await insertMessage(ids, {

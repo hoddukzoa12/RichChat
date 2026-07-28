@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { useInbox } from '../state/InboxContext'
 import { assigneeLabel } from '../state/selectors'
 import { ASSIGNEES } from '../data/seed'
-import { CHANNEL_BADGE, CHANNEL_FULL, STATUSES, STATUS_DOT, STATUS_TEXT } from '../theme'
+import { STATUSES, STATUS_DOT, STATUS_TEXT } from '../theme'
 import { Avatar, MenuItem, Popover } from './ui'
 import type { Breakpoint } from '../hooks/useBreakpoint'
 
@@ -31,14 +31,7 @@ function Header({ breakpoint }: { breakpoint: Breakpoint }) {
             {cur.company}
           </span>
         </div>
-        <div className="text-[12.5px] text-ink-400 flex items-center gap-1.5">
-          <span
-            className={`whitespace-nowrap font-semibold rounded px-[5px] ${CHANNEL_BADGE[cur.channel]}`}
-          >
-            {CHANNEL_FULL[cur.channel]}
-          </span>
-          {cur.phone}
-        </div>
+        <div className="text-[12.5px] text-ink-400">{cur.phone}</div>
       </div>
 
       <div className="ml-auto flex items-center gap-2 flex-none">

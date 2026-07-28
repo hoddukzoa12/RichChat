@@ -1,5 +1,4 @@
 import type {
-  Channel,
   DeliveryStatus,
   Direction,
   Role,
@@ -10,7 +9,6 @@ import type {
 } from '../shared/domain'
 
 export type {
-  Channel,
   DeliveryStatus,
   Direction,
   Role,
@@ -23,16 +21,15 @@ export type {
 export type Page = 'chat' | 'office' | 'settings'
 export type CardTab = 'info' | 'folder' | 'ai'
 export type Scope = 'all' | 'mine' | 'none'
-export type ChannelFilter = 'all' | Channel
 export type StatusFilter = '전체' | Status
 export type MobileView = 'list' | 'chat'
 /** Which floating menu is open — only one at a time. */
-export type OpenMenu = 'chan' | 'scope' | 'assign' | 'status' | null
+export type OpenMenu = 'scope' | 'assign' | 'status' | null
 
 export interface Message {
   dir: Direction
   text: string
-  /** Free-form stamp, e.g. `오후 1:58` for inbound or `채널톡 · 오후 2:06` for outbound. */
+  /** Free-form stamp, e.g. `오후 1:58` for inbound or `SMS · 오후 2:06` for outbound. */
   time: string
 }
 
@@ -70,7 +67,6 @@ export interface Conversation {
   company: string
   orgLine: string
   initial: string
-  channel: Channel
   phone: string
   time: string
   status: Status
@@ -116,7 +112,6 @@ export interface AiChatMessage {
 export interface Toast {
   id: number
   name: string
-  channel: Channel
   initial: string
   text: string
 }

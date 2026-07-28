@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import type { Channel, Status } from '../types'
-import { avatarTone, CHANNEL_BADGE, STATUS_BADGE } from '../theme'
+import type { Status } from '../types'
+import { avatarTone, STATUS_BADGE } from '../theme'
 
 export function Avatar({
   initial,
@@ -28,16 +28,6 @@ export function StatusBadge({ status, className = '' }: { status: Status; classN
       className={`text-[11.5px] font-semibold rounded-[5px] px-[7px] py-[1.5px] ${STATUS_BADGE[status]} ${className}`}
     >
       {status}
-    </span>
-  )
-}
-
-export function ChannelBadge({ channel }: { channel: Channel }) {
-  return (
-    <span
-      className={`text-[11px] font-bold rounded-[5px] px-[6px] py-[1.5px] ${CHANNEL_BADGE[channel]}`}
-    >
-      {channel}
     </span>
   )
 }

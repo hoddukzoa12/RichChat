@@ -2,14 +2,7 @@ import { useInbox } from '../state/InboxContext'
 import type { OfficeSettings as OfficeFlags } from '../state/inbox'
 import { Avatar, Card, ToggleRow } from './ui'
 
-const CHANNELS = [
-  {
-    name: '카카오톡 채널 @세무법인리치',
-    sub: '채널톡 · 알림톡 발송 가능',
-    state: '연결됨',
-    action: '관리',
-    dot: 'bg-folder',
-  },
+const CONNECTIONS = [
   {
     name: '문자 발신번호 02-556-1234',
     sub: 'SMS · LMS',
@@ -142,12 +135,12 @@ export function OfficeSettings() {
       <div className="flex-1 overflow-y-auto px-6 py-[22px] bg-surface">
         <div className="max-w-[760px] flex flex-col gap-4">
           <Card className="p-[18px]">
-            <div className="text-sm font-bold mb-1">채널 연동</div>
+            <div className="text-sm font-bold mb-1">문자 연동</div>
             <div className="text-[12.5px] text-ink-400 mb-3.5">
-              LGU+ 메시지허브를 통해 카카오톡·문자를 한 인박스에서 주고받습니다
+              LGU+ 메시지허브를 통해 고객 문자를 한 인박스에서 주고받습니다
             </div>
             <div className="flex flex-col gap-[9px]">
-              {CHANNELS.map((ch) => (
+              {CONNECTIONS.map((ch) => (
                 <div
                   key={ch.name}
                   className="flex items-center gap-[11px] px-[13px] py-3 border border-line rounded-[10px]"

@@ -1,4 +1,4 @@
-import type { Channel, Status } from './types'
+import type { Status } from './types'
 
 export const STATUS_BADGE: Record<Status, string> = {
   미처리: 'text-open-fg bg-open-bg',
@@ -16,22 +16,6 @@ export const STATUS_DOT: Record<Status, string> = {
   미처리: 'bg-open-dot',
   처리중: 'bg-doing-dot',
   완료: 'bg-done-dot',
-}
-
-export const CHANNEL_BADGE: Record<Channel, string> = {
-  카톡: 'text-kakao-fg bg-kakao-bg',
-  문자: 'text-brand-text bg-brand-100',
-}
-
-export const CHANNEL_FULL: Record<Channel, string> = {
-  카톡: '카카오톡',
-  문자: '문자',
-}
-
-export const CHANNEL_DOT: Record<'all' | Channel, string> = {
-  all: 'bg-line-soft',
-  카톡: 'bg-folder',
-  문자: 'bg-brand-500',
 }
 
 /** 한세무 gets the purple tone; everyone else falls back to brand blue. */
