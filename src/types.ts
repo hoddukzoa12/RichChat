@@ -1,7 +1,24 @@
-export type Channel = '카톡' | '문자'
-export type Status = '미처리' | '처리중' | '완료'
-export type TaskKind = 'warn' | 'idle'
-export type Direction = 'in' | 'out'
+import type {
+  Channel,
+  DeliveryStatus,
+  Direction,
+  Role,
+  SendChannel,
+  Status,
+  TaskKind,
+  UserStatus,
+} from '../shared/domain'
+
+export type {
+  Channel,
+  DeliveryStatus,
+  Direction,
+  Role,
+  SendChannel,
+  Status,
+  TaskKind,
+  UserStatus,
+}
 
 export type Page = 'chat' | 'office' | 'settings'
 export type CardTab = 'info' | 'folder' | 'ai'
@@ -113,5 +130,5 @@ export interface EditDraft {
 export interface TaskDraft {
   name: string
   sub: string
-  kind: TaskKind | 'done'
+  kind: TaskKind
 }
