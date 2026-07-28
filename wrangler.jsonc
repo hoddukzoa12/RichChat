@@ -16,8 +16,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "richchat-local",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_name": "richchat",
+      "database_id": "486256bf-b4ec-47ca-ae44-5af82de40095"
     }
   ],
   "durable_objects": {
