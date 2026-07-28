@@ -63,6 +63,10 @@ DIR=$(cd "$(dirname "$PROMPT_FILE")" && pwd)
 SPEC=$(mktemp)
 sed "s|{{SLICE}}|$NAME|g" "$DIR/prompt-header.md" > "$SPEC"
 cat "$PROMPT_FILE" >> "$SPEC"
+# 도메인 API 슬라이스는 공통 규약을 함께 받는다 (프롬프트가 요청한 경우만)
+if grep -q '<!-- api-conventions -->' "$PROMPT_FILE"; then
+  cat "$DIR/_api-conventions.md" >> "$SPEC"
+fi
 cat "$DIR/prompt-footer.md" >> "$SPEC"
 echo "✓ 프롬프트 조립: $(wc -l < "$SPEC")줄"
 
