@@ -4,6 +4,7 @@ import type {
 } from '../../shared/domain'
 import type {
   EventCatchupResponse,
+  EventCursorGoneResponse,
   EventEnvelope,
 } from '../../shared/wire/event'
 import { error } from '../http/error'
@@ -64,10 +65,14 @@ function parseCursor(request: Request): number | undefined {
   return Number.isSafeInteger(cursor) ? cursor : undefined
 }
 
-function cursorGone(): Response {
+function cursorGone(currentCursor: number): Response {
+  const detail: EventCursorGoneResponse['error']['detail'] = {
+    currentCursor,
+  }
   return error(
     'GONE',
     '이벤트 커서가 현재 데이터와 맞지 않아 전체 동기화가 필요합니다.',
+    detail,
   )
 }
 
@@ -116,7 +121,9 @@ async function getEvents(request: Request, env: Env): Promise<Response> {
   const range = rangeResult.results[0] as EventRangeRow | undefined
   if (!range) return error('UNAUTHORIZED', '로그인이 필요합니다.')
 
-  if (since > range.current_seq) return cursorGone()
+  if (since > range.current_seq) {
+    return cursorGone(range.current_seq)
+  }
 
   /*
    * 보존 정리는 가장 오래된 행부터 지운다는 전제다. 다음으로 필요한 번호
@@ -128,7 +135,7 @@ async function getEvents(request: Request, env: Env): Promise<Response> {
       since < range.current_seq) ||
     (range.first_seq !== null && since < range.first_seq - 1)
   ) {
-    return cursorGone()
+    return cursorGone(range.current_seq)
   }
 
   const rows = pageResult.results as EventRow[]
@@ -136,7 +143,7 @@ async function getEvents(request: Request, env: Env): Promise<Response> {
     !isContiguous(rows, since) ||
     rows.some((row) => row.office_seq > range.current_seq)
   ) {
-    return cursorGone()
+    return cursorGone(range.current_seq)
   }
 
   const hasMore = rows.length > EVENT_PAGE_LIMIT
@@ -145,7 +152,7 @@ async function getEvents(request: Request, env: Env): Promise<Response> {
 
   // 남은 행이 없는데 high-water mark에 못 미치면 중간 또는 꼬리가 잘린 상태다.
   if (!hasMore && nextCursor !== range.current_seq) {
-    return cursorGone()
+    return cursorGone(range.current_seq)
   }
 
   const response: EventCatchupResponse = {
