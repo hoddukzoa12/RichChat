@@ -154,6 +154,25 @@ describe('thread presentation', () => {
     expect(emoji).toContain('disabled=""')
   })
 
+  it('maps dedicated server error codes without depending on copy', () => {
+    const markup = renderToStaticMarkup(
+      <MessageComposer
+        draft=""
+        sendError={{
+          code: 'MSG_ATTACHMENTS_UNSUPPORTED',
+          message: '서버 문구는 바뀔 수 있습니다.',
+        }}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+      />,
+    )
+
+    expect(markup).toContain(
+      '첨부 파일 발송은 아직 지원하지 않습니다.',
+    )
+    expect(markup).not.toContain('서버 문구는 바뀔 수 있습니다.')
+  })
+
   it('preserves the visible scroll anchor after prepending history', () => {
     expect(
       restoredScrollTop({ height: 1_000, top: 80 }, 1_640),
