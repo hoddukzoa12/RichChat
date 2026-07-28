@@ -1,3 +1,7 @@
+-- conversations와 messages는 서로를 참조한다. 새 대화는 last_message_id=NULL로
+-- 먼저 INSERT하고, 메시지를 INSERT한 뒤 포인터를 UPDATE하는 순서를 같은 ordered
+-- batch에서 지켜야 한다. 미래 메시지 포인터를 먼저 쓰거나 메시지를 먼저 넣으면 실패한다.
+
 CREATE TABLE offices (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -44,16 +48,20 @@ CREATE TABLE office_settings (
   export_log INTEGER NOT NULL CHECK (export_log IN (0, 1)),
   retention_years INTEGER NOT NULL DEFAULT 5,
   updated_at INTEGER NOT NULL,
-  updated_by TEXT REFERENCES users(id)
+  updated_by TEXT,
+  FOREIGN KEY (updated_by, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE auth_sessions (
   id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id),
+  user_id TEXT NOT NULL,
   office_id TEXT NOT NULL REFERENCES offices(id),
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL
+  last_seen_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE oauth_states (
@@ -83,13 +91,18 @@ CREATE UNIQUE INDEX ux_customers_id_office
 
 CREATE TABLE customer_fields (
   id TEXT PRIMARY KEY,
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  customer_id TEXT NOT NULL,
+  office_id TEXT NOT NULL REFERENCES offices(id),
   key TEXT NOT NULL,
   value TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  updated_by TEXT REFERENCES users(id),
-  UNIQUE (customer_id, key)
+  updated_by TEXT,
+  UNIQUE (customer_id, key),
+  FOREIGN KEY (customer_id, office_id)
+    REFERENCES customers(id, office_id) ON DELETE CASCADE,
+  FOREIGN KEY (updated_by, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE conversations (
@@ -140,11 +153,16 @@ CREATE TABLE conversation_assignees (
 ) STRICT;
 
 CREATE TABLE conversation_reads (
-  conversation_id TEXT NOT NULL REFERENCES conversations(id),
-  user_id TEXT NOT NULL REFERENCES users(id),
+  conversation_id TEXT NOT NULL,
+  office_id TEXT NOT NULL REFERENCES offices(id),
+  user_id TEXT NOT NULL,
   read_inbound_count INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (conversation_id, user_id)
+  PRIMARY KEY (conversation_id, user_id),
+  FOREIGN KEY (conversation_id, office_id)
+    REFERENCES conversations(id, office_id),
+  FOREIGN KEY (user_id, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE messages (
@@ -210,26 +228,34 @@ CREATE TABLE mo_failures (
 CREATE TABLE notes (
   id TEXT PRIMARY KEY,
   office_id TEXT NOT NULL REFERENCES offices(id),
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  author_id TEXT NOT NULL REFERENCES users(id),
+  conversation_id TEXT NOT NULL,
+  author_id TEXT NOT NULL,
   body TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  deleted_at INTEGER
+  deleted_at INTEGER,
+  FOREIGN KEY (conversation_id, office_id)
+    REFERENCES conversations(id, office_id) ON DELETE CASCADE,
+  FOREIGN KEY (author_id, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
   office_id TEXT NOT NULL REFERENCES offices(id),
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL,
   name TEXT NOT NULL,
   sub TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL CHECK (kind IN ('warn', 'idle', 'done')),
   sort_order INTEGER NOT NULL,
-  created_by TEXT NOT NULL REFERENCES users(id),
+  created_by TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  deleted_at INTEGER
+  deleted_at INTEGER,
+  FOREIGN KEY (conversation_id, office_id)
+    REFERENCES conversations(id, office_id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE office_channels (
@@ -264,9 +290,13 @@ CREATE TABLE events (
   entity_id TEXT NOT NULL,
   conversation_id TEXT,
   actor_kind TEXT NOT NULL CHECK (actor_kind IN ('user', 'customer', 'system')),
-  actor_id TEXT REFERENCES users(id),
+  actor_id TEXT,
   payload TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_id, office_id)
+    REFERENCES conversations(id, office_id),
+  FOREIGN KEY (actor_id, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE UNIQUE INDEX ux_events_office_seq

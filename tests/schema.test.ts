@@ -15,6 +15,20 @@ const NOW = 1_722_134_400_000
 
 const SYSTEM_TABLES = new Set(['_cf_METADATA', 'd1_migrations'])
 
+const TENANT_PARENT_BY_COLUMN = {
+  user_id: 'users',
+  updated_by: 'users',
+  author_id: 'users',
+  created_by: 'users',
+  actor_id: 'users',
+  assigned_by: 'users',
+  sender_user_id: 'users',
+  customer_id: 'customers',
+  conversation_id: 'conversations',
+} as const
+
+const TENANT_PARENT_TABLES = new Set(['users', 'customers', 'conversations'])
+
 const PARTIAL_INDEX_PREDICATES: Record<string, string> = {
   ux_offices_email_domain: 'WHERE email_domain IS NOT NULL',
   ux_users_works_sub: 'WHERE works_sub IS NOT NULL',
@@ -41,6 +55,41 @@ interface TableListRow {
   type: string
   strict: number
 }
+
+type TenantParentTable =
+  (typeof TENANT_PARENT_BY_COLUMN)[keyof typeof TENANT_PARENT_BY_COLUMN]
+
+interface TenantGraph {
+  officeId: string
+  userId: string
+  customerId: string
+  conversationId: string
+  otherOfficeId: string
+  otherUserId: string
+  otherCustomerId: string
+  otherConversationId: string
+}
+
+interface TenantRelation {
+  childTable: string
+  childColumn: string
+  parentTable: TenantParentTable
+  hasCompoundForeignKey: boolean
+}
+
+interface ForeignKeyRow {
+  id: number
+  seq: number
+  table: string
+  from: string
+  to: string
+}
+
+type TenantInsertBuilder = (
+  graph: TenantGraph,
+  relation: TenantRelation,
+  ordinal: number,
+) => D1PreparedStatement
 
 function normalizeSql(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim()
@@ -71,6 +120,83 @@ async function tableSql(name: string): Promise<string> {
 
   expect(row).not.toBeNull()
   return normalizeSql(row?.sql ?? '')
+}
+
+async function tenantRelations(): Promise<TenantRelation[]> {
+  const relations: TenantRelation[] = []
+
+  for (const table of await applicationTables()) {
+    const { results: columns } = await env.DB.prepare(
+      'SELECT name FROM pragma_table_info(?)',
+    )
+      .bind(table.name)
+      .all<{ name: string }>()
+    if (!columns.some(({ name }) => name === 'office_id')) continue
+
+    const { results: foreignKeys } = await env.DB.prepare(
+      `SELECT id, seq, "table", "from", "to"
+      FROM pragma_foreign_key_list(?)`,
+    )
+      .bind(table.name)
+      .all<ForeignKeyRow>()
+    const foreignKeyGroups = new Map<number, ForeignKeyRow[]>()
+    for (const foreignKey of foreignKeys) {
+      const group = foreignKeyGroups.get(foreignKey.id) ?? []
+      group.push(foreignKey)
+      foreignKeyGroups.set(foreignKey.id, group)
+    }
+
+    const candidates = new Map<string, TenantParentTable>()
+    for (const column of columns) {
+      if (column.name in TENANT_PARENT_BY_COLUMN) {
+        const knownColumn =
+          column.name as keyof typeof TENANT_PARENT_BY_COLUMN
+        candidates.set(column.name, TENANT_PARENT_BY_COLUMN[knownColumn])
+      }
+    }
+    for (const foreignKey of foreignKeys) {
+      if (
+        foreignKey.to === 'id' &&
+        TENANT_PARENT_TABLES.has(foreignKey.table)
+      ) {
+        candidates.set(
+          foreignKey.from,
+          foreignKey.table as TenantParentTable,
+        )
+      }
+    }
+
+    for (const [childColumn, parentTable] of candidates) {
+      const hasCompoundForeignKey = [...foreignKeyGroups.values()].some(
+        (group) =>
+          group.some(
+            (part) =>
+              part.table === parentTable &&
+              part.from === childColumn &&
+              part.to === 'id',
+          ) &&
+          group.some(
+            (part) =>
+              part.table === parentTable &&
+              part.from === 'office_id' &&
+              part.to === 'office_id',
+          ),
+      )
+
+      relations.push({
+        childTable: table.name,
+        childColumn,
+        parentTable,
+        hasCompoundForeignKey,
+      })
+    }
+  }
+
+  return relations.sort((left, right) =>
+    `${left.childTable}.${left.childColumn}`.localeCompare(
+      `${right.childTable}.${right.childColumn}`,
+    ),
+  )
 }
 
 async function seedConversation(suffix: string): Promise<SeedIds> {
@@ -129,6 +255,94 @@ async function seedConversation(suffix: string): Promise<SeedIds> {
   return ids
 }
 
+async function seedTenantGraph(suffix: string): Promise<TenantGraph> {
+  const graph = {
+    officeId: `office-${suffix}-1`,
+    userId: `user-${suffix}-1`,
+    customerId: `customer-${suffix}-1`,
+    conversationId: `conversation-${suffix}-1`,
+    otherOfficeId: `office-${suffix}-2`,
+    otherUserId: `user-${suffix}-2`,
+    otherCustomerId: `customer-${suffix}-2`,
+    otherConversationId: `conversation-${suffix}-2`,
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO offices (id, name, created_at)
+      VALUES (?, ?, ?), (?, ?, ?)`,
+    ).bind(
+      graph.officeId,
+      '첫 번째 세무법인',
+      NOW,
+      graph.otherOfficeId,
+      '두 번째 세무법인',
+      NOW,
+    ),
+    env.DB.prepare(
+      `INSERT INTO users (
+        id, office_id, email, name, title, role, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?),
+               (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      graph.userId,
+      graph.officeId,
+      `${suffix}-1@rich.example`,
+      '첫 번째 사용자',
+      '세무사',
+      '세무사',
+      '활성',
+      NOW,
+      NOW,
+      graph.otherUserId,
+      graph.otherOfficeId,
+      `${suffix}-2@rich.example`,
+      '두 번째 사용자',
+      '세무사',
+      '세무사',
+      '활성',
+      NOW,
+      NOW,
+    ),
+    env.DB.prepare(
+      `INSERT INTO customers (
+        id, office_id, phone_e164, name, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      graph.customerId,
+      graph.officeId,
+      '+821088880001',
+      '첫 번째 고객',
+      NOW,
+      NOW,
+      graph.otherCustomerId,
+      graph.otherOfficeId,
+      '+821088880002',
+      '두 번째 고객',
+      NOW,
+      NOW,
+    ),
+    env.DB.prepare(
+      `INSERT INTO conversations (
+        id, office_id, customer_id, channel, created_at, updated_at
+      ) VALUES (?, ?, ?, '문자', ?, ?), (?, ?, ?, '문자', ?, ?)`,
+    ).bind(
+      graph.conversationId,
+      graph.officeId,
+      graph.customerId,
+      NOW,
+      NOW,
+      graph.otherConversationId,
+      graph.otherOfficeId,
+      graph.otherCustomerId,
+      NOW,
+      NOW,
+    ),
+  ])
+
+  return graph
+}
+
 function insertMessage(
   ids: SeedIds,
   values: {
@@ -164,6 +378,225 @@ function insertMessage(
     values.msgKey ?? null,
     values.deliveryStatus,
   )
+}
+
+const OTHER_ID_BY_PARENT: Record<TenantParentTable, keyof TenantGraph> = {
+  users: 'otherUserId',
+  customers: 'otherCustomerId',
+  conversations: 'otherConversationId',
+}
+
+function crossTenantId(
+  graph: TenantGraph,
+  relation: TenantRelation,
+): string {
+  return graph[OTHER_ID_BY_PARENT[relation.parentTable]]
+}
+
+function relationValue(
+  relation: TenantRelation,
+  column: string,
+  sameOfficeValue: string,
+  otherOfficeValue: string,
+): string {
+  return relation.childColumn === column
+    ? otherOfficeValue
+    : sameOfficeValue
+}
+
+const TENANT_INSERT_BUILDERS: Record<string, TenantInsertBuilder> = {
+  office_settings: (graph, relation) =>
+    env.DB.prepare(
+      `INSERT INTO office_settings (
+        office_id, export_log, updated_at, updated_by
+      ) VALUES (?, 1, ?, ?)`,
+    ).bind(
+      graph.officeId,
+      NOW,
+      relationValue(
+        relation,
+        'updated_by',
+        graph.userId,
+        graph.otherUserId,
+      ),
+    ),
+  auth_sessions: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO auth_sessions (
+        id, user_id, office_id, created_at, expires_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      `session-tenant-${ordinal}`,
+      relationValue(relation, 'user_id', graph.userId, graph.otherUserId),
+      graph.officeId,
+      NOW,
+      NOW + 1,
+      NOW,
+    ),
+  customer_fields: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO customer_fields (
+        id, customer_id, office_id, key, sort_order, updated_at, updated_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      `field-tenant-${ordinal}`,
+      relationValue(
+        relation,
+        'customer_id',
+        graph.customerId,
+        graph.otherCustomerId,
+      ),
+      graph.officeId,
+      `key-${ordinal}`,
+      ordinal,
+      NOW,
+      relationValue(
+        relation,
+        'updated_by',
+        graph.userId,
+        graph.otherUserId,
+      ),
+    ),
+  conversations: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO conversations (
+        id, office_id, customer_id, channel, created_at, updated_at
+      ) VALUES (?, ?, ?, '문자', ?, ?)`,
+    ).bind(
+      `conversation-tenant-${ordinal}`,
+      graph.officeId,
+      relationValue(
+        relation,
+        'customer_id',
+        graph.customerId,
+        graph.otherCustomerId,
+      ),
+      NOW,
+      NOW,
+    ),
+  conversation_assignees: (graph, relation) =>
+    env.DB.prepare(
+      `INSERT INTO conversation_assignees (
+        conversation_id, office_id, user_id, assigned_at, assigned_by
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      relationValue(
+        relation,
+        'conversation_id',
+        graph.conversationId,
+        graph.otherConversationId,
+      ),
+      graph.officeId,
+      relationValue(relation, 'user_id', graph.userId, graph.otherUserId),
+      NOW,
+      relationValue(
+        relation,
+        'assigned_by',
+        graph.userId,
+        graph.otherUserId,
+      ),
+    ),
+  conversation_reads: (graph, relation) =>
+    env.DB.prepare(
+      `INSERT INTO conversation_reads (
+        conversation_id, office_id, user_id, updated_at
+      ) VALUES (?, ?, ?, ?)`,
+    ).bind(
+      relationValue(
+        relation,
+        'conversation_id',
+        graph.conversationId,
+        graph.otherConversationId,
+      ),
+      graph.officeId,
+      relationValue(relation, 'user_id', graph.userId, graph.otherUserId),
+      NOW,
+    ),
+  messages: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO messages (
+        id, office_id, conversation_id, direction, channel, body,
+        sender_user_id, occurred_at, created_at, mo_key, delivery_status
+      ) VALUES (?, ?, ?, 'in', 'SMS', ?, ?, ?, ?, ?, '수신')`,
+    ).bind(
+      `message-tenant-${ordinal}`,
+      graph.officeId,
+      relationValue(
+        relation,
+        'conversation_id',
+        graph.conversationId,
+        graph.otherConversationId,
+      ),
+      '테넌트 경계 검증',
+      relationValue(
+        relation,
+        'sender_user_id',
+        graph.userId,
+        graph.otherUserId,
+      ),
+      NOW,
+      NOW,
+      `mo-tenant-${ordinal}`,
+    ),
+  notes: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO notes (
+        id, office_id, conversation_id, author_id, body, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      `note-tenant-${ordinal}`,
+      graph.officeId,
+      relationValue(
+        relation,
+        'conversation_id',
+        graph.conversationId,
+        graph.otherConversationId,
+      ),
+      relationValue(relation, 'author_id', graph.userId, graph.otherUserId),
+      '테넌트 경계 검증',
+      NOW,
+      NOW,
+    ),
+  tasks: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO tasks (
+        id, office_id, conversation_id, name, kind, sort_order, created_by,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
+    ).bind(
+      `task-tenant-${ordinal}`,
+      graph.officeId,
+      relationValue(
+        relation,
+        'conversation_id',
+        graph.conversationId,
+        graph.otherConversationId,
+      ),
+      '테넌트 경계 검증',
+      ordinal,
+      relationValue(relation, 'created_by', graph.userId, graph.otherUserId),
+      NOW,
+      NOW,
+    ),
+  events: (graph, relation, ordinal) =>
+    env.DB.prepare(
+      `INSERT INTO events (
+        office_id, office_seq, type, entity, entity_id, conversation_id,
+        actor_kind, actor_id, payload, created_at
+      ) VALUES (?, ?, 'created', 'message', ?, ?, 'user', ?, '{}', ?)`,
+    ).bind(
+      graph.officeId,
+      1_000 + ordinal,
+      `entity-tenant-${ordinal}`,
+      relationValue(
+        relation,
+        'conversation_id',
+        graph.conversationId,
+        graph.otherConversationId,
+      ),
+      relationValue(relation, 'actor_id', graph.userId, graph.otherUserId),
+      NOW,
+    ),
 }
 
 describe('Initial D1 schema', () => {
@@ -390,6 +823,34 @@ describe('Initial D1 schema', () => {
         )
         .run(),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+  })
+
+  it('rejects every cross-office tenant reference discovered from schema', async () => {
+    const graph = await seedTenantGraph('exhaustive')
+    const relations = await tenantRelations()
+    const relationTables = [
+      ...new Set(relations.map(({ childTable }) => childTable)),
+    ].sort()
+
+    expect(relations.length).toBeGreaterThan(0)
+    expect(relationTables).toEqual(Object.keys(TENANT_INSERT_BUILDERS).sort())
+
+    for (const [ordinal, relation] of relations.entries()) {
+      const key = `${relation.childTable}.${relation.childColumn}->${relation.parentTable}.id`
+      const builder = TENANT_INSERT_BUILDERS[relation.childTable]
+
+      expect(builder, `missing INSERT builder for ${key}`).toBeDefined()
+      if (!builder) throw new Error(`missing INSERT builder for ${key}`)
+
+      await expect(
+        builder(graph, relation, ordinal).run(),
+        `cross-office INSERT unexpectedly succeeded for ${key}`,
+      ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+      expect(
+        relation.hasCompoundForeignKey,
+        `missing compound office FK for ${key}`,
+      ).toBe(true)
+    }
   })
 
   it('rejects outbound messages without a client key', async () => {
