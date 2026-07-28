@@ -17,6 +17,7 @@ import type {
   Toast,
 } from '../types'
 import { CONVERSATIONS, ME, PROFILE, TEAM } from '../data/seed'
+import { DESKTOP_MIN } from '../../shared/breakpoints'
 
 export interface NotifySettings {
   newChat: boolean
@@ -86,9 +87,9 @@ export const initialState: InboxState = {
 
   page: 'chat',
   tab: 'info',
-  // The card only sits beside the thread on desktop; below 1200px it overlays
-  // the conversation, so it starts collapsed there.
-  cardOpen: typeof window === 'undefined' || window.innerWidth >= 1200,
+  // 고객 카드는 desktop에서 대화 옆에 놓이고 그보다 좁으면 오버레이되므로,
+  // 오버레이 구간에서는 닫힌 상태로 시작한다.
+  cardOpen: typeof window === 'undefined' || window.innerWidth >= DESKTOP_MIN,
   mobileView: 'list',
 
   query: '',
