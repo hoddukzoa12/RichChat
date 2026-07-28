@@ -7,8 +7,9 @@ import type { Route, RouteHandler } from '../http/router'
 import { createId, type Clock } from '../lib/ids'
 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1_000
-const MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1_000
 const QUARANTINE_ATTEMPTS = 3
+export const INVALID_ITEM_KEY_PREFIX = 'invalid-item-sha256:'
+const INVALID_ENVELOPE_KEY_PREFIX = 'invalid-envelope-sha256:'
 const SUCCESS_BODY = { code: '10000', message: 'success' } as const
 const RETRY_BODY = { code: '99999', message: 'retry' } as const
 
@@ -42,6 +43,14 @@ interface PreparedMo {
   item: MoItem
   occurredAt: number
   inputIndex: number
+  phoneE164: string
+  channel: SendChannel
+}
+
+interface DeterministicFailure {
+  key: string
+  raw: unknown
+  cause: PayloadValidationError
 }
 
 interface OfficeRow {
@@ -50,6 +59,13 @@ interface OfficeRow {
 
 interface FailureRow {
   attempts: number
+}
+
+class PayloadValidationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'PayloadValidationError'
+  }
 }
 
 const MO_CHANNEL: Record<MoType, SendChannel> = {
@@ -86,7 +102,7 @@ function requiredString(
 ): string {
   const value = source[key]
   if (typeof value !== 'string' || value.length === 0) {
-    throw new TypeError(`${key} 값이 올바르지 않습니다.`)
+    throw new PayloadValidationError(`${key} 값이 올바르지 않습니다.`)
   }
   return value
 }
@@ -97,7 +113,7 @@ function stringValue(
 ): string {
   const value = source[key]
   if (typeof value !== 'string') {
-    throw new TypeError(`${key} 값이 올바르지 않습니다.`)
+    throw new PayloadValidationError(`${key} 값이 올바르지 않습니다.`)
   }
   return value
 }
@@ -113,14 +129,16 @@ function nonNegativeInteger(value: unknown, key: string): number {
     !Number.isSafeInteger(parsed) ||
     parsed < 0
   ) {
-    throw new TypeError(`${key} 값이 올바르지 않습니다.`)
+    throw new PayloadValidationError(`${key} 값이 올바르지 않습니다.`)
   }
   return parsed
 }
 
 function parseContent(value: unknown): MoContent {
   if (!isRecord(value)) {
-    throw new TypeError('contentInfoLst 항목이 올바르지 않습니다.')
+    throw new PayloadValidationError(
+      'contentInfoLst 항목이 올바르지 않습니다.',
+    )
   }
 
   return {
@@ -133,22 +151,24 @@ function parseContent(value: unknown): MoContent {
 
 function parseItem(value: unknown): MoItem {
   if (!isRecord(value)) {
-    throw new TypeError('moLst 항목이 올바르지 않습니다.')
+    throw new PayloadValidationError('moLst 항목이 올바르지 않습니다.')
   }
 
   const moType = value.moType
   if (!isMoType(moType)) {
-    throw new TypeError('moType 값이 올바르지 않습니다.')
+    throw new PayloadValidationError('moType 값이 올바르지 않습니다.')
   }
 
   if (!Array.isArray(value.contentInfoLst)) {
-    throw new TypeError('contentInfoLst 값이 올바르지 않습니다.')
+    throw new PayloadValidationError('contentInfoLst 값이 올바르지 않습니다.')
   }
 
   const contentCnt = nonNegativeInteger(value.contentCnt, 'contentCnt')
   const contentInfoLst = value.contentInfoLst.map(parseContent)
   if (contentCnt !== contentInfoLst.length) {
-    throw new TypeError('contentCnt와 contentInfoLst 길이가 다릅니다.')
+    throw new PayloadValidationError(
+      'contentCnt와 contentInfoLst 길이가 다릅니다.',
+    )
   }
 
   return {
@@ -166,12 +186,12 @@ function parseItem(value: unknown): MoItem {
 
 function parseEnvelope(value: unknown): MoEnvelope {
   if (!isRecord(value) || !Array.isArray(value.moLst)) {
-    throw new TypeError('MO 페이로드가 올바르지 않습니다.')
+    throw new PayloadValidationError('MO 페이로드가 올바르지 않습니다.')
   }
 
   const moCnt = nonNegativeInteger(value.moCnt, 'moCnt')
   if (moCnt !== value.moLst.length) {
-    throw new TypeError('moCnt와 moLst 길이가 다릅니다.')
+    throw new PayloadValidationError('moCnt와 moLst 길이가 다릅니다.')
   }
 
   return { moCnt, moLst: value.moLst }
@@ -212,23 +232,6 @@ export function parseMoRecvDt(value: string): number | null {
   return epoch
 }
 
-function resolveOccurredAt(item: MoItem, receivedAt: number): number {
-  const parsed = parseMoRecvDt(item.moRecvDt)
-  if (
-    parsed === null ||
-    Math.abs(parsed - receivedAt) > MAX_CLOCK_SKEW_MS
-  ) {
-    console.warn('LGU+ MO 수신 시각을 서버 수신 시각으로 대체합니다.', {
-      moKey: item.moKey,
-      moRecvDt: item.moRecvDt,
-      receivedAt,
-    })
-    return receivedAt
-  }
-
-  return parsed
-}
-
 export function normalizeKoreanPhone(value: string): string {
   const digits = value.replace(/[^\d]/g, '')
   if (/^0\d{8,10}$/.test(digits)) {
@@ -237,12 +240,58 @@ export function normalizeKoreanPhone(value: string): string {
   if (/^82\d{8,10}$/.test(digits)) {
     return `+${digits}`
   }
-  throw new TypeError('국내 전화번호 형식이 올바르지 않습니다.')
+  throw new PayloadValidationError(
+    '국내 전화번호 형식이 올바르지 않습니다.',
+  )
 }
 
 async function digest(value: string): Promise<Uint8Array> {
   const bytes = new TextEncoder().encode(value)
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`
+  }
+  if (isRecord(value)) {
+    const entries = Object.keys(value)
+      .sort()
+      .map(
+        (key) => `${JSON.stringify(key)}:${stableJson(value[key])}`,
+      )
+    return `{${entries.join(',')}}`
+  }
+
+  const scalar = JSON.stringify(value)
+  if (scalar === undefined) {
+    throw new Error('JSON 값의 안정 해시를 만들 수 없습니다.')
+  }
+  return scalar
+}
+
+function hex(bytes: Uint8Array): string {
+  let encoded = ''
+  for (const byte of bytes) encoded += byte.toString(16).padStart(2, '0')
+  return encoded
+}
+
+async function syntheticFailureKey(
+  raw: unknown,
+  prefix: string,
+): Promise<string> {
+  return `${prefix}${hex(await digest(stableJson(raw)))}`
+}
+
+async function itemFailureKey(raw: unknown): Promise<string> {
+  if (
+    isRecord(raw) &&
+    typeof raw.moKey === 'string' &&
+    raw.moKey !== ''
+  ) {
+    return raw.moKey
+  }
+  return syntheticFailureKey(raw, INVALID_ITEM_KEY_PREFIX)
 }
 
 async function constantTimeEqual(
@@ -283,6 +332,25 @@ function mimeType(content: MoContent): string {
   return MIME_TYPE_BY_EXTENSION[extension] ?? 'application/octet-stream'
 }
 
+function prepareItem(raw: unknown, inputIndex: number): PreparedMo {
+  const item = parseItem(raw)
+  // 파싱된 시각은 지연 정도와 무관하게 정본이다. 서버 시각으로 대체하지 않는다.
+  const occurredAt = parseMoRecvDt(item.moRecvDt)
+  if (occurredAt === null) {
+    throw new PayloadValidationError(
+      'moRecvDt가 유효한 KST 날짜가 아닙니다.',
+    )
+  }
+
+  return {
+    item,
+    occurredAt,
+    inputIndex,
+    phoneE164: normalizeKoreanPhone(item.moCallback),
+    channel: MO_CHANNEL[item.moType],
+  }
+}
+
 async function findOffice(db: D1Database): Promise<OfficeRow> {
   const office = await db
     .prepare('SELECT id FROM offices ORDER BY created_at, id LIMIT 1')
@@ -314,7 +382,7 @@ async function recordFailure(
   db: D1Database,
   moKey: string,
   raw: unknown,
-  cause: unknown,
+  cause: PayloadValidationError,
   now: number,
 ): Promise<number> {
   const failure = await db
@@ -345,14 +413,29 @@ async function recordFailure(
   return failure.attempts
 }
 
+async function quarantineDeterministicFailure(
+  db: D1Database,
+  failure: DeterministicFailure,
+  now: number,
+): Promise<boolean> {
+  if (await isQuarantined(db, failure.key)) return true
+
+  const attempts = await recordFailure(
+    db,
+    failure.key,
+    failure.raw,
+    failure.cause,
+    now,
+  )
+  return attempts >= QUARANTINE_ATTEMPTS
+}
+
 async function processItem(
   db: D1Database,
   prepared: PreparedMo,
   receivedAt: number,
 ): Promise<void> {
-  const { item, occurredAt } = prepared
-  const channel = MO_CHANNEL[item.moType]
-  const phoneE164 = normalizeKoreanPhone(item.moCallback)
+  const { item, occurredAt, channel, phoneE164 } = prepared
   const office = await findOffice(db)
   const customerId = createId()
   const conversationId = createId()
@@ -562,82 +645,115 @@ export function createMoWebhookHandler(clock: Clock = Date.now): RouteHandler {
       return error('NOT_FOUND', '요청한 API를 찾을 수 없습니다.')
     }
 
+    const receivedAt = clock()
+    let rawEnvelope: unknown
     let envelope: MoEnvelope
     try {
-      envelope = parseEnvelope(await request.json())
-    } catch {
-      return retryResponse(400)
-    }
-
-    const receivedAt = clock()
-    const items: MoItem[] = []
-    for (const raw of envelope.moLst) {
+      const rawBody = await request.text()
+      rawEnvelope = rawBody
       try {
-        items.push(parseItem(raw))
+        rawEnvelope = JSON.parse(rawBody)
       } catch (cause) {
-        const moKey =
-          isRecord(raw) && typeof raw.moKey === 'string' && raw.moKey !== ''
-            ? raw.moKey
-            : null
-        if (moKey === null) return retryResponse(400)
-
-        try {
-          if (await isQuarantined(env.DB, moKey)) continue
-          const attempts = await recordFailure(
-            env.DB,
-            moKey,
-            raw,
-            cause,
-            receivedAt,
-          )
-          if (attempts >= QUARANTINE_ATTEMPTS) continue
-        } catch (failureCause) {
-          console.error('LGU+ MO 유효성 실패 격리 기록에 실패했습니다.', {
-            moKey,
-            error: failureText(failureCause),
-          })
-        }
-        return retryResponse(400)
+        throw new PayloadValidationError(
+          '요청 본문이 JSON 형식이 아닙니다.',
+          { cause },
+        )
       }
-    }
+      envelope = parseEnvelope(rawEnvelope)
+    } catch (cause) {
+      if (!(cause instanceof PayloadValidationError)) {
+        console.error('LGU+ MO 요청 본문을 읽지 못했습니다.', {
+          error: failureText(cause),
+        })
+        return retryResponse()
+      }
 
-    const prepared = items
-      .map<PreparedMo>((item, inputIndex) => ({
-        item,
-        occurredAt: resolveOccurredAt(item, receivedAt),
-        inputIndex,
-      }))
-      .sort(
-        (left, right) =>
-          left.occurredAt - right.occurredAt ||
-          left.inputIndex - right.inputIndex,
-      )
-
-    for (const item of prepared) {
       try {
-        if (await isQuarantined(env.DB, item.item.moKey)) continue
-        await processItem(env.DB, item, receivedAt)
-      } catch (cause) {
-        try {
-          const attempts = await recordFailure(
-            env.DB,
-            item.item.moKey,
-            item.item,
-            cause,
-            receivedAt,
-          )
-          if (attempts >= QUARANTINE_ATTEMPTS) continue
-        } catch (failureCause) {
-          console.error('LGU+ MO 실패 격리 기록에 실패했습니다.', {
-            moKey: item.item.moKey,
-            error: failureText(failureCause),
-          })
-        }
+        const key = await syntheticFailureKey(
+          rawEnvelope,
+          INVALID_ENVELOPE_KEY_PREFIX,
+        )
+        const quarantined = await quarantineDeterministicFailure(
+          env.DB,
+          { key, raw: rawEnvelope, cause },
+          receivedAt,
+        )
+        return quarantined ? successResponse() : retryResponse(400)
+      } catch (failureCause) {
+        console.error('LGU+ MO 본문 실패 격리 기록에 실패했습니다.', {
+          error: failureText(failureCause),
+        })
         return retryResponse()
       }
     }
 
-    return successResponse()
+    // 이 단계는 D1에 접근하지 않는다. 여기서 난 검증 오류만 독약으로 센다.
+    const prepared: PreparedMo[] = []
+    const failures = new Map<string, DeterministicFailure>()
+    for (const [inputIndex, raw] of envelope.moLst.entries()) {
+      try {
+        prepared.push(prepareItem(raw, inputIndex))
+      } catch (cause) {
+        if (!(cause instanceof PayloadValidationError)) {
+          console.error('LGU+ MO 순수 검증 중 내부 오류가 발생했습니다.', {
+            error: failureText(cause),
+          })
+          return retryResponse()
+        }
+
+        try {
+          const key = await itemFailureKey(raw)
+          if (!failures.has(key)) failures.set(key, { key, raw, cause })
+        } catch (hashCause) {
+          console.error('LGU+ MO 격리 키 생성에 실패했습니다.', {
+            error: failureText(hashCause),
+          })
+          return retryResponse()
+        }
+      }
+    }
+
+    let retryDeterministicFailure = false
+    for (const failure of failures.values()) {
+      try {
+        const quarantined = await quarantineDeterministicFailure(
+          env.DB,
+          failure,
+          receivedAt,
+        )
+        if (!quarantined) retryDeterministicFailure = true
+      } catch (failureCause) {
+        // 실패 기록 자체의 D1 오류는 인프라 오류다. 독약 횟수를 추정하지 않는다.
+        console.error('LGU+ MO 유효성 실패 격리 기록에 실패했습니다.', {
+          failureKey: failure.key,
+          error: failureText(failureCause),
+        })
+        return retryResponse()
+      }
+    }
+
+    prepared.sort(
+      (left, right) =>
+        left.occurredAt - right.occurredAt ||
+        left.inputIndex - right.inputIndex,
+    )
+
+    for (const item of prepared) {
+      try {
+        await processItem(env.DB, item, receivedAt)
+      } catch (cause) {
+        // 검증 뒤의 예외는 모두 일시적이다. LGU+ 재전송을 멈추면 안 된다.
+        console.error('LGU+ MO D1 커밋에 실패했습니다.', {
+          moKey: item.item.moKey,
+          error: failureText(cause),
+        })
+        return retryResponse()
+      }
+    }
+
+    return retryDeterministicFailure
+      ? retryResponse(400)
+      : successResponse()
   }
 }
 
