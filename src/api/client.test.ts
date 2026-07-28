@@ -8,7 +8,6 @@ import {
 import {
   customersEndpoint,
   eventsEndpoint,
-  messagesEndpoint,
   notesEndpoint,
   tasksEndpoint,
 } from './endpoints'
@@ -54,7 +53,31 @@ describe('API client', () => {
     await expect(apiRequest('/api/me')).rejects.toMatchObject({
       kind: 'server',
       status: 400,
+      code: 'BAD_REQUEST',
       message: '입력값을 확인해 주세요.',
+    })
+  })
+
+  it('preserves a dedicated message error code for UI handling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          Response.json(
+            {
+              error: {
+                code: 'MSG_EMOJI_UNSUPPORTED',
+                message: '문자 메시지로 보낼 수 없는 이모지가 포함되어 있습니다.',
+              },
+            },
+            { status: 400 },
+          ),
+        ),
+      ),
+    )
+
+    await expect(apiRequest('/api/messages')).rejects.toMatchObject({
+      code: 'MSG_EMOJI_UNSUPPORTED',
     })
   })
 
@@ -116,7 +139,6 @@ describe('API client', () => {
 describe('Endpoint stubs', () => {
   it('fails explicitly for every endpoint owned by later slices', () => {
     const stubs = [
-      messagesEndpoint,
       customersEndpoint,
       notesEndpoint,
       tasksEndpoint,

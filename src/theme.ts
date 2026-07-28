@@ -1,4 +1,4 @@
-import type { Status } from './types'
+import type { DeliveryStatus, Status } from './types'
 
 export const STATUS_BADGE: Record<Status, string> = {
   미처리: 'text-open-fg bg-open-bg',
@@ -16,6 +16,15 @@ export const STATUS_DOT: Record<Status, string> = {
   미처리: 'bg-open-dot',
   처리중: 'bg-doing-dot',
   완료: 'bg-done-dot',
+}
+
+export const DELIVERY_STATUS_BADGE: Record<DeliveryStatus, string> = {
+  수신: 'text-ink-500 bg-fill',
+  대기: 'text-ink-500 bg-fill',
+  접수: 'text-doing-fg bg-doing-bg',
+  전송중: 'text-doing-fg bg-doing-bg',
+  완료: 'text-done-fg bg-done-bg',
+  실패: 'text-open-fg bg-open-bg',
 }
 
 /** 한세무 gets the purple tone; everyone else falls back to brand blue. */
