@@ -1,4 +1,5 @@
 import { STATUSES, type Status } from '../domain'
+import type { Note } from './note'
 import type { Task } from './task'
 
 export const CONVERSATION_SCOPES = ['all', 'mine', 'none'] as const
@@ -83,16 +84,6 @@ export interface ConversationAssignee {
   title: string
 }
 
-export interface ConversationNote {
-  id: string
-  authorId: string
-  authorName: string
-  authorTitle: string
-  body: string
-  createdAt: number
-  updatedAt: number
-}
-
 /**
  * 목록 항목과 분리된 대화 상세 읽기 모델이다.
  * 메시지는 별도 페이지 API에서 가져오므로 이 타입에 포함하지 않는다.
@@ -106,7 +97,7 @@ export interface ConversationDetail {
   customer: ConversationCustomer
   assignees: ConversationAssignee[]
   tasks: Task[]
-  notes: ConversationNote[]
+  notes: Note[]
 }
 
 export interface ConversationDetailResponse {

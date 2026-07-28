@@ -1,3 +1,4 @@
+import type { Note } from '../../shared/wire/note'
 import type { Task } from '../../shared/wire/task'
 import type {
   AttachmentDownloadStatus,
@@ -11,7 +12,6 @@ import type {
   ConversationAssignee,
   ConversationDetail,
   ConversationDetailResponse,
-  ConversationNote,
 } from '../../shared/wire/conversation'
 import {
   MESSAGE_PAGE_SIZE,
@@ -67,7 +67,6 @@ interface NoteRow {
   id: string
   author_id: string
   author_name: string
-  author_title: string
   body: string
   created_at: number
   updated_at: number
@@ -179,12 +178,11 @@ function toTask(row: TaskRow): Task {
   }
 }
 
-function toNote(row: NoteRow): ConversationNote {
+function toNote(row: NoteRow): Note {
   return {
     id: row.id,
     authorId: row.author_id,
     authorName: row.author_name,
-    authorTitle: row.author_title,
     body: row.body,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -333,7 +331,6 @@ async function getConversationDetail(
         notes.id,
         notes.author_id,
         users.name AS author_name,
-        users.title AS author_title,
         notes.body,
         notes.created_at,
         notes.updated_at

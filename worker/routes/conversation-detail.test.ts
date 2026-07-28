@@ -450,7 +450,6 @@ describe('Conversation detail routes', () => {
           {
             authorId: seed.senderId,
             authorName: seed.senderName,
-            authorTitle: '세무사',
             body: '내부 확인 필요',
           },
         ],
