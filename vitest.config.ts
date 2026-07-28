@@ -21,6 +21,7 @@ export default defineWorkersConfig(async () => {
             },
             bindings: {
               DEV_LOGIN_ENABLED: 'true',
+              LGU_MO_WEBHOOK_SECRET: 'test-mo-webhook-secret',
               TEST_MIGRATIONS: migrations,
             },
           },
