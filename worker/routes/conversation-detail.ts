@@ -1,3 +1,4 @@
+import type { Task } from '../../shared/wire/task'
 import type {
   AttachmentDownloadStatus,
   DeliveryStatus,
@@ -11,7 +12,6 @@ import type {
   ConversationDetail,
   ConversationDetailResponse,
   ConversationNote,
-  ConversationTask,
 } from '../../shared/wire/conversation'
 import {
   MESSAGE_PAGE_SIZE,
@@ -166,7 +166,7 @@ function toAssignee(row: AssigneeRow): ConversationAssignee {
   }
 }
 
-function toTask(row: TaskRow): ConversationTask {
+function toTask(row: TaskRow): Task {
   return {
     id: row.id,
     name: row.name,

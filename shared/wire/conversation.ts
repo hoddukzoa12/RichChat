@@ -1,4 +1,5 @@
-import { STATUSES, type Status, type TaskKind } from '../domain'
+import { STATUSES, type Status } from '../domain'
+import type { Task } from './task'
 
 export const CONVERSATION_SCOPES = ['all', 'mine', 'none'] as const
 export const CONVERSATION_ARCHIVE_FILTERS = ['active', 'archived'] as const
@@ -82,17 +83,6 @@ export interface ConversationAssignee {
   title: string
 }
 
-export interface ConversationTask {
-  id: string
-  name: string
-  sub: string
-  kind: TaskKind
-  sortOrder: number
-  createdById: string
-  createdAt: number
-  updatedAt: number
-}
-
 export interface ConversationNote {
   id: string
   authorId: string
@@ -115,7 +105,7 @@ export interface ConversationDetail {
   version: number
   customer: ConversationCustomer
   assignees: ConversationAssignee[]
-  tasks: ConversationTask[]
+  tasks: Task[]
   notes: ConversationNote[]
 }
 
