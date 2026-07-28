@@ -3,8 +3,12 @@
 **인박스 목록을 서버 데이터로 돌린다.** 지금은 모든 대화의 모든 메시지를
 브라우저 메모리에 올려놓고 필터링·집계한다.
 
-`src/state/selectors.ts`의 다섯 함수를 **삭제**하고 `GET /api/conversations`
+`src/state/selectors.ts`의 **다섯 함수만** 삭제하고 `GET /api/conversations`
 (B6)의 응답을 그대로 쓴다.
+
+같은 파일의 `assigneeLabel`(표시 문구), `answerFor`·`AI_SUGGESTIONS`(AI 탭)은
+**그대로 둬라.** AI 탭 정리는 F8 소유고, 지금 지우면 그 화면이 죽는다.
+파일을 통째로 지우지 마라.
 
 ## 지금 무엇이 틀렸는가
 
