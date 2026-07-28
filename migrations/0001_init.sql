@@ -28,6 +28,8 @@ CREATE UNIQUE INDEX ux_users_email ON users(email);
 CREATE UNIQUE INDEX ux_users_works_sub
   ON users(works_sub)
   WHERE works_sub IS NOT NULL;
+CREATE UNIQUE INDEX ux_users_id_office
+  ON users(id, office_id);
 
 CREATE TABLE user_settings (
   user_id TEXT PRIMARY KEY REFERENCES users(id),
@@ -76,6 +78,8 @@ CREATE TABLE customers (
 
 CREATE UNIQUE INDEX ux_customers_phone
   ON customers(office_id, phone_e164);
+CREATE UNIQUE INDEX ux_customers_id_office
+  ON customers(id, office_id);
 
 CREATE TABLE customer_fields (
   id TEXT PRIMARY KEY,
@@ -91,22 +95,28 @@ CREATE TABLE customer_fields (
 CREATE TABLE conversations (
   id TEXT PRIMARY KEY,
   office_id TEXT NOT NULL REFERENCES offices(id),
-  customer_id TEXT NOT NULL REFERENCES customers(id),
+  customer_id TEXT NOT NULL,
   channel TEXT NOT NULL CHECK (channel IN ('카톡', '문자')),
   status TEXT NOT NULL DEFAULT '미처리'
     CHECK (status IN ('미처리', '처리중', '완료')),
   label TEXT NOT NULL DEFAULT '',
   archived_at INTEGER,
-  last_message_id TEXT REFERENCES messages(id),
+  last_message_id TEXT,
   last_message_at INTEGER,
   inbound_count INTEGER NOT NULL DEFAULT 0,
   version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (customer_id, office_id)
+    REFERENCES customers(id, office_id),
+  FOREIGN KEY (last_message_id, id)
+    REFERENCES messages(id, conversation_id)
 ) STRICT;
 
 CREATE UNIQUE INDEX ux_conv_customer
   ON conversations(office_id, customer_id);
+CREATE UNIQUE INDEX ux_conversations_id_office
+  ON conversations(id, office_id);
 CREATE INDEX ix_conversations_active_last_message
   ON conversations(office_id, last_message_at DESC)
   WHERE archived_at IS NULL;
@@ -115,11 +125,18 @@ CREATE INDEX ix_conversations_archived_last_message
   WHERE archived_at IS NOT NULL;
 
 CREATE TABLE conversation_assignees (
-  conversation_id TEXT NOT NULL REFERENCES conversations(id),
-  user_id TEXT NOT NULL REFERENCES users(id),
+  conversation_id TEXT NOT NULL,
+  office_id TEXT NOT NULL REFERENCES offices(id),
+  user_id TEXT NOT NULL,
   assigned_at INTEGER NOT NULL,
-  assigned_by TEXT REFERENCES users(id),
-  PRIMARY KEY (conversation_id, user_id)
+  assigned_by TEXT,
+  PRIMARY KEY (conversation_id, user_id),
+  FOREIGN KEY (conversation_id, office_id)
+    REFERENCES conversations(id, office_id),
+  FOREIGN KEY (user_id, office_id)
+    REFERENCES users(id, office_id),
+  FOREIGN KEY (assigned_by, office_id)
+    REFERENCES users(id, office_id)
 ) STRICT;
 
 CREATE TABLE conversation_reads (
@@ -133,12 +150,12 @@ CREATE TABLE conversation_reads (
 CREATE TABLE messages (
   id TEXT PRIMARY KEY,
   office_id TEXT NOT NULL REFERENCES offices(id),
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL,
   direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
   channel TEXT NOT NULL CHECK (channel IN ('카톡', 'SMS', 'LMS', 'MMS')),
   title TEXT,
   body TEXT NOT NULL,
-  sender_user_id TEXT REFERENCES users(id),
+  sender_user_id TEXT,
   occurred_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   mo_key TEXT,
@@ -148,7 +165,12 @@ CREATE TABLE messages (
   result_code TEXT,
   delivered_at INTEGER,
   error_text TEXT,
+  FOREIGN KEY (conversation_id, office_id)
+    REFERENCES conversations(id, office_id) ON DELETE CASCADE,
+  FOREIGN KEY (sender_user_id, office_id)
+    REFERENCES users(id, office_id),
   CHECK (direction = 'in' OR sender_user_id IS NOT NULL),
+  CHECK (direction = 'in' OR client_key IS NOT NULL),
   CHECK (direction = 'out' OR mo_key IS NOT NULL),
   CHECK (
     (direction = 'in' AND delivery_status = '수신')
@@ -168,6 +190,8 @@ CREATE UNIQUE INDEX ux_msg_client_key
 CREATE UNIQUE INDEX ux_msg_msg_key
   ON messages(msg_key)
   WHERE msg_key IS NOT NULL;
+CREATE UNIQUE INDEX ux_messages_id_conversation
+  ON messages(id, conversation_id);
 CREATE INDEX ix_messages_conversation_occurred
   ON messages(conversation_id, occurred_at, id);
 CREATE INDEX ix_messages_pending

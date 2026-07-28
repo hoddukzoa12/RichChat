@@ -1,34 +1,76 @@
 import { env } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
+import {
+  CHANNELS,
+  DELIVERY_STATUSES,
+  DIRECTIONS,
+  ROLES,
+  SEND_CHANNELS,
+  STATUSES,
+  TASK_KINDS,
+  USER_STATUSES,
+} from '../shared/domain'
 
 const NOW = 1_722_134_400_000
 
-const TABLE_NAMES = [
-  'offices',
-  'users',
-  'user_settings',
-  'office_settings',
-  'auth_sessions',
-  'oauth_states',
-  'customers',
-  'customer_fields',
-  'conversations',
-  'conversation_assignees',
-  'conversation_reads',
-  'messages',
-  'mo_failures',
-  'notes',
-  'tasks',
-  'office_channels',
-  'lgu_tokens',
-  'events',
-] as const
+const SYSTEM_TABLES = new Set(['_cf_METADATA', 'd1_migrations'])
+
+const PARTIAL_INDEX_PREDICATES: Record<string, string> = {
+  ux_offices_email_domain: 'WHERE email_domain IS NOT NULL',
+  ux_users_works_sub: 'WHERE works_sub IS NOT NULL',
+  ix_conversations_active_last_message: 'WHERE archived_at IS NULL',
+  ix_conversations_archived_last_message: 'WHERE archived_at IS NOT NULL',
+  ux_msg_mo_key: 'WHERE mo_key IS NOT NULL',
+  ux_msg_client_key: 'WHERE client_key IS NOT NULL',
+  ux_msg_msg_key: 'WHERE msg_key IS NOT NULL',
+  ix_messages_pending:
+    "WHERE delivery_status IN ('대기', '접수', '전송중')",
+  ux_channel_default: 'WHERE is_default = 1',
+}
 
 interface SeedIds {
   officeId: string
   userId: string
   customerId: string
   conversationId: string
+}
+
+interface TableListRow {
+  schema: string
+  name: string
+  type: string
+  strict: number
+}
+
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim()
+}
+
+function sqlValues(values: readonly string[]): string {
+  return values.map((value) => `'${value}'`).join(', ')
+}
+
+async function applicationTables(): Promise<TableListRow[]> {
+  const { results } = await env.DB.prepare('PRAGMA table_list').all<TableListRow>()
+
+  return results.filter(
+    ({ schema, name, type }) =>
+      schema === 'main' &&
+      type === 'table' &&
+      !name.startsWith('sqlite_') &&
+      !SYSTEM_TABLES.has(name),
+  )
+}
+
+async function tableSql(name: string): Promise<string> {
+  const row = await env.DB.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+  )
+    .bind(name)
+    .first<{ sql: string }>()
+
+  expect(row).not.toBeNull()
+  return normalizeSql(row?.sql ?? '')
 }
 
 async function seedConversation(suffix: string): Promise<SeedIds> {
@@ -91,6 +133,8 @@ function insertMessage(
   ids: SeedIds,
   values: {
     id: string
+    officeId?: string
+    conversationId?: string
     direction: 'in' | 'out'
     senderUserId?: string | null
     moKey?: string | null
@@ -107,8 +151,8 @@ function insertMessage(
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     values.id,
-    ids.officeId,
-    ids.conversationId,
+    values.officeId ?? ids.officeId,
+    values.conversationId ?? ids.conversationId,
     values.direction,
     values.direction === 'in' ? 'SMS' : 'LMS',
     '테스트 메시지',
@@ -164,6 +208,7 @@ describe('Initial D1 schema', () => {
       insertMessage(ids, {
         id: 'message-sender',
         direction: 'out',
+        clientKey: 'client-sender',
         deliveryStatus: '대기',
       }).run(),
     ).rejects.toThrow()
@@ -228,7 +273,254 @@ describe('Initial D1 schema', () => {
           NOW,
         )
         .run(),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/UNIQUE constraint failed/)
+  })
+
+  it('rejects a conversation linked to another office customer', async () => {
+    const ids = await seedConversation('tenant-customer')
+    const otherOfficeId = 'office-tenant-customer-other'
+    const otherCustomerId = 'customer-tenant-customer-other'
+
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
+      ).bind(otherOfficeId, '다른 세무법인', NOW),
+      env.DB.prepare(
+        `INSERT INTO customers (
+          id, office_id, phone_e164, name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        otherCustomerId,
+        otherOfficeId,
+        '+821099990001',
+        '다른 고객',
+        NOW,
+        NOW,
+      ),
+    ])
+
+    await expect(
+      env.DB.prepare(
+        `INSERT INTO conversations (
+          id, office_id, customer_id, channel, created_at, updated_at
+        ) VALUES (?, ?, ?, '문자', ?, ?)`,
+      )
+        .bind(
+          'conversation-cross-office',
+          ids.officeId,
+          otherCustomerId,
+          NOW,
+          NOW,
+        )
+        .run(),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+  })
+
+  it('rejects a message linked to another office conversation', async () => {
+    const ids = await seedConversation('tenant-message')
+    const otherOfficeId = 'office-tenant-message-other'
+
+    await env.DB.prepare(
+      'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
+    )
+      .bind(otherOfficeId, '다른 세무법인', NOW)
+      .run()
+
+    await expect(
+      insertMessage(ids, {
+        id: 'message-cross-office',
+        officeId: otherOfficeId,
+        direction: 'in',
+        moKey: 'mo-cross-office',
+        deliveryStatus: '수신',
+      }).run(),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+  })
+
+  it('rejects an assignee from another office', async () => {
+    const ids = await seedConversation('tenant-assignee')
+    const otherOfficeId = 'office-tenant-assignee-other'
+    const otherUserId = 'user-tenant-assignee-other'
+
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
+      ).bind(otherOfficeId, '다른 세무법인', NOW),
+      env.DB.prepare(
+        `INSERT INTO users (
+          id, office_id, email, name, title, role, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        otherUserId,
+        otherOfficeId,
+        'other-assignee@rich.example',
+        '타사 담당자',
+        '세무사',
+        '세무사',
+        '활성',
+        NOW,
+        NOW,
+      ),
+    ])
+
+    const sql = `INSERT INTO conversation_assignees (
+      conversation_id, office_id, user_id, assigned_at, assigned_by
+    ) VALUES (?, ?, ?, ?, ?)`
+
+    await expect(
+      env.DB.prepare(sql)
+        .bind(
+          ids.conversationId,
+          otherOfficeId,
+          otherUserId,
+          NOW,
+          otherUserId,
+        )
+        .run(),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+
+    await expect(
+      env.DB.prepare(sql)
+        .bind(
+          ids.conversationId,
+          ids.officeId,
+          otherUserId,
+          NOW,
+          ids.userId,
+        )
+        .run(),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+  })
+
+  it('rejects outbound messages without a client key', async () => {
+    const ids = await seedConversation('client-required')
+
+    await expect(
+      insertMessage(ids, {
+        id: 'message-client-required',
+        direction: 'out',
+        senderUserId: ids.userId,
+        deliveryStatus: '대기',
+      }).run(),
+    ).rejects.toThrow(
+      /CHECK constraint failed: direction = 'in' OR client_key IS NOT NULL/,
+    )
+  })
+
+  it('rejects a last-message pointer to another conversation', async () => {
+    const ids = await seedConversation('last-message-mismatch')
+    const otherCustomerId = 'customer-last-message-other'
+    const otherConversationId = 'conversation-last-message-other'
+    const otherMessageId = 'message-last-message-other'
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO customers (
+          id, office_id, phone_e164, name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        otherCustomerId,
+        ids.officeId,
+        '+821099990002',
+        '다른 고객',
+        NOW,
+        NOW,
+      ),
+      env.DB.prepare(
+        `INSERT INTO conversations (
+          id, office_id, customer_id, channel, created_at, updated_at
+        ) VALUES (?, ?, ?, '문자', ?, ?)`,
+      ).bind(
+        otherConversationId,
+        ids.officeId,
+        otherCustomerId,
+        NOW,
+        NOW,
+      ),
+    ])
+
+    await insertMessage(ids, {
+      id: otherMessageId,
+      conversationId: otherConversationId,
+      direction: 'in',
+      moKey: 'mo-last-message-other',
+      deliveryStatus: '수신',
+    }).run()
+
+    await expect(
+      env.DB.prepare(
+        `UPDATE conversations
+        SET last_message_id = ?, last_message_at = ?, updated_at = ?
+        WHERE id = ?`,
+      )
+        .bind(otherMessageId, NOW, NOW, ids.conversationId)
+        .run(),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/)
+  })
+
+  it('supports the inbound message projection write order', async () => {
+    const ids = await seedConversation('inbound-order')
+    const messageId = 'message-inbound-order'
+
+    await insertMessage(ids, {
+      id: messageId,
+      direction: 'in',
+      moKey: 'mo-inbound-order',
+      deliveryStatus: '수신',
+    }).run()
+    const update = await env.DB.prepare(
+      `UPDATE conversations
+      SET last_message_id = ?, last_message_at = ?, updated_at = ?
+      WHERE id = ?`,
+    )
+      .bind(messageId, NOW, NOW, ids.conversationId)
+      .run()
+    const conversation = await env.DB.prepare(
+      `SELECT last_message_id, last_message_at
+      FROM conversations
+      WHERE id = ?`,
+    )
+      .bind(ids.conversationId)
+      .first<{ last_message_id: string; last_message_at: number }>()
+
+    expect(update.meta.changes).toBe(1)
+    expect(conversation).toEqual({
+      last_message_id: messageId,
+      last_message_at: NOW,
+    })
+  })
+
+  it('cascades messages when deleting a conversation with a last-message pointer', async () => {
+    const ids = await seedConversation('delete-cascade')
+    const messageId = 'message-delete-cascade'
+
+    await insertMessage(ids, {
+      id: messageId,
+      direction: 'in',
+      moKey: 'mo-delete-cascade',
+      deliveryStatus: '수신',
+    }).run()
+    await env.DB.prepare(
+      `UPDATE conversations
+      SET last_message_id = ?, last_message_at = ?, updated_at = ?
+      WHERE id = ?`,
+    )
+      .bind(messageId, NOW, NOW, ids.conversationId)
+      .run()
+
+    const deletion = await env.DB.prepare(
+      'DELETE FROM conversations WHERE id = ?',
+    )
+      .bind(ids.conversationId)
+      .run()
+    const remaining = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?',
+    )
+      .bind(ids.conversationId)
+      .first<{ count: number }>()
+
+    expect(deletion.meta.changes).toBe(2)
+    expect(remaining?.count).toBe(0)
   })
 
   it('rejects duplicate event sequences within an office', async () => {
@@ -246,18 +538,132 @@ describe('Initial D1 schema', () => {
   })
 
   it('marks every application table as STRICT', async () => {
-    const { results } = await env.DB.prepare('PRAGMA table_list').all<{
-      name: string
-      strict: number
-    }>()
-    const strictByName = new Map(
-      results
-        .filter(({ name }) => TABLE_NAMES.includes(name as (typeof TABLE_NAMES)[number]))
-        .map(({ name, strict }) => [name, strict]),
+    const tables = await applicationTables()
+
+    expect(tables.length).toBeGreaterThan(0)
+    expect(tables.filter(({ strict }) => strict !== 1)).toEqual([])
+  })
+
+  it('keeps every time column as INTEGER', async () => {
+    const tables = await applicationTables()
+    const timeColumns: Array<{ table: string; column: string; type: string }> = []
+
+    for (const table of tables) {
+      const { results } = await env.DB.prepare(
+        'SELECT name, type FROM pragma_table_info(?)',
+      )
+        .bind(table.name)
+        .all<{ name: string; type: string }>()
+
+      for (const column of results) {
+        if (column.name.endsWith('_at') || column.name.endsWith('_until')) {
+          timeColumns.push({
+            table: table.name,
+            column: column.name,
+            type: column.type,
+          })
+        }
+      }
+    }
+
+    expect(timeColumns.length).toBeGreaterThan(0)
+    expect(timeColumns.filter(({ type }) => type !== 'INTEGER')).toEqual([])
+  })
+
+  it('keeps shared domain values aligned with database CHECK constraints', async () => {
+    const usersSql = await tableSql('users')
+    const conversationsSql = await tableSql('conversations')
+    const messagesSql = await tableSql('messages')
+    const tasksSql = await tableSql('tasks')
+
+    expect(usersSql).toContain(`role IN (${sqlValues(ROLES)})`)
+    expect(usersSql).toContain(`status IN (${sqlValues(USER_STATUSES)})`)
+    expect(conversationsSql).toContain(`channel IN (${sqlValues(CHANNELS)})`)
+    expect(conversationsSql).toContain(`status IN (${sqlValues(STATUSES)})`)
+    expect(messagesSql).toContain(`direction IN (${sqlValues(DIRECTIONS)})`)
+    expect(messagesSql).toContain(`channel IN (${sqlValues(SEND_CHANNELS)})`)
+    expect(messagesSql).toContain(
+      `delivery_status = '${DELIVERY_STATUSES[0]}'`,
+    )
+    expect(messagesSql).toContain(
+      `delivery_status IN (${sqlValues(DELIVERY_STATUSES.slice(1))})`,
+    )
+    expect(tasksSql).toContain(`kind IN (${sqlValues(TASK_KINDS)})`)
+  })
+
+  it('keeps every partial index predicate exact', async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT name, sql
+      FROM sqlite_schema
+      WHERE type = 'index' AND sql LIKE '% WHERE %'`,
+    ).all<{ name: string; sql: string }>()
+    const actualByName = new Map(
+      results.map(({ name, sql }) => [name, normalizeSql(sql)]),
     )
 
-    expect([...strictByName.keys()].sort()).toEqual([...TABLE_NAMES].sort())
-    expect([...strictByName.values()]).toEqual(TABLE_NAMES.map(() => 1))
+    expect([...actualByName.keys()].sort()).toEqual(
+      Object.keys(PARTIAL_INDEX_PREDICATES).sort(),
+    )
+    for (const [name, predicate] of Object.entries(
+      PARTIAL_INDEX_PREDICATES,
+    )) {
+      expect(actualByName.get(name)).toContain(predicate)
+    }
+  })
+
+  it('allows multiple rows outside partial unique index predicates', async () => {
+    const ids = await seedConversation('partial-null')
+
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
+      ).bind('office-partial-null-other', '다른 세무법인', NOW),
+      env.DB.prepare(
+        `INSERT INTO users (
+          id, office_id, email, name, title, role, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        'user-partial-null-other',
+        ids.officeId,
+        'partial-null-other@rich.example',
+        '다른 담당자',
+        '세무사',
+        '세무사',
+        '활성',
+        NOW,
+        NOW,
+      ),
+      env.DB.prepare(
+        `INSERT INTO office_channels (
+          id, office_id, kind, value, is_default, active, created_at
+        ) VALUES (?, ?, 'sms_callback', ?, 0, 1, ?)`,
+      ).bind('channel-partial-null-1', ids.officeId, '0211111111', NOW),
+      env.DB.prepare(
+        `INSERT INTO office_channels (
+          id, office_id, kind, value, is_default, active, created_at
+        ) VALUES (?, ?, 'sms_callback', ?, 0, 1, ?)`,
+      ).bind('channel-partial-null-2', ids.officeId, '0222222222', NOW),
+    ])
+    await insertMessage(ids, {
+      id: 'message-partial-null-1',
+      direction: 'in',
+      moKey: 'mo-partial-null-1',
+      deliveryStatus: '수신',
+    }).run()
+    await insertMessage(ids, {
+      id: 'message-partial-null-2',
+      direction: 'in',
+      moKey: 'mo-partial-null-2',
+      deliveryStatus: '수신',
+    }).run()
+
+    const messages = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+      FROM messages
+      WHERE client_key IS NULL AND msg_key IS NULL`,
+    ).first<{ count: number }>()
+
+    expect(messages?.count).toBe(2)
   })
 
   it('rejects duplicate outbound idempotency and LGU+ message keys', async () => {
