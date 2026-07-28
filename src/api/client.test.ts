@@ -5,8 +5,6 @@ import {
   apiRequest,
   onUnauthorized,
 } from './client'
-import { eventsEndpoint } from './endpoints'
-import { EndpointStubError } from './endpointStub'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -128,15 +126,5 @@ describe('API client', () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     )
     expect(result.clientKey).toBe(sent.clientKey)
-  })
-})
-
-describe('Endpoint stubs', () => {
-  it('fails explicitly for every endpoint owned by later slices', () => {
-    const stubs = [eventsEndpoint]
-
-    for (const stub of stubs) {
-      expect(stub).toThrow(EndpointStubError)
-    }
   })
 })

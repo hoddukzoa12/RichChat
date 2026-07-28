@@ -13,6 +13,7 @@ import type { MeUser } from '../../shared/wire/settings'
 import { ApiRequestError } from '../api/client'
 import { useAuth } from '../api/AuthGate'
 import { getOfficeMembers } from '../api/endpoints'
+import { useRealtime } from '../hooks/useRealtime'
 import type { Conversation } from '../types'
 import { answerFor } from './selectors'
 import { currentConv, initialState, reducer, type Action, type InboxState } from './inbox'
@@ -69,6 +70,7 @@ export function InboxProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState)
   const { me } = useAuth()
   const aiTimer = useRef<number | undefined>(undefined)
+  useRealtime(state, dispatch)
 
   // F4/F5가 상세 읽기 모델로 교체한다.
   const cur = useMemo(
