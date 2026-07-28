@@ -1,6 +1,4 @@
-import { ME } from '../data/seed'
-import type { AiChatMessage, EditDraft, TaskDraft, TaskKind } from '../types'
-import { currentConv, patchSelectedConversation } from './conversations'
+import type { AiChatMessage, EditDraft, TaskDraft } from '../types'
 import type { ActionHandlers, InboxState } from './inbox'
 
 export interface CustomerCardState {
@@ -11,7 +9,7 @@ export interface CustomerCardState {
   noteEdit: number | null
   addingNote: boolean
   noteDraft: string
-  aiChats: Record<number, AiChatMessage[]>
+  aiChats: Record<string, AiChatMessage[]>
   aiDraft: string
   aiLoading: boolean
 }
@@ -53,75 +51,33 @@ export type CustomerCardAction =
   | { type: 'setNoteDraft'; value: string }
   | { type: 'setAiDraft'; value: string }
   | { type: 'askAi'; question: string }
-  | { type: 'aiReply'; id: number; text: string }
-
-interface SavedTask {
-  badge: string
-  kind: Extract<TaskKind, 'warn' | 'idle'>
-}
-
-const savedTaskByKind: Record<TaskKind, SavedTask> = {
-  warn: { badge: '진행', kind: 'warn' },
-  idle: { badge: '대기', kind: 'idle' },
-  done: { badge: '완료', kind: 'idle' },
-}
-
-function noteStamp(now: Date): string {
-  return `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(
-    now.getMinutes(),
-  ).padStart(2, '0')}`
-}
+  | { type: 'aiReply'; id: string; text: string }
 
 export const customerCardHandlers = {
-  toggleTodo: (state, action) => ({
-    ...state,
-    convs: patchSelectedConversation(state, (conversation) => ({
-      todos: conversation.todos.map((todo, index) =>
-        index === action.index ? { ...todo, done: !todo.done } : todo,
-      ),
-    })),
-  }),
-
-  linkFolder: (state) => ({
-    ...state,
-    convs: patchSelectedConversation(state, (conversation) => ({
-      folderLinked: true,
-      folderPath: conversation.folderPath || `/고객사/${conversation.name}`,
-      docCount: conversation.docCount || 3,
-    })),
-  }),
-
-  unlinkFolder: (state) => ({
-    ...state,
-    convs: patchSelectedConversation(state, () => ({ folderLinked: false })),
-  }),
-
-  startEdit: (state) => {
-    const conversation = currentConv(state)
-    return {
-      ...state,
-      editDraft: {
-        name: conversation.name,
-        org: conversation.orgLine,
-        fields: conversation.fields.map((field) => ({ ...field })),
-      },
-    }
+  // F5가 채운다.
+  toggleTodo: (state, action) => {
+    void action.index
+    return state
   },
+
+  // F5가 채운다.
+  linkFolder: (state) => state,
+
+  // F5가 채운다.
+  unlinkFolder: (state) => state,
+
+  // F5가 채운다.
+  startEdit: (state) => state,
 
   cancelEdit: (state) => ({ ...state, editDraft: null }),
 
   saveEdit: (state) => {
     const draft = state.editDraft
     if (!draft) return state
+    // F5가 채운다.
     return {
       ...state,
       editDraft: null,
-      convs: patchSelectedConversation(state, () => ({
-        name: draft.name,
-        orgLine: draft.org,
-        company: draft.org.split(' · ')[0],
-        fields: draft.fields,
-      })),
     }
   },
 
@@ -156,12 +112,12 @@ export const customerCardHandlers = {
   }),
 
   editTask: (state, action) => {
-    const task = currentConv(state).tasks[action.index]
+    // F5가 채운다.
     return {
       ...state,
       taskEdit: action.index,
       addingTask: false,
-      taskDraft: { name: task.name, sub: task.sub, kind: task.kind },
+      taskDraft: { name: '', sub: '', kind: 'idle' },
     }
   },
 
@@ -173,36 +129,21 @@ export const customerCardHandlers = {
   }),
 
   saveTask: (state) => {
-    const draft = state.taskDraft
-    const name = draft.name.trim()
     const reset = {
       ...state,
       addingTask: false,
       taskEdit: null,
       taskDraft: { name: '', sub: '', kind: 'idle' as const },
     }
-    if (!name) return reset
-    const saved = savedTaskByKind[draft.kind]
-    const row = { name, sub: draft.sub, badge: saved.badge, kind: saved.kind }
-    const index = state.taskEdit
-    return {
-      ...reset,
-      convs: patchSelectedConversation(state, (conversation) => ({
-        tasks:
-          index === null
-            ? [...conversation.tasks, row]
-            : conversation.tasks.map((task, taskIndex) => (taskIndex === index ? row : task)),
-      })),
-    }
+    // F5가 채운다.
+    return reset
   },
 
-  removeTask: (state, action) => ({
-    ...state,
-    taskEdit: null,
-    convs: patchSelectedConversation(state, (conversation) => ({
-      tasks: conversation.tasks.filter((_, index) => index !== action.index),
-    })),
-  }),
+  removeTask: (state, action) => {
+    // F5가 채운다.
+    void action.index
+    return { ...state, taskEdit: null }
+  },
 
   setTaskDraft: (state, action) => ({
     ...state,
@@ -220,7 +161,8 @@ export const customerCardHandlers = {
     ...state,
     noteEdit: action.index,
     addingNote: false,
-    noteDraft: currentConv(state).notes[action.index].text,
+    // F5가 채운다.
+    noteDraft: '',
   }),
 
   cancelNote: (state) => ({
@@ -231,32 +173,17 @@ export const customerCardHandlers = {
   }),
 
   saveNote: (state, action) => {
-    const text = state.noteDraft.trim()
     const reset = { ...state, addingNote: false, noteEdit: null, noteDraft: '' }
-    if (!text) return reset
-    const stamp = noteStamp(new Date(action.now))
-    const index = state.noteEdit
-    return {
-      ...reset,
-      convs: patchSelectedConversation(state, (conversation) => ({
-        notes:
-          index === null
-            ? [...conversation.notes, { author: ME, time: stamp, text }]
-            : conversation.notes.map((note, noteIndex) =>
-                noteIndex === index ? { ...note, text, time: `${stamp} 수정` } : note,
-              ),
-      })),
-    }
+    // F5가 채운다.
+    void action.now
+    return reset
   },
 
-  removeNote: (state, action) => ({
-    ...state,
-    noteEdit: null,
-    noteDraft: '',
-    convs: patchSelectedConversation(state, (conversation) => ({
-      notes: conversation.notes.filter((_, index) => index !== action.index),
-    })),
-  }),
+  removeNote: (state, action) => {
+    // F5가 채운다.
+    void action.index
+    return { ...state, noteEdit: null, noteDraft: '' }
+  },
 
   setNoteDraft: (state, action) => ({ ...state, noteDraft: action.value }),
 
@@ -264,7 +191,7 @@ export const customerCardHandlers = {
 
   askAi: (state, action) => {
     const question = action.question.trim()
-    if (!question) return state
+    if (!question || state.selected === null) return state
     const id = state.selected
     return {
       ...state,
