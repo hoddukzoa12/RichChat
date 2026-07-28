@@ -94,6 +94,26 @@ function run(actions: CustomerCardDataAction[]): CustomerCardDataState {
 }
 
 describe('Customer card model', () => {
+  it('resets only transient card editors when the selected conversation changes', () => {
+    const state = run([
+      { type: 'cardLoadSucceeded', detail: DETAIL },
+      { type: 'startEdit', conversationId: DETAIL.id },
+      { type: 'addTask' },
+      { type: 'addNote' },
+      { type: 'cardSelectionChanged' },
+    ])
+
+    expect(state.cardEntries[DETAIL.id].detail).toBe(DETAIL)
+    expect(state).toMatchObject({
+      editDraft: null,
+      customerConflict: null,
+      taskEditId: null,
+      addingTask: false,
+      noteEditId: null,
+      addingNote: false,
+    })
+  })
+
   it('updates and deletes nested rows by id after a middle row disappears', () => {
     const state = run([
       { type: 'cardLoadSucceeded', detail: DETAIL },
@@ -158,6 +178,49 @@ describe('Customer card model', () => {
     })
 
     expect(saved.cardEntries[DETAIL.id].detail?.tasks[1].kind).toBe('done')
+  })
+
+  it('reconciles optimistic rows with an earlier server event by id', () => {
+    const serverTask = {
+      ...DETAIL.tasks[0],
+      id: 'task-server',
+      name: '새 업무',
+    }
+    const optimistic = {
+      ...serverTask,
+      id: 'optimistic-task-1',
+      optimistic: true as const,
+    }
+    const state = run([
+      { type: 'cardLoadSucceeded', detail: DETAIL },
+      {
+        type: 'taskCreateOptimistic',
+        conversationId: DETAIL.id,
+        task: optimistic,
+      },
+      {
+        type: 'taskUpdateSucceeded',
+        conversationId: DETAIL.id,
+        task: serverTask,
+      },
+      {
+        type: 'taskCreateSucceeded',
+        conversationId: DETAIL.id,
+        optimisticId: optimistic.id,
+        task: serverTask,
+      },
+    ])
+
+    expect(
+      state.cardEntries[DETAIL.id].detail?.tasks.filter(
+        ({ id }) => id === serverTask.id,
+      ),
+    ).toHaveLength(1)
+    expect(
+      state.cardEntries[DETAIL.id].detail?.tasks.some(
+        ({ id }) => id === optimistic.id,
+      ),
+    ).toBe(false)
   })
 
   it('builds customer field changes by stable id and never sends phone', () => {

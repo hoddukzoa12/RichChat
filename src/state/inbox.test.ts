@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { ConversationListResponse } from '../../shared/wire/conversation'
+import type {
+  ConversationDetail,
+  ConversationListResponse,
+} from '../../shared/wire/conversation'
 import type { ConversationMessage } from '../../shared/wire/message'
 import {
   ACTION_TYPES,
@@ -42,24 +45,7 @@ const ACTION_TYPES_AFTER_LIST_API = [
   'toggleTodo',
   'linkFolder',
   'unlinkFolder',
-  'startEdit',
-  'cancelEdit',
-  'saveEdit',
-  'setEditName',
-  'setEditOrg',
-  'setEditField',
-  'addTask',
-  'editTask',
-  'cancelTask',
-  'saveTask',
-  'removeTask',
-  'setTaskDraft',
-  'addNote',
-  'editNote',
-  'cancelNote',
-  'saveNote',
-  'removeNote',
-  'setNoteDraft',
+  'cardData',
   'toggleAi',
   'toggleOffice',
   'loadTeam',
@@ -138,6 +124,68 @@ function message(
   }
 }
 
+function conversationDetail(): ConversationDetail {
+  return {
+    id: 'conversation-1',
+    status: '미처리',
+    label: '',
+    archived: false,
+    version: 1,
+    customer: {
+      id: 'customer-conversation-1',
+      name: '고객 conversation-1',
+      company: '리치 · 세무',
+      roleTitle: '대표',
+      phoneE164: '+821000000000',
+      version: 1,
+      fields: [
+        { id: 'field-1', key: '유형', value: '개인', sortOrder: 0 },
+        { id: 'field-2', key: '과세', value: '일반', sortOrder: 1 },
+        { id: 'field-3', key: '업종', value: '도소매', sortOrder: 2 },
+      ],
+    },
+    assignees: [],
+    tasks: [
+      {
+        id: 'task-1',
+        name: '부가세 신고',
+        sub: '',
+        kind: 'done',
+        sortOrder: 0,
+        createdById: 'user-1',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ],
+    notes: [
+      {
+        id: 'note-1',
+        authorId: 'user-1',
+        authorName: '박상담',
+        body: '첫 메모',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'note-2',
+        authorId: 'user-2',
+        authorName: '김상담',
+        body: '가운데 메모',
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      {
+        id: 'note-3',
+        authorId: 'user-1',
+        authorName: '박상담',
+        body: '마지막 메모',
+        createdAt: 3,
+        updatedAt: 3,
+      },
+    ],
+  }
+}
+
 describe('inbox reducer', () => {
   it('preserves every registered action name after adding the list API', () => {
     expect([...ACTION_TYPES].sort()).toEqual(
@@ -182,6 +230,132 @@ describe('inbox reducer', () => {
       nextCursor: 'next-page',
       listLoadStatus: 'loaded',
       listRequestId: 1,
+    })
+  })
+
+  it('keeps card detail separate while synchronizing customer list fields', () => {
+    const response = listResponse(['conversation-1'])
+    const detail = conversationDetail()
+    const state = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+      { type: 'select', id: detail.id },
+      {
+        type: 'cardData',
+        action: { type: 'cardLoadSucceeded', detail },
+      },
+      {
+        type: 'cardData',
+        action: { type: 'startEdit', conversationId: detail.id },
+      },
+      {
+        type: 'cardData',
+        action: { type: 'removeEditField', fieldId: 'field-2' },
+      },
+      {
+        type: 'cardData',
+        action: {
+          type: 'setEditField',
+          fieldId: 'field-3',
+          patch: { value: '전자상거래' },
+        },
+      },
+      {
+        type: 'cardData',
+        action: {
+          type: 'customerSaved',
+          conversationId: detail.id,
+          customer: {
+            id: detail.customer.id,
+            name: '바뀐 고객',
+            company: '리치 · 세무법인',
+            roleTitle: '공동대표',
+            phoneE164: detail.customer.phoneE164,
+            version: 2,
+            updatedAt: 4,
+            fields: [
+              {
+                id: 'field-1',
+                key: '유형',
+                value: '개인',
+                sortOrder: 0,
+                updatedAt: 4,
+              },
+              {
+                id: 'field-3',
+                key: '업종',
+                value: '전자상거래',
+                sortOrder: 1,
+                updatedAt: 4,
+              },
+            ],
+          },
+        },
+      },
+      {
+        type: 'cardData',
+        action: {
+          type: 'taskUpdateOptimistic',
+          conversationId: detail.id,
+          taskId: 'task-1',
+          patch: {
+            name: '부가세 신고',
+            sub: '완료 확인',
+            kind: 'done',
+          },
+        },
+      },
+      {
+        type: 'cardData',
+        action: { type: 'noteDeleteStarted', noteId: 'note-2' },
+      },
+      {
+        type: 'cardData',
+        action: {
+          type: 'noteDeleteSucceeded',
+          conversationId: detail.id,
+          noteId: 'note-2',
+        },
+      },
+      {
+        type: 'cardData',
+        action: {
+          type: 'noteUpdateOptimistic',
+          conversationId: detail.id,
+          noteId: 'note-3',
+          body: '수정한 마지막 메모',
+          updatedAt: 5,
+        },
+      },
+    ])
+
+    expect(state.convs[0].customer).toMatchObject({
+      name: '바뀐 고객',
+      company: '리치 · 세무법인',
+    })
+    expect(state.cardEntries[detail.id].detail).toMatchObject({
+      customer: {
+        roleTitle: '공동대표',
+        version: 2,
+        fields: [
+          { id: 'field-1' },
+          { id: 'field-3', value: '전자상거래' },
+        ],
+      },
+      tasks: [{ id: 'task-1', kind: 'done', sub: '완료 확인' }],
+      notes: [
+        { id: 'note-1' },
+        { id: 'note-3', body: '수정한 마지막 메모' },
+      ],
     })
   })
 

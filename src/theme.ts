@@ -29,19 +29,27 @@ export const DELIVERY_STATUS_BADGE: Record<DeliveryStatus, string> = {
 
 export const TASK_KIND_VIEW: Record<
   TaskKind,
-  { badge: string; badgeClass: string; cardClass: string }
+  {
+    optionLabel: string
+    badge: string
+    badgeClass: string
+    cardClass: string
+  }
 > = {
   warn: {
+    optionLabel: '진행 중',
     badge: 'D-3',
     badgeClass: 'font-bold text-doing-fg bg-doing-bg',
     cardClass: 'border-warn-border bg-warn-bg',
   },
   idle: {
+    optionLabel: '대기',
     badge: '대기',
     badgeClass: 'font-semibold text-ink-600 bg-fill',
     cardClass: 'border-line',
   },
   done: {
+    optionLabel: '완료',
     badge: '완료',
     badgeClass: 'font-bold text-done-fg bg-done-bg',
     cardClass: 'border-line bg-done-bg/30',

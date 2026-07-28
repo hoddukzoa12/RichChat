@@ -67,6 +67,7 @@ export interface CustomerCardDataState {
   cardEntries: Record<string, CardEntry>
   editDraft: CustomerEditDraft | null
   customerConflict: CustomerConflict | null
+  savingCustomer: boolean
   taskEditId: string | null
   addingTask: boolean
   taskDraft: TaskDraft
@@ -88,6 +89,7 @@ export const initialCustomerCardDataState: CustomerCardDataState = {
   cardEntries: {},
   editDraft: null,
   customerConflict: null,
+  savingCustomer: false,
   taskEditId: null,
   addingTask: false,
   taskDraft: { ...EMPTY_TASK_DRAFT },
@@ -100,6 +102,7 @@ export const initialCustomerCardDataState: CustomerCardDataState = {
 }
 
 export type CustomerCardDataAction =
+  | { type: 'cardSelectionChanged' }
   | { type: 'cardLoadStarted'; conversationId: string }
   | { type: 'cardLoadSucceeded'; detail: ConversationDetail }
   | {
@@ -119,6 +122,7 @@ export type CustomerCardDataAction =
     }
   | { type: 'addEditField'; fieldId: string }
   | { type: 'removeEditField'; fieldId: string }
+  | { type: 'customerSaveStarted' }
   | {
       type: 'customerSaved'
       conversationId: string
@@ -232,6 +236,7 @@ export type CustomerCardDataAction =
       noteId: string
       error: CardMutationError
     }
+  | { type: 'cardMutationFailed'; error: CardMutationError }
   | { type: 'clearCardMutationError' }
 
 function editableCustomer(
@@ -296,10 +301,14 @@ function replaceByRequestItem<T extends { id: string }>(
       ? -1
       : items.findIndex(({ id }) => id === optimisticId)
   const serverIndex = items.findIndex(({ id }) => id === item.id)
+  if (optimisticIndex < 0 && serverIndex < 0) return [...items, item]
   const targetIndex = optimisticIndex >= 0 ? optimisticIndex : serverIndex
-  if (targetIndex < 0) return [...items, item]
 
-  return items.map((current, index) => (index === targetIndex ? item : current))
+  return items.flatMap((current, index) => {
+    if (index === targetIndex) return [item]
+    if (optimisticIndex >= 0 && index === serverIndex) return []
+    return [current]
+  })
 }
 
 function withoutValue(values: string[], value: string): string[] {
@@ -476,6 +485,16 @@ type CustomerCardDataHandlers = {
 }
 
 export const customerCardDataHandlers = {
+  cardSelectionChanged: (state, _action) => {
+    return {
+      ...resetNoteEditor(resetTaskEditor(state)),
+      editDraft: null,
+      customerConflict: null,
+      savingCustomer: false,
+      cardMutationError: null,
+    }
+  },
+
   cardLoadStarted: (state, action) => {
     const current = state.cardEntries[action.conversationId]
     return {
@@ -621,6 +640,14 @@ export const customerCardDataHandlers = {
       : state
   },
 
+  customerSaveStarted: (state, _action) => {
+    return {
+      ...state,
+      savingCustomer: true,
+      cardMutationError: null,
+    }
+  },
+
   customerSaved: (state, action) => {
     const updated = updateDetail(state, action.conversationId, (detail) => ({
       ...detail,
@@ -630,6 +657,7 @@ export const customerCardDataHandlers = {
       ...updated,
       editDraft: null,
       customerConflict: null,
+      savingCustomer: false,
       cardMutationError: null,
     }
   },
@@ -638,6 +666,7 @@ export const customerCardDataHandlers = {
     return {
       ...state,
       customerConflict: { current: action.current },
+      savingCustomer: false,
       cardMutationError: null,
     }
   },
@@ -654,6 +683,7 @@ export const customerCardDataHandlers = {
       ...updated,
       editDraft: null,
       customerConflict: null,
+      savingCustomer: false,
     }
   },
 
@@ -924,6 +954,14 @@ export const customerCardDataHandlers = {
     return {
       ...errorState(state, action.error),
       pendingNoteDeletes: withoutValue(state.pendingNoteDeletes, action.noteId),
+    }
+  },
+
+  cardMutationFailed: (state, action) => {
+    return {
+      ...state,
+      savingCustomer: false,
+      cardMutationError: action.error,
     }
   },
 
