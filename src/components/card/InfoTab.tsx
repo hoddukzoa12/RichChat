@@ -1,7 +1,7 @@
 import { useInbox } from '../../state/InboxContext'
-import { ME } from '../../data/seed'
 import type { TaskDraft } from '../../types'
 import { Avatar, Card } from '../ui'
+import { useAuth } from '../../api/AuthGate'
 
 const BADGE_OPTIONS: { key: TaskDraft['kind']; label: string }[] = [
   { key: 'warn', label: '진행 중' },
@@ -119,6 +119,7 @@ function NoteForm() {
 
 export function InfoTab() {
   const { state, dispatch, cur } = useInbox()
+  const { me } = useAuth()
   const edit = state.editDraft
   const fields = edit ? edit.fields : cur.fields
 
@@ -250,7 +251,9 @@ export function InfoTab() {
                 <div className="flex items-center gap-1.5">
                   <span className="text-[12.5px] font-semibold">{n.author}</span>
                   <span className="text-[11.5px] text-ink-400">{n.time}</span>
-                  {state.noteEdit !== i && n.author === ME && (
+                  {state.noteEdit !== i &&
+                    'authorId' in n &&
+                    n.authorId === me.user.id && (
                     <button
                       type="button"
                       onClick={() => dispatch({ type: 'editNote', index: i })}
