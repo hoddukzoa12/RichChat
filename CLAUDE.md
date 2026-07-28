@@ -50,11 +50,35 @@ git rev-parse --short main origin/main   # 두 값이 같아야 한다
 없다 — 한 번 이것 때문에 Codex가 `AGENTS.md` 없는 상태로 시작했다. 규칙 파일이
 통째로 빠진 채 구현이 돌아가면 전부 다시 해야 한다.
 
-그다음 `orca-cli` 스킬로 워크트리를 만들고 Codex에게 넘긴다.
-독립 작업이면 `--no-parent`, 이어지는 작업이면 부모 워크트리를 명시한다.
-
 생성 직후 `head`가 기대한 커밋인지 확인하고, 아니면
 `git -C <워크트리> reset --hard <커밋>`으로 맞춘 뒤 터미널에 알린다.
+
+**디스패치는 orchestration으로 한다.** 나는 코디네이터이고 DAG를 관리하며
+완료를 기다렸다가 리뷰·병합한다 — 전권 위임(handoff)이 아니다.
+
+```sh
+orca worktree create --name <슬라이스> --no-parent --base-branch <기준> --agent codex --json
+orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 120000 --json
+orca orchestration task-create --spec "<슬라이스 브리프>" [--deps '["task_…"]'] --json
+orca orchestration dispatch --task <task_id> --to <handle> --inject --json
+```
+
+그다음 **반드시 백그라운드로 대기를 건다.** 안 걸면 완료를 손으로 들여다봐야 한다.
+
+```sh
+orca orchestration check --wait --types worker_done,escalation,decision_gate \
+  --timeout-ms 900000 --json
+```
+
+타임아웃은 실패가 아니라 체크포인트다. `worker_done`/`escalation`이 오거나
+터미널이 사라지기 전까지 대기를 다시 건다.
+
+`--inject`가 워커에게 `worker_done`·`heartbeat`·`ask` 의무를 심는다. 프롬프트에
+*"이상하면 구현하지 말고 보고하라"*고 쓰려면 이 채널이 있어야 한다 — handoff에는
+되돌아오는 길이 없어서 그 지시가 무의미해진다.
+
+**task의 `spec`에 슬라이스 내용을 복사하지 않는다.** 슬라이스의 정본은 계획서다.
+spec은 브리프만 담고 계획서를 가리킨다.
 
 프롬프트에 반드시 포함할 것:
 - 무엇을 바꾸는가 (파일 경로까지)
@@ -67,6 +91,26 @@ git rev-parse --short main origin/main   # 두 값이 같아야 한다
 **구현한 워크트리가 아닌 새 워크트리**에서 Codex를 띄운다.
 리뷰어에게는 구현 의도를 설명하지 않는다 — 수용 기준과 diff만 준다.
 의도를 알려주면 그 프레임에 갇혀서 놓친다.
+
+**독립 리뷰를 반드시 붙이는 슬라이스**
+
+- 스키마·마이그레이션 (되돌리기 가장 어렵다)
+- 데이터 무결성을 직접 건드리는 것 — 수신·발송·상태 전이
+- 인증·권한
+- 여러 슬라이스가 올라탈 기반 (골격, 공용 타입 축)
+
+나머지는 내가 직접 검증하고 병합한다. 판단 기준은 **"틀렸을 때 되돌리는 비용"**
+이지 변경의 크기가 아니다. B0 수정처럼 지적이 명확하고 수용 기준이 기계적이면
+재리뷰 없이 내가 확인한다.
+
+**리뷰에서 반드시 요구할 것**
+
+구현자 보고를 믿지 말고 직접 실행하게 한다. 그리고 한 단계 더 —
+**테스트가 실제로 무엇을 증명하는지** 읽게 한다.
+
+실제로 B2에서 스키마 테스트 10개가 전부 통과하는데 테넌시 누수·멱등성 우회·
+다른 고객 데이터 노출 세 가지가 살아 있었다. 구현자는 "의심되는 결함 없음"으로
+자체 보고했다. **반례를 직접 만들어 실행하는 것만이 제약이 실제로 막는지 증명한다.**
 
 ### 4. 병합
 
