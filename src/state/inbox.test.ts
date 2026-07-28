@@ -35,6 +35,8 @@ const ACTION_TYPES_AFTER_LIST_API = [
   'thread/loadStarted',
   'thread/loadSucceeded',
   'thread/loadFailed',
+  'thread/readStarted',
+  'thread/readFailed',
   'thread/draftChanged',
   'thread/sendStarted',
   'thread/sendSucceeded',
@@ -530,6 +532,61 @@ describe('inbox reducer', () => {
     ])
     expect(state.draft).toBe('')
     expect(state.composerError).toBeNull()
+  })
+
+  it('optimistically clears unread messages and restores them after failure', () => {
+    const response = listResponse(['conversation-1', 'conversation-2'])
+    response.conversations[0] = {
+      ...response.conversations[0],
+      unreadCount: 3,
+    }
+    const loaded = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+      {
+        type: 'thread/readStarted',
+        conversationId: 'conversation-1',
+      },
+    ])
+
+    expect(loaded.convs.map(({ unreadCount }) => unreadCount)).toEqual([
+      0,
+      1,
+    ])
+
+    const restored = reducer(loaded, {
+      type: 'thread/readFailed',
+      conversationId: 'conversation-1',
+      unreadCount: 3,
+    })
+    expect(restored.convs.map(({ unreadCount }) => unreadCount)).toEqual([
+      3,
+      1,
+    ])
+
+    const withNewerUnread = {
+      ...loaded,
+      convs: loaded.convs.map((conversation) =>
+        conversation.id === 'conversation-1'
+          ? { ...conversation, unreadCount: 4 }
+          : conversation,
+      ),
+    }
+    const preserved = reducer(withNewerUnread, {
+      type: 'thread/readFailed',
+      conversationId: 'conversation-1',
+      unreadCount: 3,
+    })
+    expect(preserved.convs[0].unreadCount).toBe(4)
   })
 
   it('discards a response from an older request', () => {

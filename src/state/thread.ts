@@ -370,6 +370,15 @@ export type ThreadAction =
   | { type: 'select'; id: string }
   | { type: 'draftReply' }
   | {
+      type: 'thread/readStarted'
+      conversationId: string
+    }
+  | {
+      type: 'thread/readFailed'
+      conversationId: string
+      unreadCount: number
+    }
+  | {
       type: 'assigneeAssigned'
       conversationId: string
       assignee: ConversationListAssignee
@@ -414,6 +423,30 @@ export const threadHandlers = {
   }),
 
   draftReply: (state) => ({ ...state, draft: '확인 후 회신드리겠습니다.' }),
+
+  'thread/readStarted': (state, action) => ({
+    ...state,
+    convs: patchConversation(
+      state.convs,
+      action.conversationId,
+      (conversation) => ({ ...conversation, unreadCount: 0 }),
+    ),
+  }),
+
+  'thread/readFailed': (state, action) => ({
+    ...state,
+    convs: patchConversation(
+      state.convs,
+      action.conversationId,
+      (conversation) => ({
+        ...conversation,
+        unreadCount: Math.max(
+          conversation.unreadCount,
+          action.unreadCount,
+        ),
+      }),
+    ),
+  }),
 
   assigneeAssigned: (state, action) => ({
     ...state,
