@@ -42,7 +42,8 @@ UPDATE customers SET name = ?, ..., version = version + 1, updated_at = ?
 - 삭제 → id로 지정
 - 순서 변경 → `sort_order` 갱신
 
-`ux_fields_key(customer_id, key)`가 있어 같은 키 중복은 DB가 막는다. 그 실패를
+`customer_fields`의 테이블 제약 `UNIQUE (customer_id, key)`가
+같은 키 중복을 막는다. 그 실패를
 500으로 흘리지 말고 **409나 400으로 번역**해라.
 
 ### 상호와 직함은 별개 컬럼이다

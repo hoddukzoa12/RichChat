@@ -54,7 +54,8 @@ DELETE /api/conversations/:id/tasks/:taskId
 ### 소프트 삭제
 
 `deleted_at`이 있다. 행을 지우지 마라. 모든 조회에 `deleted_at IS NULL`.
-`ix_tasks_conv`가 그 조건으로 만들어져 있다.
+
+`tasks`에는 보조 인덱스가 없다. **새로 만들지 마라.**
 
 ### 경로의 대화 id를 확인해라
 

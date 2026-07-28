@@ -115,6 +115,26 @@ orca terminal send --terminal <handle> --text "$ANSWER" --enter --json
 **task의 `spec`에 슬라이스 내용을 복사하지 않는다.** 슬라이스의 정본은 계획서다.
 spec은 브리프만 담고 계획서를 가리킨다.
 
+### 식별자는 계획서가 아니라 저장소에서 확인한다
+
+계획서의 스키마 블록은 **설계 시점 초안**이다. 구현이 다른 이름을 쓴 곳이 있다.
+프롬프트에 인덱스·컬럼·제약 이름을 적을 때는 계획서에서 옮기지 말고
+`migrations/`를 직접 읽어라.
+
+묶음 5에서 네 개를 틀렸다. `ix_msg_thread`(실제 `ix_messages_conversation_occurred`),
+`ux_fields_key`(실제로는 이름 없는 테이블 제약), 그리고 `ix_notes_conv`·
+`ix_tasks_conv`는 **아예 존재하지 않는 인덱스**였다. B7이 물어봐서 드러났다.
+
+디스패치 전 한 줄로 대조된다:
+
+```sh
+grep -ho '\b\(ix\|ux\)_[a-z_]*' .claude/prompts/prompt-*.md | sort -u
+grep -ho 'INDEX [a-z_]*' migrations/*.sql | sed 's/INDEX //' | sort
+```
+
+없는 인덱스를 "이미 있다"고 쓰면 워커가 그걸 믿고 만들려 든다 —
+`migrations/`는 그 슬라이스 소유가 아닌데.
+
 프롬프트에 반드시 포함할 것:
 - 무엇을 바꾸는가 (파일 경로까지)
 - 수용 기준

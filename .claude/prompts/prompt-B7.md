@@ -41,7 +41,7 @@ GET /api/conversations/:id/messages?before=<커서>&limit=50
 스레드는 **최신이 아래**고 위로 스크롤하며 과거를 불러온다. 목록(B6)과 방향이
 반대다.
 
-`(occurred_at, id)` 복합 키로 **역방향 키셋 커서**를 써라. `ix_msg_thread`
+`(occurred_at, id)` 복합 키로 **역방향 키셋 커서**를 써라. `ix_messages_conversation_occurred`
 인덱스가 `(conversation_id, occurred_at, id)`로 이미 있다.
 
 `OFFSET`을 쓰지 마라 — 위로 읽는 동안 아래에 새 메시지가 들어오면 밀린다.
@@ -83,7 +83,8 @@ GET /api/conversations/:id/messages?before=<커서>&limit=50
 9. 다운로드 미완료 첨부가 그 상태로 구분된다
 10. 없는 대화 id → 404
 11. **쿼리 수가 메시지 수에 비례하지 않는다** — 메시지 200건을 넣고 확인해라
-12. `EXPLAIN QUERY PLAN`이 `ix_msg_thread`를 쓴다
+12. `EXPLAIN QUERY PLAN`이 `(conversation_id, occurred_at, id)` 인덱스를 탄다
+    (전체 스캔이 아님을 증명하는 게 요점이다)
 
 ## 만들지 말 것
 

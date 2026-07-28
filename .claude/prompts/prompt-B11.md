@@ -52,8 +52,10 @@ UPDATE notes SET body = ?, updated_at = ?
 
 `deleted_at`이 있다. **행을 지우지 마라** — 세무 기록이고 보존 기간 설정이 있다.
 
-모든 조회에 `deleted_at IS NULL`을 걸어라. `ix_notes_conv` 인덱스가 그 조건으로
-이미 만들어져 있다.
+모든 조회에 `deleted_at IS NULL`을 걸어라.
+
+`notes`에는 보조 인덱스가 없다. **새로 만들지 마라** — `migrations/`는 이
+슬라이스 소유가 아니다.
 
 이미 삭제된 메모를 또 삭제 → 0행이므로 **이벤트도 없다.**
 
