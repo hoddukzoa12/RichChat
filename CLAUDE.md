@@ -86,6 +86,20 @@ orca orchestration check --wait --types worker_done,escalation,decision_gate \
 *"이상하면 구현하지 말고 보고하라"*고 쓰려면 이 채널이 있어야 한다 — handoff에는
 되돌아오는 길이 없어서 그 지시가 무의미해진다.
 
+### `decision_gate`에 답할 때는 두 경로로 보낸다
+
+```sh
+orca orchestration reply --id <msg_id> --body "$ANSWER" --json
+orca terminal send --terminal <handle> --text "$ANSWER" --enter --json
+```
+
+`reply`가 `ok: true`를 반환해도 **워커가 못 받는 경우가 있다.** 두 번 겪었다 —
+한 번은 워커가 같은 질문을 다시 했고, 한 번은 10분 기다리다 `escalation`을
+올렸다. 내용이 같으므로 중복 전달은 무해하다.
+
+답을 보낸 뒤 **워커가 실제로 재개했는지 확인해라.** 다음 하트비트의 `phase`가
+바뀌거나 워크트리에 변경이 생기면 전달된 것이다.
+
 **task의 `spec`에 슬라이스 내용을 복사하지 않는다.** 슬라이스의 정본은 계획서다.
 spec은 브리프만 담고 계획서를 가리킨다.
 
