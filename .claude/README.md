@@ -1,5 +1,33 @@
 # .claude — 프로젝트 스코프 에이전트 설정
 
+## 슬라이스 프롬프트와 디스패치 스크립트
+
+백엔드 구현은 슬라이스 단위로 쪼개 각각 별도 워크트리의 Codex에게 맡긴다.
+슬라이스 정의의 **정본은 계획서**이고, 여기 프롬프트는 그것을 실행 가능한
+형태로 옮긴 것이다.
+
+```
+prompts/
+  prompt-header.md       모든 구현 프롬프트 앞에 붙는다 ({{SLICE}} 치환)
+  prompt-footer.md       모든 구현 프롬프트 뒤에 붙는다 (커밋·ask·금지 경로)
+  review-footer.md       모든 리뷰 프롬프트 뒤에 붙는다
+  prompt-<슬라이스>.md   슬라이스별 본문
+  review-<슬라이스>.md   리뷰 지시
+scripts/
+  dispatch.sh            워크트리 생성 → 프롬프트 조립 → orchestration 디스패치
+  review.sh              별도 워크트리에 독립 리뷰어 디스패치
+```
+
+```sh
+.claude/scripts/dispatch.sh b3-db-helpers .claude/prompts/prompt-B3.md
+.claude/scripts/review.sh   b2-schema     .claude/prompts/review-B2.md
+```
+
+헤더·꼬리말을 자동으로 붙이는 이유는 **손으로 쓰다 두 번 빠뜨렸기 때문**이다
+(커밋 지시 누락, 프롬프트 내 모순). 규칙을 기억하는 것보다 스크립트가 강제하는
+쪽이 확실하다.
+
+
 ## Cloudflare 스킬 (gitignore 대상 — 각자 설치)
 
 `.claude/skills/`와 `.claude/commands/cloudflare/`는 [cloudflare/skills](https://github.com/cloudflare/skills)
