@@ -37,6 +37,7 @@ interface JwtClaims {
   email: string
   exp: number
   iat: number
+  nbf?: number
 }
 
 interface SigningJwk extends JsonWebKey {
@@ -101,6 +102,14 @@ function secureUrl(value: string): string {
   return value
 }
 
+function sameOriginUrl(value: string, expectedOrigin: string): string {
+  const secure = secureUrl(value)
+  if (new URL(secure).origin !== expectedOrigin) {
+    return validationError()
+  }
+  return secure
+}
+
 function discoveryUrl(bindings: WorksOidcBindings): string {
   if (
     bindings.WORKS_CLIENT_ID === '' ||
@@ -131,6 +140,7 @@ async function readJson(response: Response): Promise<unknown> {
 
 async function fetchDiscovery(
   url: string,
+  bindings: WorksOidcBindings,
   fetcher: OidcFetch,
 ): Promise<WorksConfiguration> {
   const document = await readJson(
@@ -141,15 +151,25 @@ async function fetchDiscovery(
   )
   if (!isObject(document)) return validationError()
 
+  const configuredIssuer = secureUrl(bindings.WORKS_ISSUER)
+  const issuer = secureUrl(requiredString(document, 'issuer'))
+  if (issuer !== configuredIssuer) return validationError()
+  const providerOrigin = new URL(configuredIssuer).origin
+
   return {
-    issuer: secureUrl(requiredString(document, 'issuer')),
-    authorizationEndpoint: secureUrl(
+    issuer,
+    authorizationEndpoint: sameOriginUrl(
       requiredString(document, 'authorization_endpoint'),
+      providerOrigin,
     ),
-    tokenEndpoint: secureUrl(
+    tokenEndpoint: sameOriginUrl(
       requiredString(document, 'token_endpoint'),
+      providerOrigin,
     ),
-    jwksUri: secureUrl(requiredString(document, 'jwks_uri')),
+    jwksUri: sameOriginUrl(
+      requiredString(document, 'jwks_uri'),
+      providerOrigin,
+    ),
   }
 }
 
@@ -191,7 +211,7 @@ export async function getWorksConfiguration(
     discoveryLoads,
     url,
     now,
-    () => fetchDiscovery(url, fetcher),
+    () => fetchDiscovery(url, bindings, fetcher),
   )
 }
 
@@ -306,11 +326,14 @@ function parseClaims(value: Record<string, unknown>): JwtClaims {
 
   const exp = value.exp
   const iat = value.iat
+  const nbf = value.nbf
   if (
     typeof exp !== 'number' ||
     !Number.isInteger(exp) ||
     typeof iat !== 'number' ||
-    !Number.isInteger(iat)
+    !Number.isInteger(iat) ||
+    (nbf !== undefined &&
+      (typeof nbf !== 'number' || !Number.isInteger(nbf)))
   ) {
     return validationError()
   }
@@ -323,6 +346,7 @@ function parseClaims(value: Record<string, unknown>): JwtClaims {
     email: requiredString(value, 'email'),
     exp,
     iat,
+    nbf: typeof nbf === 'number' ? nbf : undefined,
   }
 }
 
@@ -415,6 +439,7 @@ export async function verifyIdToken(
     !audienceIncludes(claims.aud, expected.clientId) ||
     claims.nonce !== expected.nonce ||
     claims.iat > nowSeconds ||
+    (claims.nbf !== undefined && claims.nbf > nowSeconds) ||
     claims.exp <= nowSeconds
   ) {
     return validationError()

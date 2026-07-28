@@ -11,7 +11,10 @@ import {
   hashSessionToken,
   SESSION_COOKIE_NAME,
 } from '../http/session'
-import { routes as authRoutes } from './auth'
+import {
+  OAUTH_STATE_COOKIE_NAME,
+  routes as authRoutes,
+} from './auth'
 
 declare module 'cloudflare:test' {
   interface ProvidedEnv extends Env {}
@@ -19,8 +22,8 @@ declare module 'cloudflare:test' {
 
 const ORIGIN = 'https://example.com'
 const DISCOVERY_ORIGIN = 'https://auth.worksmobile.com'
-const OIDC_ORIGIN = 'https://oidc.test'
-const ISSUER = 'https://issuer.test'
+const OIDC_ORIGIN = DISCOVERY_ORIGIN
+const ISSUER = DISCOVERY_ORIGIN
 const CLIENT_ID = 'test-works-client-id'
 const CLIENT_SECRET = 'test-works-client-secret'
 const TENANT_ID = 'test-works-tenant-id'
@@ -37,6 +40,8 @@ interface SeedUserOptions {
 
 interface LoginAttempt {
   authorizationUrl: URL
+  browserCookie: string
+  browserSecret: string
   nonce: string
   state: string
 }
@@ -65,6 +70,7 @@ interface IdTokenOverrides {
   exp?: number
   iat?: number
   iss?: string
+  nbf?: number
   nonce?: string
   sub?: string
 }
@@ -137,6 +143,7 @@ async function idToken(
       email: overrides.email ?? 'invitee@rich.example',
       iat: overrides.iat ?? nowSeconds - 1,
       exp: overrides.exp ?? nowSeconds + 3_600,
+      nbf: overrides.nbf,
     }),
   )
   const signingInput = `${header}.${payload}`
@@ -303,6 +310,19 @@ async function beginLogin(redirectTo?: string): Promise<LoginAttempt> {
     redirect: 'manual',
   })
   expect(response.status).toBe(302)
+  const setCookie = response.headers.get('set-cookie') ?? ''
+  expect(setCookie).toContain('HttpOnly')
+  expect(setCookie).toContain('Secure')
+  expect(setCookie).toContain('SameSite=Lax')
+  expect(setCookie).toContain('Path=/api/auth/callback')
+  const browserCookie = setCookie.split(';', 1)[0]
+  expect(
+    browserCookie.startsWith(`${OAUTH_STATE_COOKIE_NAME}=`),
+  ).toBe(true)
+  const browserSecret = browserCookie.slice(
+    `${OAUTH_STATE_COOKIE_NAME}=`.length,
+  )
+  expect(browserSecret).toMatch(/^[A-Za-z0-9_-]{43}$/)
 
   const location = response.headers.get('location')
   expect(location).not.toBeNull()
@@ -321,6 +341,8 @@ async function beginLogin(redirectTo?: string): Promise<LoginAttempt> {
 
   return {
     authorizationUrl,
+    browserCookie,
+    browserSecret,
     nonce: authorizationUrl.searchParams.get('nonce') ?? '',
     state: authorizationUrl.searchParams.get('state') ?? '',
   }
@@ -338,6 +360,16 @@ async function prepareCallback(
   callbackUrl.searchParams.set('code', code)
   callbackUrl.searchParams.set('state', attempt.state)
   return { callbackUrl: callbackUrl.toString(), code }
+}
+
+function fetchCallback(
+  callbackUrl: string,
+  attempt: LoginAttempt,
+): Promise<Response> {
+  return SELF.fetch(callbackUrl, {
+    headers: { cookie: attempt.browserCookie },
+    redirect: 'manual',
+  })
 }
 
 function sessionToken(response: Response): string {
@@ -373,13 +405,27 @@ describe('NAVER WORKS OIDC authentication', () => {
     const { userId } = await seedUser()
     const attempt = await beginLogin('/inbox?view=mine')
     const { callbackUrl, code } = await prepareCallback(attempt)
+    const state = await env.DB.prepare(
+      `SELECT browser_secret_hash
+      FROM oauth_states
+      WHERE state = ?`,
+    )
+      .bind(attempt.state)
+      .first<{ browser_secret_hash: string }>()
+    expect(state?.browser_secret_hash).toBe(
+      await hashSessionToken(attempt.browserSecret),
+    )
+    expect(state?.browser_secret_hash).not.toBe(
+      attempt.browserSecret,
+    )
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(302)
     expect(response.headers.get('location')).toBe('/inbox?view=mine')
+    expect(response.headers.get('set-cookie')).toContain(
+      `${OAUTH_STATE_COOKIE_NAME}=`,
+    )
     const token = sessionToken(response)
     const request = tokenRequests.find(
       (candidate) => candidate.code === code,
@@ -413,16 +459,39 @@ describe('NAVER WORKS OIDC authentication', () => {
     const attempt = await beginLogin()
     const { callbackUrl } = await prepareCallback(attempt)
 
-    const first = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
-    const second = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const first = await fetchCallback(callbackUrl, attempt)
+    const second = await fetchCallback(callbackUrl, attempt)
 
     expect(first.status).toBe(302)
     expect(second.status).toBe(400)
     expect(second.headers.get('content-type')).toContain('text/html')
+  })
+
+  it('requires the browser correlation cookie before consuming state', async () => {
+    await seedUser()
+    const attempt = await beginLogin()
+    const { callbackUrl } = await prepareCallback(attempt)
+
+    const missingCookie = await SELF.fetch(callbackUrl, {
+      redirect: 'manual',
+    })
+    const wrongCookie = await SELF.fetch(callbackUrl, {
+      headers: {
+        cookie: `${OAUTH_STATE_COOKIE_NAME}=wrong-browser-secret`,
+      },
+      redirect: 'manual',
+    })
+    const stateBeforeLegitimateCallback = await env.DB.prepare(
+      'SELECT state FROM oauth_states WHERE state = ?',
+    )
+      .bind(attempt.state)
+      .first()
+    const legitimate = await fetchCallback(callbackUrl, attempt)
+
+    expect(missingCookie.status).toBe(400)
+    expect(wrongCookie.status).toBe(400)
+    expect(stateBeforeLegitimateCallback).not.toBeNull()
+    expect(legitimate.status).toBe(302)
   })
 
   it('rejects and removes an expired state', async () => {
@@ -434,9 +503,7 @@ describe('NAVER WORKS OIDC authentication', () => {
       .run()
     const { callbackUrl } = await prepareCallback(attempt)
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(400)
     const state = await env.DB.prepare(
@@ -450,10 +517,18 @@ describe('NAVER WORKS OIDC authentication', () => {
   it('cleans expired states when starting a login', async () => {
     await env.DB.prepare(
       `INSERT INTO oauth_states (
-        state, nonce, code_verifier, redirect_to, expires_at
-      ) VALUES (?, ?, ?, ?, ?)`,
+        state, nonce, code_verifier, browser_secret_hash, redirect_to,
+        expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
     )
-      .bind('expired-state', 'nonce', 'verifier', '/', Date.now() - 1)
+      .bind(
+        'expired-state',
+        'nonce',
+        'verifier',
+        'browser-secret-hash',
+        '/',
+        Date.now() - 1,
+      )
       .run()
 
     await beginLogin()
@@ -472,9 +547,7 @@ describe('NAVER WORKS OIDC authentication', () => {
       email: 'not-invited@rich.example',
     })
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(403)
     const body = await response.text()
@@ -496,14 +569,33 @@ describe('NAVER WORKS OIDC authentication', () => {
     const attempt = await beginLogin()
     const { callbackUrl } = await prepareCallback(attempt)
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(403)
     const body = await response.text()
     expect(body).not.toContain('비활성')
     expect(body).not.toContain('초대')
+  })
+
+  it('normalizes surrounding whitespace and case in invited email', async () => {
+    const { userId } = await seedUser({
+      email: ' \tInvitee@Rich.Example\n',
+    })
+    const attempt = await beginLogin()
+    const { callbackUrl } = await prepareCallback(attempt)
+
+    const response = await fetchCallback(callbackUrl, attempt)
+
+    expect(response.status).toBe(302)
+    const user = await env.DB.prepare(
+      'SELECT works_sub, status FROM users WHERE id = ?',
+    )
+      .bind(userId)
+      .first<{ works_sub: string; status: UserStatus }>()
+    expect(user).toEqual({
+      works_sub: 'works-subject-1',
+      status: '활성',
+    })
   })
 
   it('rejects a nonce mismatch', async () => {
@@ -513,9 +605,7 @@ describe('NAVER WORKS OIDC authentication', () => {
       nonce: 'different-nonce',
     })
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(400)
     const user = await env.DB.prepare(
@@ -536,9 +626,7 @@ describe('NAVER WORKS OIDC authentication', () => {
       forgedKey,
     )
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(400)
   })
@@ -553,11 +641,29 @@ describe('NAVER WORKS OIDC authentication', () => {
       exp: nowSeconds - 1,
     })
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(400)
+  })
+
+  it('rejects a genuinely signed ID token before nbf', async () => {
+    activeJwks = [primaryKey.publicJwk]
+    await seedUser()
+    const attempt = await beginLogin()
+    const nowSeconds = Math.floor(Date.now() / 1_000)
+    const { callbackUrl } = await prepareCallback(attempt, {
+      nbf: nowSeconds + 3_600,
+    })
+
+    const response = await fetchCallback(callbackUrl, attempt)
+
+    expect(response.status).toBe(400)
+    const user = await env.DB.prepare(
+      'SELECT status FROM users WHERE id = ?',
+    )
+      .bind('user-oidc')
+      .first<{ status: UserStatus }>()
+    expect(user?.status).toBe('초대')
   })
 
   it.each([
@@ -575,9 +681,7 @@ describe('NAVER WORKS OIDC authentication', () => {
     const attempt = await beginLogin()
     const { callbackUrl } = await prepareCallback(attempt, overrides)
 
-    const response = await SELF.fetch(callbackUrl, {
-      redirect: 'manual',
-    })
+    const response = await fetchCallback(callbackUrl, attempt)
 
     expect(response.status).toBe(400)
   })
@@ -586,15 +690,16 @@ describe('NAVER WORKS OIDC authentication', () => {
     await seedUser()
     const firstAttempt = await beginLogin()
     const firstCallback = await prepareCallback(firstAttempt)
-    const firstResponse = await SELF.fetch(firstCallback.callbackUrl, {
-      redirect: 'manual',
-    })
+    const firstResponse = await fetchCallback(
+      firstCallback.callbackUrl,
+      firstAttempt,
+    )
 
     const secondAttempt = await beginLogin()
     const secondCallback = await prepareCallback(secondAttempt)
-    const secondResponse = await SELF.fetch(
+    const secondResponse = await fetchCallback(
       secondCallback.callbackUrl,
-      { redirect: 'manual' },
+      secondAttempt,
     )
 
     const firstToken = sessionToken(firstResponse)
@@ -610,9 +715,10 @@ describe('NAVER WORKS OIDC authentication', () => {
     await seedUser()
     const attempt = await beginLogin()
     const callback = await prepareCallback(attempt)
-    const login = await SELF.fetch(callback.callbackUrl, {
-      redirect: 'manual',
-    })
+    const login = await fetchCallback(
+      callback.callbackUrl,
+      attempt,
+    )
     const token = sessionToken(login)
     const sessionId = await hashSessionToken(token)
 
@@ -647,9 +753,10 @@ describe('NAVER WORKS OIDC authentication', () => {
       const attempt = await beginLogin(redirectTo)
       const callback = await prepareCallback(attempt)
 
-      const response = await SELF.fetch(callback.callbackUrl, {
-        redirect: 'manual',
-      })
+      const response = await fetchCallback(
+        callback.callbackUrl,
+        attempt,
+      )
 
       expect(response.status).toBe(302)
       expect(response.headers.get('location')).toBe('/')
@@ -664,9 +771,10 @@ describe('NAVER WORKS OIDC authentication', () => {
     activeJwks = [primaryKey.publicJwk]
     const firstAttempt = await beginLogin()
     const firstCallback = await prepareCallback(firstAttempt)
-    const first = await SELF.fetch(firstCallback.callbackUrl, {
-      redirect: 'manual',
-    })
+    const first = await fetchCallback(
+      firstCallback.callbackUrl,
+      firstAttempt,
+    )
     expect(first.status).toBe(302)
     const afterFirst = jwksRequestCount
 
@@ -677,9 +785,10 @@ describe('NAVER WORKS OIDC authentication', () => {
       {},
       rolloverKey,
     )
-    const second = await SELF.fetch(secondCallback.callbackUrl, {
-      redirect: 'manual',
-    })
+    const second = await fetchCallback(
+      secondCallback.callbackUrl,
+      secondAttempt,
+    )
 
     expect(second.status).toBe(302)
     expect(jwksRequestCount).toBeGreaterThan(afterFirst)
@@ -710,7 +819,9 @@ describe('NAVER WORKS OIDC authentication', () => {
     }) as Env
 
     const response = await callbackRoute?.handler(
-      new Request(callback.callbackUrl),
+      new Request(callback.callbackUrl, {
+        headers: { cookie: attempt.browserCookie },
+      }),
       wrongSecretEnv,
       {},
     )

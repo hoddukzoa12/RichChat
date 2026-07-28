@@ -1,3 +1,4 @@
+import { canonicalizeEmail } from '../../shared/email'
 import { executeBatch } from '../db/d1'
 import { error } from '../http/error'
 import type { Route } from '../http/router'
@@ -19,6 +20,7 @@ import {
 
 const CALLBACK_PATH = '/api/auth/callback'
 const DEFAULT_REDIRECT = '/'
+export const OAUTH_STATE_COOKIE_NAME = 'richchat_oauth_state'
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1_000
 const RANDOM_VALUE_BYTES = 32
 
@@ -40,6 +42,10 @@ interface OauthStateRow {
 interface UserRow {
   id: string
   office_id: string
+}
+
+interface UserCandidateRow extends UserRow {
+  email: string
 }
 
 function randomBase64Url(): string {
@@ -113,6 +119,26 @@ function htmlFailure(status: number): Response {
   )
 }
 
+function oauthStateCookie(
+  value: string,
+  expiresAt: number,
+): string {
+  return [
+    `${OAUTH_STATE_COOKIE_NAME}=${value}`,
+    `Expires=${new Date(expiresAt).toUTCString()}`,
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax',
+    `Path=${CALLBACK_PATH}`,
+  ].join('; ')
+}
+
+function callbackFailure(status: number): Response {
+  const response = htmlFailure(status)
+  response.headers.set('set-cookie', oauthStateCookie('', 0))
+  return response
+}
+
 function redirect(location: string, headers?: HeadersInit): Response {
   const responseHeaders = new Headers(headers)
   responseHeaders.set('location', location)
@@ -169,6 +195,8 @@ async function startLogin(
   const state = randomBase64Url()
   const nonce = randomBase64Url()
   const codeVerifier = randomBase64Url()
+  const browserSecret = randomBase64Url()
+  const browserSecretHash = await hashSessionToken(browserSecret)
   const redirectTo = safeRedirectTo(
     requestUrl.searchParams.get('redirect_to'),
     requestUrl.origin,
@@ -182,9 +210,17 @@ async function startLogin(
       ).bind(now),
       env.DB.prepare(
         `INSERT INTO oauth_states (
-          state, nonce, code_verifier, redirect_to, expires_at
-        ) VALUES (?, ?, ?, ?, ?)`,
-      ).bind(state, nonce, codeVerifier, redirectTo, expiresAt),
+          state, nonce, code_verifier, browser_secret_hash, redirect_to,
+          expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        state,
+        nonce,
+        codeVerifier,
+        browserSecretHash,
+        redirectTo,
+        expiresAt,
+      ),
     ])
   } catch {
     return htmlFailure(500)
@@ -204,19 +240,23 @@ async function startLogin(
     code_challenge_method: 'S256',
   }).toString()
 
-  return redirect(authorizationUrl.toString())
+  return redirect(authorizationUrl.toString(), {
+    'set-cookie': oauthStateCookie(browserSecret, expiresAt),
+  })
 }
 
 async function consumeState(
   db: D1Database,
   state: string,
+  browserSecretHash: string,
 ): Promise<OauthStateRow | null> {
   return db.prepare(
     `DELETE FROM oauth_states
     WHERE state = ?
+      AND browser_secret_hash = ?
     RETURNING nonce, code_verifier, redirect_to, expires_at`,
   )
-    .bind(state)
+    .bind(state, browserSecretHash)
     .first<OauthStateRow>()
 }
 
@@ -226,27 +266,50 @@ async function claimUser(
   subject: string,
   now: number,
 ): Promise<UserRow | null> {
+  const canonicalEmail = canonicalizeEmail(email)
+  if (canonicalEmail === '') return null
+
+  const { results } = await db.prepare(
+    `SELECT id, office_id, email
+    FROM users
+    WHERE status IN ('초대', '활성')`,
+  ).all<UserCandidateRow>()
+  const candidates = results.filter(
+    (candidate) =>
+      canonicalizeEmail(candidate.email) === canonicalEmail,
+  )
+  if (candidates.length !== 1) return null
+  const [candidate] = candidates
+
   const activated = await db.prepare(
     `UPDATE users
     SET works_sub = ?, status = '활성', updated_at = ?
-    WHERE email = ? COLLATE NOCASE
+    WHERE id = ?
+      AND email = ?
       AND status = '초대'
       AND (works_sub IS NULL OR works_sub = ?)
     RETURNING id, office_id`,
   )
-    .bind(subject, now, email, subject)
+    .bind(
+      subject,
+      now,
+      candidate.id,
+      candidate.email,
+      subject,
+    )
     .first<UserRow>()
   if (activated) return activated
 
   return db.prepare(
     `SELECT id, office_id
     FROM users
-    WHERE email = ? COLLATE NOCASE
+    WHERE id = ?
+      AND email = ?
       AND status = '활성'
       AND works_sub = ?
     LIMIT 1`,
   )
-    .bind(email, subject)
+    .bind(candidate.id, candidate.email, subject)
     .first<UserRow>()
 }
 
@@ -258,18 +321,26 @@ async function finishLogin(
 ): Promise<Response> {
   const requestUrl = new URL(request.url)
   const state = requestUrl.searchParams.get('state')
-  if (!state) return htmlFailure(400)
+  const browserSecret = cookieValue(
+    request,
+    OAUTH_STATE_COOKIE_NAME,
+  )
+  if (!state || !browserSecret) return callbackFailure(400)
 
   let oauthState: OauthStateRow | null
   try {
-    oauthState = await consumeState(env.DB, state)
+    oauthState = await consumeState(
+      env.DB,
+      state,
+      await hashSessionToken(browserSecret),
+    )
   } catch {
-    return htmlFailure(500)
+    return callbackFailure(500)
   }
 
   const now = clock()
   if (!oauthState || oauthState.expires_at <= now) {
-    return htmlFailure(400)
+    return callbackFailure(400)
   }
 
   const code = requestUrl.searchParams.get('code')
@@ -278,10 +349,10 @@ async function finishLogin(
     code === null ||
     code === ''
   ) {
-    return htmlFailure(400)
+    return callbackFailure(400)
   }
 
-  if (!hasWorksBindings(env)) return htmlFailure(400)
+  if (!hasWorksBindings(env)) return callbackFailure(400)
 
   const bindings = worksBindings(env)
   let identity
@@ -310,7 +381,7 @@ async function finishLogin(
       now,
     )
   } catch {
-    return htmlFailure(400)
+    return callbackFailure(400)
   }
 
   let user: UserRow | null
@@ -322,9 +393,9 @@ async function finishLogin(
       now,
     )
   } catch {
-    return htmlFailure(403)
+    return callbackFailure(403)
   }
-  if (!user) return htmlFailure(403)
+  if (!user) return callbackFailure(403)
 
   try {
     const session = await createSession(
@@ -340,18 +411,25 @@ async function finishLogin(
       requestUrl.origin,
     )
 
-    return redirect(redirectTo, {
-      'set-cookie': createSessionCookie(
+    const headers = new Headers()
+    headers.append(
+      'set-cookie',
+      createSessionCookie(
         session.token,
         session.expiresAt,
       ),
-    })
+    )
+    headers.append('set-cookie', oauthStateCookie('', 0))
+    return redirect(redirectTo, headers)
   } catch {
-    return htmlFailure(500)
+    return callbackFailure(500)
   }
 }
 
-function sessionToken(request: Request): string | undefined {
+function cookieValue(
+  request: Request,
+  name: string,
+): string | undefined {
   const cookieHeader = request.headers.get('cookie')
   if (!cookieHeader) return undefined
 
@@ -360,7 +438,7 @@ function sessionToken(request: Request): string | undefined {
     const separator = cookie.indexOf('=')
     if (
       separator >= 0 &&
-      cookie.slice(0, separator) === SESSION_COOKIE_NAME
+      cookie.slice(0, separator) === name
     ) {
       return cookie.slice(separator + 1) || undefined
     }
@@ -373,7 +451,7 @@ async function logout(request: Request, env: Env): Promise<Response> {
   const csrfError = csrfFailure(request)
   if (csrfError) return csrfError
 
-  const token = sessionToken(request)
+  const token = cookieValue(request, SESSION_COOKIE_NAME)
   if (token) {
     const sessionId = await hashSessionToken(token)
     await env.DB.prepare('DELETE FROM auth_sessions WHERE id = ?')
