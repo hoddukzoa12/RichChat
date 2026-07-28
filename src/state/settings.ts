@@ -1,12 +1,9 @@
-import { PROFILE, TEAM } from '../data/seed'
-import type { Profile, TeamMember } from '../types'
+import type {
+  InviteRole,
+  OfficeMember,
+  OfficeMemberWithStatus,
+} from '../api/endpoints'
 import type { ActionHandlers, InboxState } from './inbox'
-
-export interface NotifySettings {
-  newChat: boolean
-  mineOnly: boolean
-  sound: boolean
-}
 
 export interface AiSettings {
   summary: boolean
@@ -17,55 +14,48 @@ export interface AiSettings {
 export interface OfficeSettings {
   aiOn: boolean
   docRead: boolean
-  exportLog: boolean
 }
 
 export interface SettingsState {
-  profile: Profile
-  notify: NotifySettings
   ai: AiSettings
   office: OfficeSettings
-  isAdmin: boolean
-  team: TeamMember[]
+  team: Array<OfficeMember | OfficeMemberWithStatus>
+  teamLoading: boolean
+  teamError: string | null
   inviteOpen: boolean
   inviteEmail: string
-  inviteRole: string
+  inviteRole: InviteRole
 }
 
 export const initialSettingsState: SettingsState = {
-  profile: PROFILE,
-  notify: { newChat: true, mineOnly: false, sound: true },
   ai: { summary: true, autofill: true, draft: false },
-  office: { aiOn: true, docRead: true, exportLog: false },
-  isAdmin: true,
-  team: TEAM,
+  office: { aiOn: true, docRead: true },
+  team: [],
+  teamLoading: true,
+  teamError: null,
   inviteOpen: false,
   inviteEmail: '',
   inviteRole: '상담 담당',
 }
 
 export type SettingsAction =
-  | { type: 'setProfile'; key: keyof Profile; value: string }
-  | { type: 'toggleNotify'; key: keyof NotifySettings }
   | { type: 'toggleAi'; key: keyof AiSettings }
   | { type: 'toggleOffice'; key: keyof OfficeSettings }
+  | {
+      type: 'loadTeam'
+      members: Array<OfficeMember | OfficeMemberWithStatus>
+    }
+  | { type: 'failTeam'; message: string }
+  | {
+      type: 'upsertTeamMember'
+      member: OfficeMemberWithStatus
+    }
   | { type: 'openInvite' }
   | { type: 'closeInvite' }
   | { type: 'setInviteEmail'; value: string }
-  | { type: 'setInviteRole'; value: string }
-  | { type: 'sendInvite' }
+  | { type: 'setInviteRole'; value: InviteRole }
 
 export const settingsHandlers = {
-  setProfile: (state, action) => ({
-    ...state,
-    profile: { ...state.profile, [action.key]: action.value },
-  }),
-
-  toggleNotify: (state, action) => ({
-    ...state,
-    notify: { ...state.notify, [action.key]: !state.notify[action.key] },
-  }),
-
   toggleAi: (state, action) => ({
     ...state,
     ai: { ...state.ai, [action.key]: !state.ai[action.key] },
@@ -75,6 +65,38 @@ export const settingsHandlers = {
     ...state,
     office: { ...state.office, [action.key]: !state.office[action.key] },
   }),
+
+  loadTeam: (state, action) => ({
+    ...state,
+    team: action.members,
+    teamLoading: false,
+    teamError: null,
+  }),
+
+  failTeam: (state, action) => ({
+    ...state,
+    teamLoading: false,
+    teamError: action.message,
+  }),
+
+  upsertTeamMember: (state, action) => {
+    const exists = state.team.some(
+      (member) =>
+        member.id === action.member.id ||
+        member.email === action.member.email,
+    )
+    return {
+      ...state,
+      team: exists
+        ? state.team.map((member) =>
+            member.id === action.member.id ||
+            member.email === action.member.email
+              ? action.member
+              : member,
+          )
+        : [...state.team, action.member],
+    }
+  },
 
   openInvite: (state) => ({
     ...state,
@@ -88,24 +110,4 @@ export const settingsHandlers = {
   setInviteEmail: (state, action) => ({ ...state, inviteEmail: action.value }),
 
   setInviteRole: (state, action) => ({ ...state, inviteRole: action.value }),
-
-  sendInvite: (state) => {
-    const email = state.inviteEmail.trim()
-    if (!email) return state
-    const nick = email.split('@')[0]
-    return {
-      ...state,
-      inviteOpen: false,
-      team: [
-        ...state.team,
-        {
-          name: nick,
-          initial: nick[0].toUpperCase(),
-          email,
-          role: state.inviteRole,
-          pending: true,
-        },
-      ],
-    }
-  },
 } satisfies ActionHandlers<InboxState, SettingsAction>
