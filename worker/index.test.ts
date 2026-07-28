@@ -25,6 +25,13 @@ describe('Worker', () => {
     })
   })
 
+  it('returns a JSON 404 for the API root', async () => {
+    const response = await SELF.fetch('https://example.com/api')
+
+    expect(response.status).toBe(404)
+    expect(response.headers.get('content-type')).toBe('application/json')
+  })
+
   it('serves the SPA shell from the root', async () => {
     const response = await SELF.fetch('https://example.com/')
 

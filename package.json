@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "check": "tsc -b && vitest run",
+    "types": "wrangler types worker-configuration.d.ts",
+    "types:check": "wrangler types worker-configuration.d.ts --check",
+    "check": "npm run types:check && tsc -b && vitest run",
     "preview": "vite preview",
     "deploy": "wrangler deploy"
   },

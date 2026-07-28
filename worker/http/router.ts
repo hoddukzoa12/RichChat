@@ -1,10 +1,3 @@
-export interface Env {
-  ASSETS: {
-    fetch(request: Request): Promise<Response>
-  }
-  LGU_ENV: string
-}
-
 export type RouteHandler = (
   request: Request,
   env: Env,

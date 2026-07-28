@@ -1,5 +1,5 @@
 import { error } from './http/error'
-import { dispatch, type Env, type Route } from './http/router'
+import { dispatch, type Route } from './http/router'
 import { routes as authRoutes } from './routes/auth'
 import { routes as conversationDetailRoutes } from './routes/conversation-detail'
 import { routes as conversationWriteRoutes } from './routes/conversation-write'
