@@ -5,17 +5,24 @@ export type ApiFailureKind = 'network' | 'server'
 export class ApiRequestError extends Error {
   readonly kind: ApiFailureKind
   readonly status?: number
+  readonly code?: string
   readonly detail?: unknown
 
   constructor(
     kind: ApiFailureKind,
     message: string,
-    options: { status?: number; detail?: unknown; cause?: unknown } = {},
+    options: {
+      status?: number
+      code?: string
+      detail?: unknown
+      cause?: unknown
+    } = {},
   ) {
     super(message, { cause: options.cause })
     this.name = 'ApiRequestError'
     this.kind = kind
     this.status = options.status
+    this.code = options.code
     this.detail = options.detail
   }
 }
@@ -56,6 +63,7 @@ async function serverError(response: Response): Promise<ApiRequestError> {
   const detail = isApiError(payload) ? payload.error.detail : undefined
   return new ApiRequestError('server', message, {
     status: response.status,
+    code: isApiError(payload) ? payload.error.code : undefined,
     detail,
   })
 }
