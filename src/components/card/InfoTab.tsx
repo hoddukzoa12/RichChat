@@ -215,7 +215,7 @@ export function InfoTab() {
                   <span
                     className={`ml-auto text-[11px] rounded px-1.5 py-px ${
                       t.kind === 'warn'
-                        ? 'font-bold text-doing-fg bg-kakao-bg'
+                        ? 'font-bold text-doing-fg bg-doing-bg'
                         : 'font-semibold text-ink-600 bg-fill'
                     }`}
                   >

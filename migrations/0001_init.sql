@@ -109,7 +109,6 @@ CREATE TABLE conversations (
   id TEXT PRIMARY KEY,
   office_id TEXT NOT NULL REFERENCES offices(id),
   customer_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('카톡', '문자')),
   status TEXT NOT NULL DEFAULT '미처리'
     CHECK (status IN ('미처리', '처리중', '완료')),
   label TEXT NOT NULL DEFAULT '',
@@ -170,7 +169,7 @@ CREATE TABLE messages (
   office_id TEXT NOT NULL REFERENCES offices(id),
   conversation_id TEXT NOT NULL,
   direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
-  channel TEXT NOT NULL CHECK (channel IN ('카톡', 'SMS', 'LMS', 'MMS')),
+  channel TEXT NOT NULL CHECK (channel IN ('SMS', 'LMS', 'MMS')),
   title TEXT,
   body TEXT NOT NULL,
   sender_user_id TEXT,
@@ -261,7 +260,6 @@ CREATE TABLE tasks (
 CREATE TABLE office_channels (
   id TEXT PRIMARY KEY,
   office_id TEXT NOT NULL REFERENCES offices(id),
-  kind TEXT NOT NULL CHECK (kind IN ('sms_callback', 'kakao_sender')),
   value TEXT NOT NULL,
   label TEXT NOT NULL DEFAULT '',
   is_default INTEGER NOT NULL CHECK (is_default IN (0, 1)),
@@ -270,7 +268,7 @@ CREATE TABLE office_channels (
 ) STRICT;
 
 CREATE UNIQUE INDEX ux_channel_default
-  ON office_channels(office_id, kind)
+  ON office_channels(office_id)
   WHERE is_default = 1;
 
 CREATE TABLE lgu_tokens (

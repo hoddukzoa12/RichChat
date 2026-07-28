@@ -2,24 +2,16 @@ import { useInbox } from '../state/InboxContext'
 import {
   archivedCount,
   assigneeLabel,
-  channelCount,
   preview,
   scopeCount,
   statusCounts,
   visibleList,
 } from '../state/selectors'
-import type { Channel, Conversation, Scope, StatusFilter } from '../types'
-import { CHANNEL_DOT, CHANNEL_FULL } from '../theme'
-import { Avatar, ChannelBadge, MenuItem, Popover, StatusBadge } from './ui'
+import type { Conversation, Scope, StatusFilter } from '../types'
+import { Avatar, MenuItem, Popover, StatusBadge } from './ui'
 import type { Breakpoint } from '../hooks/useBreakpoint'
 
 const FILTERS: StatusFilter[] = ['전체', '미처리', '처리중', '완료']
-
-const CHANNEL_OPTIONS: { key: 'all' | Channel; label: string }[] = [
-  { key: 'all', label: '전체 채널' },
-  { key: '카톡', label: '카카오톡' },
-  { key: '문자', label: '문자' },
-]
 
 const SCOPE_OPTIONS: { key: Scope; label: string }[] = [
   { key: 'all', label: '전체 담당' },
@@ -59,7 +51,6 @@ function Row({ conv }: { conv: Conversation }) {
     >
       <div className="flex items-center gap-[7px]">
         {unread && <span className="w-[7px] h-[7px] rounded-full bg-brand flex-none" />}
-        <ChannelBadge channel={conv.channel} />
         <span
           className={`text-[14.5px] tracking-[-0.2px] ${unread ? 'font-extrabold' : 'font-bold'}`}
         >
@@ -120,7 +111,6 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
         ? 'w-[292px] flex-none border-r border-line'
         : 'w-[328px] flex-none border-r border-line'
 
-  const chanLabel = state.chan === 'all' ? '전체 채널' : CHANNEL_FULL[state.chan]
   const scopeLabel = SCOPE_OPTIONS.find((o) => o.key === state.scope)!.label
 
   return (
@@ -130,36 +120,6 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
           <span className="text-[19px] font-bold tracking-[-0.4px] flex-none whitespace-nowrap mr-0.5">
             대화
           </span>
-
-          <div className="relative">
-            <button
-              type="button"
-              className={pillClass(state.chan !== 'all')}
-              onClick={() =>
-                dispatch({ type: 'setMenu', value: state.menu === 'chan' ? null : 'chan' })
-              }
-            >
-              {chanLabel}
-              <span className="text-[8px] text-ink-400">▼</span>
-            </button>
-            <Popover
-              open={state.menu === 'chan'}
-              onClose={() => dispatch({ type: 'setMenu', value: null })}
-              className="top-9 left-0 w-[150px]"
-            >
-              {CHANNEL_OPTIONS.map((o) => (
-                <MenuItem
-                  key={o.key}
-                  active={state.chan === o.key}
-                  onClick={() => dispatch({ type: 'setChan', value: o.key })}
-                >
-                  <span className={`w-[9px] h-[9px] rounded-[3px] flex-none ${CHANNEL_DOT[o.key]}`} />
-                  {o.label}
-                  <span className="ml-auto text-xs text-ink-400">{channelCount(state, o.key)}</span>
-                </MenuItem>
-              ))}
-            </Popover>
-          </div>
 
           <div className="relative">
             <button

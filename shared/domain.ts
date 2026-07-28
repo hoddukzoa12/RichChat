@@ -1,4 +1,3 @@
-export const CHANNELS = ['카톡', '문자'] as const
 export const STATUSES = ['미처리', '처리중', '완료'] as const
 export const TASK_KINDS = ['warn', 'idle', 'done'] as const
 export const DIRECTIONS = ['in', 'out'] as const
@@ -10,11 +9,10 @@ export const DELIVERY_STATUSES = [
   '완료',
   '실패',
 ] as const
-export const SEND_CHANNELS = ['카톡', 'SMS', 'LMS', 'MMS'] as const
+export const SEND_CHANNELS = ['SMS', 'LMS', 'MMS'] as const
 export const ROLES = ['관리자', '세무사', '상담 담당'] as const
 export const USER_STATUSES = ['초대', '활성', '비활성'] as const
 
-export type Channel = (typeof CHANNELS)[number]
 export type Status = (typeof STATUSES)[number]
 export type TaskKind = (typeof TASK_KINDS)[number]
 export type Direction = (typeof DIRECTIONS)[number]

@@ -1,5 +1,4 @@
 import { useInbox } from '../state/InboxContext'
-import { CHANNEL_BADGE } from '../theme'
 import { Avatar } from './ui'
 import type { Breakpoint } from '../hooks/useBreakpoint'
 
@@ -21,11 +20,6 @@ export function Toast({ breakpoint }: { breakpoint: Breakpoint }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <span className="text-[13.5px] font-bold">{toast.name}</span>
-          <span
-            className={`text-[11px] font-bold rounded-[5px] px-1.5 py-[1.5px] ${CHANNEL_BADGE[toast.channel]}`}
-          >
-            {toast.channel}
-          </span>
           <span className="ml-auto text-[11.5px] text-ink-400">방금</span>
         </div>
         <div className="mt-[3px] text-[13px] text-ink-600 leading-normal">{toast.text}</div>
