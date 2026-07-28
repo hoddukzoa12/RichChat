@@ -118,6 +118,23 @@ describe('Session authentication', () => {
     expect(response.status).toBe(401)
   })
 
+  it('rejects a well-formed forged session cookie', async () => {
+    const response = await getMe('A'.repeat(43))
+
+    expect(response.status).toBe(401)
+  })
+
+  it('rejects a cookie whose session row no longer exists', async () => {
+    const session = await seedSession()
+    await env.DB.prepare('DELETE FROM auth_sessions WHERE id = ?')
+      .bind(session.sessionId)
+      .run()
+
+    const response = await getMe(session.token)
+
+    expect(response.status).toBe(401)
+  })
+
   it('rejects an expired session', async () => {
     const session = await seedSession()
     await env.DB.prepare(
@@ -278,9 +295,17 @@ describe('Development login', () => {
     expect(response?.status).toBe(404)
   })
 
-  it.each(['', '1', 'TRUE', 'yes', 'unexpected'])(
-    'keeps the route closed for a noncanonical enable value',
-    async (value) => {
+  it.each([
+    { label: 'empty', value: '' },
+    { label: 'numeric', value: '1' },
+    { label: 'uppercase', value: 'TRUE' },
+    { label: 'title-case', value: 'True' },
+    { label: 'word', value: 'yes' },
+    { label: 'padded', value: ' true ' },
+    { label: 'arbitrary', value: 'unexpected' },
+  ])(
+    'keeps the route closed for the $label enable value',
+    async ({ value }) => {
       const route = devRoutes.find(
         ({ method, path }) =>
           method === 'POST' && path === '/api/dev/login',
