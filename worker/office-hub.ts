@@ -1,1 +1,1 @@
-export class OfficeHub {}
+export { OfficeHub } from './realtime/hub'
