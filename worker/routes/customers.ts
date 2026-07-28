@@ -9,7 +9,6 @@ import type {
 import {
   changes,
   D1BatchError,
-  executeBatch,
 } from '../db/d1'
 import { publish } from '../db/events'
 import { ERROR_STATUS, error } from '../http/error'
@@ -17,6 +16,7 @@ import { json } from '../http/respond'
 import type { Route } from '../http/router'
 import { requireSession } from '../http/session'
 import { createId } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 const CUSTOMER_KEYS = new Set([
   'version',
@@ -444,6 +444,7 @@ function createPatchCustomer(
     request: Request,
     env: Env,
     params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> => {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
@@ -507,41 +508,48 @@ function createPatchCustomer(
         update.version,
       )
 
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: 'customer.updated',
+        entity: 'customer',
+        entityId: customerId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { version: update.version + 1 },
+        createdAt: now,
+      },
+      {
+        query: `SELECT 1
+                FROM customers
+                WHERE id = ?
+                  AND office_id = ?
+                  AND version = ?
+                  AND updated_at = ?`,
+        bindings: [
+          customerId,
+          session.officeId,
+          update.version + 1,
+          now,
+        ],
+      },
+    )
     const statements = [
       ...fieldStatements,
       customerStatement,
-      ...publish(
-        env.DB,
-        {
-          officeId: session.officeId,
-          type: 'customer.updated',
-          entity: 'customer',
-          entityId: customerId,
-          actorKind: 'user',
-          actorId: session.userId,
-          payload: { version: update.version + 1 },
-          createdAt: now,
-        },
-        {
-          query: `SELECT 1
-                  FROM customers
-                  WHERE id = ?
-                    AND office_id = ?
-                    AND version = ?
-                    AND updated_at = ?`,
-          bindings: [
-            customerId,
-            session.officeId,
-            update.version + 1,
-            now,
-          ],
-        },
-      ),
+      ...publication,
     ]
 
     let results: D1Result[]
     try {
-      results = await executeBatch(env.DB, statements)
+      results = await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
     } catch (cause) {
       if (cause instanceof D1BatchError && isFieldKeyConflict(cause)) {
         return error('CONFLICT', '같은 이름의 고객 필드가 이미 있습니다.')

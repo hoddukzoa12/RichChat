@@ -9,7 +9,7 @@ import type {
   TaskResponse,
   UpdateTaskRequest,
 } from '../../shared/wire/task'
-import { changes, executeBatch } from '../db/d1'
+import { changes } from '../db/d1'
 import {
   publish,
   type EventInput,
@@ -21,6 +21,7 @@ import { json } from '../http/respond'
 import { requireSession } from '../http/session'
 import { createId } from '../lib/ids'
 import type { Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 type JsonObject = Record<string, unknown>
 type TaskPatchKey = keyof UpdateTaskRequest
@@ -282,6 +283,7 @@ async function createTask(
   env: Env,
   conversationId: string,
   dependencies: TaskRouteDependencies,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -329,40 +331,45 @@ async function createTask(
     conversationId,
     session.officeId,
   )
-  const [result] = await executeBatch<TaskRow>(env.DB, [
-    mutation,
-    ...publish(
-      env.DB,
-      taskEvent('create', {
-        actorId: session.userId,
-        conversationId,
-        createdAt: now,
-        entityId: id,
-        officeId: session.officeId,
-        payload: {
-          name: input.name,
-          sub: input.sub,
-          kind: input.kind,
-          sortOrder: requestedSortOrder,
-        },
-      }),
-      activeTaskGuard({
-        conversationId,
-        createdAt: now,
-        expected: {
-          name: input.name,
-          sub: input.sub,
-          kind: input.kind,
-          ...(input.sortOrder === undefined
-            ? {}
-            : { sortOrder: input.sortOrder }),
-        },
-        officeId: session.officeId,
-        taskId: id,
-        updatedAt: now,
-      }),
-    ),
-  ])
+  const publication = publish(
+    env.DB,
+    taskEvent('create', {
+      actorId: session.userId,
+      conversationId,
+      createdAt: now,
+      entityId: id,
+      officeId: session.officeId,
+      payload: {
+        name: input.name,
+        sub: input.sub,
+        kind: input.kind,
+        sortOrder: requestedSortOrder,
+      },
+    }),
+    activeTaskGuard({
+      conversationId,
+      createdAt: now,
+      expected: {
+        name: input.name,
+        sub: input.sub,
+        kind: input.kind,
+        ...(input.sortOrder === undefined
+          ? {}
+          : { sortOrder: input.sortOrder }),
+      },
+      officeId: session.officeId,
+      taskId: id,
+      updatedAt: now,
+    }),
+  )
+  const statements = [mutation, ...publication]
+  const [result] = await executeBatchAndBroadcast<TaskRow>(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
   const row = result.results[0]
   if (!row) {
     return error('NOT_FOUND', '요청한 대화를 찾을 수 없습니다.')
@@ -378,6 +385,7 @@ async function patchTask(
   conversationId: string,
   taskId: string,
   dependencies: TaskRouteDependencies,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -421,27 +429,32 @@ async function patchTask(
     const value = patch[key]
     if (value !== undefined) eventPatch[key] = value
   }
-  const [result] = await executeBatch<TaskRow>(env.DB, [
-    mutation,
-    ...publish(
-      env.DB,
-      taskEvent('update', {
-        actorId: session.userId,
-        conversationId,
-        createdAt: now,
-        entityId: taskId,
-        officeId: session.officeId,
-        payload: eventPatch,
-      }),
-      activeTaskGuard({
-        conversationId,
-        expected: patch,
-        officeId: session.officeId,
-        taskId,
-        updatedAt: now,
-      }),
-    ),
-  ])
+  const publication = publish(
+    env.DB,
+    taskEvent('update', {
+      actorId: session.userId,
+      conversationId,
+      createdAt: now,
+      entityId: taskId,
+      officeId: session.officeId,
+      payload: eventPatch,
+    }),
+    activeTaskGuard({
+      conversationId,
+      expected: patch,
+      officeId: session.officeId,
+      taskId,
+      updatedAt: now,
+    }),
+  )
+  const statements = [mutation, ...publication]
+  const [result] = await executeBatchAndBroadcast<TaskRow>(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
   const row = result.results[0]
   if (!row) {
     return error('NOT_FOUND', TASK_NOT_FOUND_MESSAGE)
@@ -457,44 +470,53 @@ async function deleteTask(
   conversationId: string,
   taskId: string,
   dependencies: TaskRouteDependencies,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
 
   const now = dependencies.now()
-  const [result] = await executeBatch(env.DB, [
-    env.DB.prepare(
+  const mutation = env.DB
+    .prepare(
       `UPDATE tasks
       SET deleted_at = ?, updated_at = ?
       WHERE id = ?
         AND conversation_id = ?
         AND office_id = ?
         AND deleted_at IS NULL`,
-    ).bind(
+    )
+    .bind(
       now,
       now,
       taskId,
       conversationId,
       session.officeId,
-    ),
-    ...publish(
-      env.DB,
-      taskEvent('delete', {
-        actorId: session.userId,
-        conversationId,
-        createdAt: now,
-        entityId: taskId,
-        officeId: session.officeId,
-        payload: { deletedAt: now },
-      }),
-      deletedTaskGuard({
-        conversationId,
-        deletedAt: now,
-        officeId: session.officeId,
-        taskId,
-      }),
-    ),
-  ])
+    )
+  const publication = publish(
+    env.DB,
+    taskEvent('delete', {
+      actorId: session.userId,
+      conversationId,
+      createdAt: now,
+      entityId: taskId,
+      officeId: session.officeId,
+      payload: { deletedAt: now },
+    }),
+    deletedTaskGuard({
+      conversationId,
+      deletedAt: now,
+      officeId: session.officeId,
+      taskId,
+    }),
+  )
+  const statements = [mutation, ...publication]
+  const [result] = await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
   if (changes(result) === 0) {
     return error('NOT_FOUND', TASK_NOT_FOUND_MESSAGE)
   }
@@ -509,31 +531,33 @@ export function createTaskRoutes(
     {
       method: 'POST',
       path: TASK_COLLECTION_PATH,
-      handler: (request, env, params) =>
-        createTask(request, env, params.id, dependencies),
+      handler: (request, env, params, ctx) =>
+        createTask(request, env, params.id, dependencies, ctx),
     },
     {
       method: 'PATCH',
       path: TASK_ITEM_PATH,
-      handler: (request, env, params) =>
+      handler: (request, env, params, ctx) =>
         patchTask(
           request,
           env,
           params.id,
           params.taskId,
           dependencies,
+          ctx,
         ),
     },
     {
       method: 'DELETE',
       path: TASK_ITEM_PATH,
-      handler: (request, env, params) =>
+      handler: (request, env, params, ctx) =>
         deleteTask(
           request,
           env,
           params.id,
           params.taskId,
           dependencies,
+          ctx,
         ),
     },
   ]

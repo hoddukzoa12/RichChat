@@ -1,12 +1,11 @@
 import type {
-  EventActorKind,
-  JsonValue,
-} from '../../shared/domain'
-import type {
   EventCatchupResponse,
   EventCursorGoneResponse,
-  EventEnvelope,
 } from '../../shared/wire/event'
+import {
+  eventEnvelope,
+  type EventRow,
+} from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route } from '../http/router'
@@ -45,18 +44,6 @@ interface EventRangeRow {
   first_seq: number | null
 }
 
-interface EventRow {
-  office_seq: number
-  type: string
-  entity: string
-  entity_id: string
-  conversation_id: string | null
-  actor_kind: EventActorKind
-  actor_id: string | null
-  payload: string
-  created_at: number
-}
-
 function parseCursor(request: Request): number | undefined {
   const value = new URL(request.url).searchParams.get('since')
   if (value === null || !DECIMAL_CURSOR.test(value)) return undefined
@@ -80,20 +67,6 @@ function isContiguous(rows: readonly EventRow[], since: number): boolean {
   return rows.every(
     (row, index) => row.office_seq === since + index + 1,
   )
-}
-
-function envelope(row: EventRow): EventEnvelope {
-  return {
-    officeSeq: row.office_seq,
-    type: row.type,
-    entity: row.entity,
-    entityId: row.entity_id,
-    conversationId: row.conversation_id,
-    actorKind: row.actor_kind,
-    actorId: row.actor_id,
-    payload: JSON.parse(row.payload) as JsonValue,
-    createdAt: row.created_at,
-  }
 }
 
 async function getEvents(request: Request, env: Env): Promise<Response> {
@@ -147,7 +120,7 @@ async function getEvents(request: Request, env: Env): Promise<Response> {
   }
 
   const hasMore = rows.length > EVENT_PAGE_LIMIT
-  const events = rows.slice(0, EVENT_PAGE_LIMIT).map(envelope)
+  const events = rows.slice(0, EVENT_PAGE_LIMIT).map(eventEnvelope)
   const nextCursor = events.at(-1)?.officeSeq ?? since
 
   // 남은 행이 없는데 high-water mark에 못 미치면 중간 또는 꼬리가 잘린 상태다.

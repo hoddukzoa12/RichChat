@@ -1,4 +1,4 @@
-import { changes, executeBatch } from './db/d1'
+import { changes } from './db/d1'
 import { applyDeliveryReports } from './db/delivery'
 import { publish } from './db/events'
 import type { LguFetch } from './lgu/protocol'
@@ -11,6 +11,7 @@ import {
   type LguTokenEnv,
   type LguTokenProvider,
 } from './lgu/token'
+import { executeBatchAndBroadcast } from './realtime/broadcast'
 
 export const LGU_ATTACHMENT_RECOVERY_WINDOW_MS =
   7 * 24 * 60 * 60 * 1_000
@@ -24,6 +25,7 @@ const MAX_REPORTS_PER_REQUEST = 10
 interface AttachmentDownloadEnv extends LguTokenEnv {
   ATTACHMENTS: R2Bucket
   LGU_CONTENT_HOST: string
+  OFFICE_HUB: Env['OFFICE_HUB']
 }
 
 interface ClaimedAttachment {
@@ -95,11 +97,14 @@ const OUTCOME_COUNTER: Record<
   deferred: 'deferred',
 }
 
-export type ScheduledTask = (env: Env) => Promise<unknown>
+export type ScheduledTask = (
+  env: Env,
+  ctx?: ExecutionContext,
+) => Promise<unknown>
 
 const SCHEDULED_TASKS: readonly ScheduledTask[] = [
-  runDeliveryReportReconciliation,
-  runAttachmentDownloads,
+  (env, ctx) => runDeliveryReportReconciliation(env, {}, ctx),
+  (env, ctx) => runAttachmentDownloads(env, {}, ctx),
 ]
 
 export const PENDING_DELIVERY_REPORT_QUERY =
@@ -215,6 +220,7 @@ async function finalizeFailure(
   leaseUntil: number,
   reason: 'expired' | 'missing',
   now: number,
+  ctx?: ExecutionContext,
 ): Promise<boolean> {
   const guard = {
     query: `SELECT 1
@@ -233,24 +239,31 @@ async function finalizeFailure(
          AND download_lease_until = ?`,
     )
     .bind(attachment.id, leaseUntil)
+  const publication = publish(
+    env.DB,
+    {
+      officeId: attachment.office_id,
+      type: 'attachment.download_failed',
+      entity: 'attachment',
+      entityId: attachment.id,
+      conversationId: attachment.conversation_id,
+      actorKind: 'system',
+      payload: { status: '실패', reason },
+      createdAt: now,
+    },
+    guard,
+  )
   const statements = [
-    ...publish(
-      env.DB,
-      {
-        officeId: attachment.office_id,
-        type: 'attachment.download_failed',
-        entity: 'attachment',
-        entityId: attachment.id,
-        conversationId: attachment.conversation_id,
-        actorKind: 'system',
-        payload: { status: '실패', reason },
-        createdAt: now,
-      },
-      guard,
-    ),
+    ...publication,
     update,
   ]
-  const results = await executeBatch(env.DB, statements)
+  const results = await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
 
   return changes(results[results.length - 1]) === 1
 }
@@ -262,6 +275,7 @@ async function finalizeSuccess(
   object: R2Object,
   contentType: string,
   now: number,
+  ctx?: ExecutionContext,
 ): Promise<boolean> {
   const r2Key = attachmentObjectKey(attachment.id)
   const guard = {
@@ -294,24 +308,31 @@ async function finalizeSuccess(
       attachment.id,
       leaseUntil,
     )
+  const publication = publish(
+    env.DB,
+    {
+      officeId: attachment.office_id,
+      type: 'attachment.downloaded',
+      entity: 'attachment',
+      entityId: attachment.id,
+      conversationId: attachment.conversation_id,
+      actorKind: 'system',
+      payload: { status: '완료' },
+      createdAt: now,
+    },
+    guard,
+  )
   const statements = [
-    ...publish(
-      env.DB,
-      {
-        officeId: attachment.office_id,
-        type: 'attachment.downloaded',
-        entity: 'attachment',
-        entityId: attachment.id,
-        conversationId: attachment.conversation_id,
-        actorKind: 'system',
-        payload: { status: '완료' },
-        createdAt: now,
-      },
-      guard,
-    ),
+    ...publication,
     update,
   ]
-  const results = await executeBatch(env.DB, statements)
+  const results = await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
 
   return changes(results[results.length - 1]) === 1
 }
@@ -334,6 +355,7 @@ async function processAttachment(
   options: Required<
     Pick<AttachmentDownloadOptions, 'fetch' | 'logger' | 'now' | 'tokenProvider'>
   >,
+  ctx?: ExecutionContext,
 ): Promise<AttachmentOutcome> {
   const { attachment, leaseUntil } = claim
   const currentTime = options.now()
@@ -347,6 +369,7 @@ async function processAttachment(
       leaseUntil,
       'expired',
       currentTime,
+      ctx,
     )
     return failed ? 'failed' : 'deferred'
   }
@@ -363,6 +386,7 @@ async function processAttachment(
         existing,
         attachment.mime_type ?? 'application/octet-stream',
         options.now(),
+        ctx,
       )
       return completed ? 'completed' : 'deferred'
     }
@@ -388,6 +412,7 @@ async function processAttachment(
           leaseUntil,
           'missing',
           options.now(),
+          ctx,
         )
         return failed ? 'failed' : 'deferred'
       }
@@ -420,6 +445,7 @@ async function processAttachment(
       object,
       contentType,
       options.now(),
+      ctx,
     )
     return completed ? 'completed' : 'deferred'
   } catch (cause) {
@@ -436,6 +462,7 @@ async function processAttachment(
 export async function runAttachmentDownloads(
   env: AttachmentDownloadEnv,
   options: AttachmentDownloadOptions = {},
+  ctx?: ExecutionContext,
 ): Promise<AttachmentDownloadSummary> {
   const resolvedOptions = {
     fetch: options.fetch ?? fetch,
@@ -484,6 +511,7 @@ export async function runAttachmentDownloads(
       env,
       claim,
       resolvedOptions,
+      ctx,
     )
     summary[OUTCOME_COUNTER[outcome]] += 1
   }
@@ -494,6 +522,7 @@ export async function runAttachmentDownloads(
 export async function runDeliveryReportReconciliation(
   env: Env,
   options: DeliveryReportOptions = {},
+  ctx?: ExecutionContext,
 ): Promise<DeliveryReportReconciliationSummary> {
   const now = options.now ?? Date.now
   const currentTime = now()
@@ -543,7 +572,10 @@ export async function runDeliveryReportReconciliation(
       })
     }
 
-    const applied = await applyDeliveryReports(env.DB, result.reports)
+    const applied = await applyDeliveryReports(env.DB, result.reports, {
+      ctx,
+      env,
+    })
     summary.changed += applied.changed
     summary.rejected += result.rejected.length
     summary.unchanged += applied.unchanged
@@ -561,11 +593,12 @@ export async function runDeliveryReportReconciliation(
 export async function runScheduledTasks(
   env: Env,
   tasks: readonly ScheduledTask[] = SCHEDULED_TASKS,
+  ctx?: ExecutionContext,
 ): Promise<void> {
   await Promise.all(
     tasks.map(async (task) => {
       try {
-        await task(env)
+        await task(env, ctx)
       } catch (cause) {
         console.error('스케줄 작업 실행에 실패했습니다.', cause)
       }

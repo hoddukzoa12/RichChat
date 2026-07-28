@@ -8,7 +8,6 @@ import {
   type UserSettingInput,
   type UserSettings,
 } from '../../shared/wire/settings'
-import { executeBatch } from '../db/d1'
 import { publish } from '../db/events'
 import { error } from '../http/error'
 import type { Route } from '../http/router'
@@ -18,6 +17,7 @@ import {
 } from '../http/session'
 import { json } from '../http/respond'
 import type { Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 export { DEFAULT_USER_SETTINGS } from '../../shared/wire/settings'
 
@@ -249,6 +249,7 @@ async function patchMe(
   request: Request,
   env: Env,
   clock: Clock,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -273,35 +274,36 @@ async function patchMe(
     patch.title,
   ] as const
 
-  await executeBatch(env.DB, [
-    ...publish(
-      env.DB,
-      {
-        officeId: session.officeId,
-        type: USER_EVENT_TYPES.profileUpdated,
-        entity: USER_EVENT_ENTITY,
-        entityId: session.userId,
-        actorKind: 'user',
-        actorId: session.userId,
-        payload: {
-          ...(patch.hasName ? { name: patch.name } : {}),
-          ...(patch.hasTitle ? { title: patch.title } : {}),
-        },
-        createdAt: now,
+  const publication = publish(
+    env.DB,
+    {
+      officeId: session.officeId,
+      type: USER_EVENT_TYPES.profileUpdated,
+      entity: USER_EVENT_ENTITY,
+      entityId: session.userId,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: {
+        ...(patch.hasName ? { name: patch.name } : {}),
+        ...(patch.hasTitle ? { title: patch.title } : {}),
       },
-      {
-        query: `SELECT 1
-                FROM users
-                WHERE id = ?
-                  AND office_id = ?
-                  AND ${differencePredicate}`,
-        bindings: [
-          session.userId,
-          session.officeId,
-          ...differenceBindings,
-        ],
-      },
-    ),
+      createdAt: now,
+    },
+    {
+      query: `SELECT 1
+              FROM users
+              WHERE id = ?
+                AND office_id = ?
+                AND ${differencePredicate}`,
+      bindings: [
+        session.userId,
+        session.officeId,
+        ...differenceBindings,
+      ],
+    },
+  )
+  const statements = [
+    ...publication,
     env.DB.prepare(
       `UPDATE users
       SET
@@ -321,7 +323,14 @@ async function patchMe(
       session.officeId,
       ...differenceBindings,
     ),
-  ])
+  ]
+  await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
 
   return meResponse(env, session)
 }
@@ -330,6 +339,7 @@ async function patchSettings(
   request: Request,
   env: Env,
   clock: Clock,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -385,46 +395,47 @@ async function patchSettings(
         )
       )`
 
-  await executeBatch(env.DB, [
-    ...publish(
-      env.DB,
-      {
-        officeId: session.officeId,
-        type: USER_EVENT_TYPES.settingsUpdated,
-        entity: USER_EVENT_ENTITY,
-        entityId: session.userId,
-        actorKind: 'user',
-        actorId: session.userId,
-        payload: {
-          ...(patch.notifyNewChat === undefined
-            ? {}
-            : {
-                notifyNewChat:
-                  DB_BOOLEAN_VALUES[patch.notifyNewChat],
-              }),
-          ...(patch.notifyMineOnly === undefined
-            ? {}
-            : {
-                notifyMineOnly:
-                  DB_BOOLEAN_VALUES[patch.notifyMineOnly],
-              }),
-          ...(patch.notifySound === undefined
-            ? {}
-            : {
-                notifySound: DB_BOOLEAN_VALUES[patch.notifySound],
-              }),
-        },
-        createdAt: now,
+  const publication = publish(
+    env.DB,
+    {
+      officeId: session.officeId,
+      type: USER_EVENT_TYPES.settingsUpdated,
+      entity: USER_EVENT_ENTITY,
+      entityId: session.userId,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: {
+        ...(patch.notifyNewChat === undefined
+          ? {}
+          : {
+              notifyNewChat:
+                DB_BOOLEAN_VALUES[patch.notifyNewChat],
+            }),
+        ...(patch.notifyMineOnly === undefined
+          ? {}
+          : {
+              notifyMineOnly:
+                DB_BOOLEAN_VALUES[patch.notifyMineOnly],
+            }),
+        ...(patch.notifySound === undefined
+          ? {}
+          : {
+              notifySound: DB_BOOLEAN_VALUES[patch.notifySound],
+            }),
       },
-      {
-        query: changeGuard,
-        bindings: [
-          session.userId,
-          session.officeId,
-          ...differenceBindings,
-        ],
-      },
-    ),
+      createdAt: now,
+    },
+    {
+      query: changeGuard,
+      bindings: [
+        session.userId,
+        session.officeId,
+        ...differenceBindings,
+      ],
+    },
+  )
+  const statements = [
+    ...publication,
     env.DB.prepare(
       `INSERT INTO user_settings (
         user_id,
@@ -457,7 +468,14 @@ async function patchSettings(
       ...differenceBindings,
       ...differenceBindings,
     ),
-  ])
+  ]
+  await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
 
   return meResponse(env, session)
 }
@@ -476,13 +494,14 @@ export function createMeRoutes(
     {
       method: 'PATCH',
       path: '/api/me',
-      handler: (request, env) => patchMe(request, env, clock),
+      handler: (request, env, _params, ctx) =>
+        patchMe(request, env, clock, ctx),
     },
     {
       method: 'PATCH',
       path: '/api/me/settings',
-      handler: (request, env) =>
-        patchSettings(request, env, clock),
+      handler: (request, env, _params, ctx) =>
+        patchSettings(request, env, clock, ctx),
     },
   ]
 }

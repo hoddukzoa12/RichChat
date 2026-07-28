@@ -1,10 +1,11 @@
 import type { SendChannel } from '../../shared/domain'
-import { changes, executeBatch } from '../db/d1'
+import { changes } from '../db/d1'
 import { publish } from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route, RouteHandler } from '../http/router'
 import { createId, type Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1_000
 const QUARANTINE_ATTEMPTS = 3
@@ -431,11 +432,13 @@ async function quarantineDeterministicFailure(
 }
 
 async function processItem(
-  db: D1Database,
+  env: Env,
   prepared: PreparedMo,
   receivedAt: number,
+  ctx?: ExecutionContext,
 ): Promise<void> {
   const { item, occurredAt, channel, phoneE164 } = prepared
+  const db = env.DB
   const office = await findOffice(db)
   const customerId = createId()
   const conversationId = createId()
@@ -551,6 +554,27 @@ async function processItem(
     )
   }
 
+  const publication = publish(
+    db,
+    {
+      officeId: office.id,
+      type: 'message.created',
+      entity: 'message',
+      entityId: messageId,
+      actorKind: 'customer',
+      payload: {
+        direction: 'in',
+        channel,
+        moType: item.moType,
+        moNumber: item.moNumber,
+      },
+      createdAt: receivedAt,
+    },
+    {
+      query: 'SELECT 1 FROM messages WHERE id = ? AND mo_key = ?',
+      bindings: [messageId, item.moKey],
+    },
+  )
   statements.push(
     db
       .prepare(
@@ -597,33 +621,19 @@ async function processItem(
          WHERE id = (SELECT conversation_id FROM projection)`,
       )
       .bind(messageId, item.moKey, receivedAt),
-    ...publish(
-      db,
-      {
-        officeId: office.id,
-        type: 'message.created',
-        entity: 'message',
-        entityId: messageId,
-        actorKind: 'customer',
-        payload: {
-          direction: 'in',
-          channel,
-          moType: item.moType,
-          moNumber: item.moNumber,
-        },
-        createdAt: receivedAt,
-      },
-      {
-        query: 'SELECT 1 FROM messages WHERE id = ? AND mo_key = ?',
-        bindings: [messageId, item.moKey],
-      },
-    ),
+    ...publication,
     db
       .prepare('DELETE FROM mo_failures WHERE mo_key = ?')
       .bind(item.moKey),
   )
 
-  const results = await executeBatch(db, statements)
+  const results = await executeBatchAndBroadcast(
+    db,
+    statements,
+    [publication],
+    ctx,
+    env,
+  )
   if (changes(results[messageInsertIndex]) === 1) return
 
   const duplicate = await db
@@ -636,7 +646,7 @@ async function processItem(
 }
 
 export function createMoWebhookHandler(clock: Clock = Date.now): RouteHandler {
-  return async (request, env, params) => {
+  return async (request, env, params, ctx) => {
     const expectedSecret = env.LGU_MO_WEBHOOK_SECRET
     const candidateSecret = params.secret ?? ''
     if (
@@ -741,7 +751,7 @@ export function createMoWebhookHandler(clock: Clock = Date.now): RouteHandler {
 
     for (const item of prepared) {
       try {
-        await processItem(env.DB, item, receivedAt)
+        await processItem(env, item, receivedAt, ctx)
       } catch (cause) {
         // 검증 뒤의 예외는 모두 일시적이다. LGU+ 재전송을 멈추면 안 된다.
         console.error('LGU+ MO D1 커밋에 실패했습니다.', {

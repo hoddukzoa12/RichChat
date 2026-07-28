@@ -229,7 +229,7 @@ export function createReportWebhookHandler(
   clock: Clock = Date.now,
   logger: ReportLogger = console,
 ): RouteHandler {
-  return async (request, env, params) => {
+  return async (request, env, params, ctx) => {
     const expectedSecret = env.LGU_REPORT_WEBHOOK_SECRET
     if (
       typeof expectedSecret !== 'string' ||
@@ -276,7 +276,10 @@ export function createReportWebhookHandler(
     }
 
     try {
-      const summary = await applyDeliveryReports(env.DB, reports)
+      const summary = await applyDeliveryReports(env.DB, reports, {
+        ctx,
+        env,
+      })
       if (summary.unknown.length > 0) {
         logger.warn('아직 결합되지 않은 LGU+ 리포트를 재요청합니다.', {
           reportKeys: summary.unknown,

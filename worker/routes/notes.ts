@@ -1,5 +1,5 @@
 import type { Note, NoteResponse } from '../../shared/wire/note'
-import { changes, executeBatch } from '../db/d1'
+import { changes } from '../db/d1'
 import { publish } from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
@@ -9,6 +9,7 @@ import {
   type SessionContext,
 } from '../http/session'
 import { createId, type Clock } from '../lib/ids'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 interface NoteRow {
   id: string
@@ -167,6 +168,7 @@ export function createNoteRoutes(
     request: Request,
     env: Env,
     params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
@@ -188,7 +190,18 @@ export function createNoteRoutes(
 
     const noteId = idFactory()
     const now = clock()
-    await executeBatch(env.DB, [
+    const publication = publish(env.DB, {
+      officeId: session.officeId,
+      type: NOTE_EVENT_TYPES.created,
+      entity: NOTE_ENTITY,
+      entityId: noteId,
+      conversationId: params.id,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: { body },
+      createdAt: now,
+    })
+    const statements = [
       env.DB.prepare(
         `INSERT INTO notes (
           id,
@@ -208,18 +221,15 @@ export function createNoteRoutes(
         now,
         now,
       ),
-      ...publish(env.DB, {
-        officeId: session.officeId,
-        type: NOTE_EVENT_TYPES.created,
-        entity: NOTE_ENTITY,
-        entityId: noteId,
-        conversationId: params.id,
-        actorKind: 'user',
-        actorId: session.userId,
-        payload: { body },
-        createdAt: now,
-      }),
-    ])
+      ...publication,
+    ]
+    await executeBatchAndBroadcast(
+      env.DB,
+      statements,
+      [publication],
+      ctx,
+      env,
+    )
 
     const note = await loadActiveNote(
       env,
@@ -238,6 +248,7 @@ export function createNoteRoutes(
     request: Request,
     env: Env,
     params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
@@ -246,6 +257,40 @@ export function createNoteRoutes(
     if (body instanceof Response) return body
 
     const now = clock()
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: NOTE_EVENT_TYPES.updated,
+        entity: NOTE_ENTITY,
+        entityId: params.noteId,
+        conversationId: params.id,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { body },
+        createdAt: now,
+      },
+      {
+        // 과거 삭제 이벤트까지 확인해 동일 밀리초 재시도를 이번 삭제로 오인하지 않는다.
+        query: `SELECT 1
+                FROM notes
+                WHERE id = ?
+                  AND conversation_id = ?
+                  AND office_id = ?
+                  AND author_id = ?
+                  AND body = ?
+                  AND updated_at = ?
+                  AND deleted_at IS NULL`,
+        bindings: [
+          params.noteId,
+          params.id,
+          session.officeId,
+          session.userId,
+          body,
+          now,
+        ],
+      },
+    )
     const statements = [
       env.DB.prepare(
         `UPDATE notes
@@ -263,42 +308,15 @@ export function createNoteRoutes(
         session.officeId,
         session.userId,
       ),
-      ...publish(
-        env.DB,
-        {
-          officeId: session.officeId,
-          type: NOTE_EVENT_TYPES.updated,
-          entity: NOTE_ENTITY,
-          entityId: params.noteId,
-          conversationId: params.id,
-          actorKind: 'user',
-          actorId: session.userId,
-          payload: { body },
-          createdAt: now,
-        },
-        {
-          // 과거 삭제 이벤트까지 확인해 동일 밀리초 재시도를 이번 삭제로 오인하지 않는다.
-          query: `SELECT 1
-                  FROM notes
-                  WHERE id = ?
-                    AND conversation_id = ?
-                    AND office_id = ?
-                    AND author_id = ?
-                    AND body = ?
-                    AND updated_at = ?
-                    AND deleted_at IS NULL`,
-          bindings: [
-            params.noteId,
-            params.id,
-            session.officeId,
-            session.userId,
-            body,
-            now,
-          ],
-        },
-      ),
+      ...publication,
     ]
-    const [result] = await executeBatch(env.DB, statements)
+    const [result] = await executeBatchAndBroadcast(
+      env.DB,
+      statements,
+      [publication],
+      ctx,
+      env,
+    )
 
     if (changes(result) !== 1) {
       return zeroChangeResponse(
@@ -326,11 +344,56 @@ export function createNoteRoutes(
     request: Request,
     env: Env,
     params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
 
     const now = clock()
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: NOTE_EVENT_TYPES.deleted,
+        entity: NOTE_ENTITY,
+        entityId: params.noteId,
+        conversationId: params.id,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { deletedAt: now },
+        createdAt: now,
+      },
+      {
+        query: `SELECT 1
+                FROM notes
+                WHERE id = ?
+                  AND conversation_id = ?
+                  AND office_id = ?
+                  AND author_id = ?
+                  AND deleted_at = ?
+                  AND updated_at = ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM events
+                    WHERE office_id = ?
+                    AND type = ?
+                    AND entity = ?
+                    AND entity_id = ?
+                  )`,
+        bindings: [
+          params.noteId,
+          params.id,
+          session.officeId,
+          session.userId,
+          now,
+          now,
+          session.officeId,
+          NOTE_EVENT_TYPES.deleted,
+          NOTE_ENTITY,
+          params.noteId,
+        ],
+      },
+    )
     const statements = [
       env.DB.prepare(
         `UPDATE notes
@@ -348,52 +411,15 @@ export function createNoteRoutes(
         session.officeId,
         session.userId,
       ),
-      ...publish(
-        env.DB,
-        {
-          officeId: session.officeId,
-          type: NOTE_EVENT_TYPES.deleted,
-          entity: NOTE_ENTITY,
-          entityId: params.noteId,
-          conversationId: params.id,
-          actorKind: 'user',
-          actorId: session.userId,
-          payload: { deletedAt: now },
-          createdAt: now,
-        },
-        {
-          query: `SELECT 1
-                  FROM notes
-                  WHERE id = ?
-                    AND conversation_id = ?
-                    AND office_id = ?
-                    AND author_id = ?
-                    AND deleted_at = ?
-                    AND updated_at = ?
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM events
-                      WHERE office_id = ?
-                      AND type = ?
-                      AND entity = ?
-                      AND entity_id = ?
-                    )`,
-          bindings: [
-            params.noteId,
-            params.id,
-            session.officeId,
-            session.userId,
-            now,
-            now,
-            session.officeId,
-            NOTE_EVENT_TYPES.deleted,
-            NOTE_ENTITY,
-            params.noteId,
-          ],
-        },
-      ),
+      ...publication,
     ]
-    const [result] = await executeBatch(env.DB, statements)
+    const [result] = await executeBatchAndBroadcast(
+      env.DB,
+      statements,
+      [publication],
+      ctx,
+      env,
+    )
 
     if (changes(result) !== 1) {
       return zeroChangeResponse(

@@ -4,6 +4,7 @@ export type RouteHandler = (
   request: Request,
   env: Env,
   params: RouteParams,
+  ctx?: ExecutionContext,
 ) => Response | Promise<Response>
 
 export interface Route {
@@ -45,6 +46,7 @@ export async function dispatch(
   request: Request,
   env: Env,
   routes: Route[],
+  ctx?: ExecutionContext,
 ): Promise<Response | undefined> {
   const pathname = new URL(request.url).pathname
   const methodRoutes = routes.filter(
@@ -53,11 +55,11 @@ export async function dispatch(
   const exactRoute = methodRoutes.find(
     (candidate) => candidate.path === pathname,
   )
-  if (exactRoute) return exactRoute.handler(request, env, {})
+  if (exactRoute) return exactRoute.handler(request, env, {}, ctx)
 
   for (const route of methodRoutes) {
     const params = matchPath(route.path, pathname)
-    if (params) return route.handler(request, env, params)
+    if (params) return route.handler(request, env, params, ctx)
   }
 
   return undefined
