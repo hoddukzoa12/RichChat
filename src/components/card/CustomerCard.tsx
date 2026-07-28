@@ -2,7 +2,7 @@ import { useInbox } from '../../state/InboxContext'
 import type { CardTab } from '../../types'
 import type { Breakpoint } from '../../hooks/useBreakpoint'
 import { useCustomerCard } from '../../hooks/useCustomerCard'
-import { AiComposer, AiTab } from './AiTab'
+import { AiTab } from './AiTab'
 import { FolderTab } from './FolderTab'
 import { InfoTab } from './InfoTab'
 
@@ -142,8 +142,6 @@ export function CustomerCard({ breakpoint }: { breakpoint: Breakpoint }) {
           {state.tab === 'folder' && <FolderTab />}
           {state.tab === 'ai' && <AiTab />}
         </div>
-
-        {state.tab === 'ai' && <AiComposer />}
       </div>
     </>
   )
