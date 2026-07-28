@@ -5,12 +5,7 @@ import {
   apiRequest,
   onUnauthorized,
 } from './client'
-import {
-  customersEndpoint,
-  eventsEndpoint,
-  notesEndpoint,
-  tasksEndpoint,
-} from './endpoints'
+import { eventsEndpoint } from './endpoints'
 import { EndpointStubError } from './endpointStub'
 
 afterEach(() => {
@@ -138,12 +133,7 @@ describe('API client', () => {
 
 describe('Endpoint stubs', () => {
   it('fails explicitly for every endpoint owned by later slices', () => {
-    const stubs = [
-      customersEndpoint,
-      notesEndpoint,
-      tasksEndpoint,
-      eventsEndpoint,
-    ]
+    const stubs = [eventsEndpoint]
 
     for (const stub of stubs) {
       expect(stub).toThrow(EndpointStubError)
