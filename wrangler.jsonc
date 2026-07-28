@@ -11,7 +11,13 @@
     "run_worker_first": ["/api", "/api/*"]
   },
   "vars": {
-    "LGU_ENV": "local"
+    "LGU_ENV": "local",
+    "LGU_AUTH_HOST": "api.msghub-qa.uplus.co.kr",
+    "LGU_SEND_HOST": "api-send.msghub-qa.uplus.co.kr",
+    "LGU_CONTENT_HOST": "mnt-api.msghub-qa.uplus.co.kr"
+  },
+  "secrets": {
+    "required": ["LGU_API_KEY", "LGU_API_PASSWORD"]
   },
   "d1_databases": [
     {
