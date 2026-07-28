@@ -66,9 +66,18 @@ orca orchestration dispatch --task <task_id> --to <handle> --inject --json
 그다음 **반드시 백그라운드로 대기를 건다.** 안 걸면 완료를 손으로 들여다봐야 한다.
 
 ```sh
+orca orchestration check --unread --json >/dev/null   # 묵은 것 먼저 비운다
 orca orchestration check --wait --types worker_done,escalation,decision_gate \
-  --timeout-ms 900000 --json
+  --timeout-ms 900000 --json > wait-<슬라이스>.json
 ```
+
+**비우는 단계를 빼지 마라.** `check --wait`은 가장 오래된 미읽음을 반환한다.
+이전 슬라이스의 완료 보고가 남아 있으면 **새 워커를 기다린다고 걸어놓고 옛
+메시지를 받고 즉시 종료**한다. 실제로 두 번 겪었다. `check --all`은 읽음
+처리를 하지 않으므로 조회에만 쓰고, 소비가 필요하면 `--unread`를 쓴다.
+
+결과는 파일로 받아라. 파이프로 파싱하면 CLI가 JSON을 여러 개 이어 뱉을 때
+깨진다.
 
 타임아웃은 실패가 아니라 체크포인트다. `worker_done`/`escalation`이 오거나
 터미널이 사라지기 전까지 대기를 다시 건다.
