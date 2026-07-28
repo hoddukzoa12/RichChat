@@ -12,6 +12,7 @@ export const DELIVERY_STATUSES = [
 export const SEND_CHANNELS = ['SMS', 'LMS', 'MMS'] as const
 export const ROLES = ['관리자', '세무사', '상담 담당'] as const
 export const USER_STATUSES = ['초대', '활성', '비활성'] as const
+export const ATTACHMENT_DOWNLOAD_STATUSES = ['대기', '완료', '실패'] as const
 
 export type Status = (typeof STATUSES)[number]
 export type TaskKind = (typeof TASK_KINDS)[number]
@@ -20,3 +21,5 @@ export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number]
 export type SendChannel = (typeof SEND_CHANNELS)[number]
 export type Role = (typeof ROLES)[number]
 export type UserStatus = (typeof USER_STATUSES)[number]
+export type AttachmentDownloadStatus =
+  (typeof ATTACHMENT_DOWNLOAD_STATUSES)[number]

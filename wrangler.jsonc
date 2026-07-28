@@ -20,6 +20,12 @@
       "database_id": "486256bf-b4ec-47ca-ae44-5af82de40095"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "ATTACHMENTS",
+      "bucket_name": "richchat-attachments"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
