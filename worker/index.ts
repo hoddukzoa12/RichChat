@@ -16,7 +16,6 @@ import { routes as messagesSendRoutes } from './routes/messages-send'
 import { routes as notesRoutes } from './routes/notes'
 import { routes as officeRoutes } from './routes/office'
 import { routes as readsRoutes } from './routes/reads'
-import { routes as settingsMeRoutes } from './routes/settings-me'
 import { routes as tasksRoutes } from './routes/tasks'
 
 export { OfficeHub } from './office-hub'
@@ -34,7 +33,6 @@ const routes: Route[] = [
   ...customersRoutes,
   ...notesRoutes,
   ...tasksRoutes,
-  ...settingsMeRoutes,
   ...officeRoutes,
   ...messagesSendRoutes,
   ...hooksMoRoutes,

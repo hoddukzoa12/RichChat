@@ -1,5 +1,15 @@
 import type { Role } from '../../shared/domain'
-import { changes } from '../db/d1'
+import {
+  DEFAULT_USER_SETTINGS,
+  ME_PROFILE_FIELDS,
+  USER_SETTING_FIELDS,
+  USER_SETTING_INPUTS,
+  type MeResponse,
+  type UserSettingInput,
+  type UserSettings,
+} from '../../shared/wire/settings'
+import { executeBatch } from '../db/d1'
+import { publish } from '../db/events'
 import { error } from '../http/error'
 import type { Route } from '../http/router'
 import {
@@ -7,19 +17,38 @@ import {
   type SessionContext,
 } from '../http/session'
 import { json } from '../http/respond'
+import type { Clock } from '../lib/ids'
 
-export const DEFAULT_USER_SETTINGS = {
-  notifyNewChat: true,
-  notifyMineOnly: false,
-  notifySound: true,
-} as const
+export { DEFAULT_USER_SETTINGS } from '../../shared/wire/settings'
 
-const PROFILE_KEYS = ['name', 'title'] as const
-const SETTING_KEYS = [
-  'notifyNewChat',
-  'notifyMineOnly',
-  'notifySound',
-] as const
+export const USER_EVENT_ENTITY = 'user'
+type UserEventAction = 'profileUpdated' | 'settingsUpdated'
+export const USER_EVENT_TYPES = {
+  profileUpdated: 'user.profile.updated',
+  settingsUpdated: 'user.settings.updated',
+} as const satisfies Record<UserEventAction, string>
+const SETTING_INPUT_VALUES = new Map<unknown, 0 | 1>(
+  USER_SETTING_INPUTS,
+)
+const DB_BOOLEAN_VALUES: Record<0 | 1, boolean> = {
+  0: false,
+  1: true,
+}
+
+function settingInput(value: UserSettingInput): 0 | 1 {
+  const normalized = SETTING_INPUT_VALUES.get(value)
+  if (normalized === undefined) {
+    throw new TypeError('기본 알림 설정을 정규화할 수 없습니다.')
+  }
+
+  return normalized
+}
+
+const DEFAULT_USER_SETTINGS_DB: Record<keyof UserSettings, 0 | 1> = {
+  notifyNewChat: settingInput(DEFAULT_USER_SETTINGS.notifyNewChat),
+  notifyMineOnly: settingInput(DEFAULT_USER_SETTINGS.notifyMineOnly),
+  notifySound: settingInput(DEFAULT_USER_SETTINGS.notifySound),
+}
 
 interface MeRow {
   user_id: string
@@ -36,6 +65,23 @@ interface MeRow {
 }
 
 type JsonObject = Record<string, unknown>
+
+interface ProfilePatch {
+  hasName: boolean
+  hasTitle: boolean
+  name: string
+  title: string
+}
+
+interface SettingsPatch {
+  notifyNewChat?: 0 | 1
+  notifyMineOnly?: 0 | 1
+  notifySound?: 0 | 1
+}
+
+interface MeRouteDependencies {
+  clock?: Clock
+}
 
 async function readJsonObject(
   request: Request,
@@ -62,6 +108,65 @@ function hasOnlyKeys(
 ): boolean {
   const allowed = new Set(allowedKeys)
   return Object.keys(object).every((key) => allowed.has(key))
+}
+
+function parseProfilePatch(
+  body: JsonObject,
+): ProfilePatch | Response {
+  if (
+    !hasOnlyKeys(body, ME_PROFILE_FIELDS) ||
+    !ME_PROFILE_FIELDS.some((key) => Object.hasOwn(body, key))
+  ) {
+    return error(
+      'BAD_REQUEST',
+      '이름과 직함만 변경할 수 있습니다.',
+    )
+  }
+
+  const hasName = Object.hasOwn(body, 'name')
+  const hasTitle = Object.hasOwn(body, 'title')
+  if (
+    (hasName &&
+      (typeof body.name !== 'string' || body.name.trim() === '')) ||
+    (hasTitle &&
+      (typeof body.title !== 'string' || body.title.trim() === ''))
+  ) {
+    return error('BAD_REQUEST', '이름과 직함은 빈 문자열일 수 없습니다.')
+  }
+
+  return {
+    hasName,
+    hasTitle,
+    name: typeof body.name === 'string' ? body.name.trim() : '',
+    title: typeof body.title === 'string' ? body.title.trim() : '',
+  }
+}
+
+function parseSettingsPatch(
+  body: JsonObject,
+): SettingsPatch | Response {
+  if (
+    !hasOnlyKeys(body, USER_SETTING_FIELDS) ||
+    !USER_SETTING_FIELDS.some((key) => Object.hasOwn(body, key))
+  ) {
+    return error('BAD_REQUEST', '알림 설정 값이 필요합니다.')
+  }
+
+  const patch: SettingsPatch = {}
+  for (const key of USER_SETTING_FIELDS) {
+    if (!Object.hasOwn(body, key)) continue
+
+    const normalized = SETTING_INPUT_VALUES.get(body[key])
+    if (normalized === undefined) {
+      return error(
+        'BAD_REQUEST',
+        '알림 설정은 참 또는 거짓이어야 합니다.',
+      )
+    }
+    patch[key] = normalized
+  }
+
+  return patch
 }
 
 async function loadMe(
@@ -130,7 +235,7 @@ async function meResponse(
       ),
     },
     isAdmin: row.role === '관리자',
-  })
+  } satisfies MeResponse)
 }
 
 async function getMe(request: Request, env: Env): Promise<Response> {
@@ -140,62 +245,10 @@ async function getMe(request: Request, env: Env): Promise<Response> {
   return meResponse(env, session)
 }
 
-async function patchMe(request: Request, env: Env): Promise<Response> {
-  const session = await requireSession(request, env)
-  if (session instanceof Response) return session
-
-  const body = await readJsonObject(request)
-  if (body instanceof Response) return body
-
-  if (
-    !hasOnlyKeys(body, PROFILE_KEYS) ||
-    Object.keys(body).length === 0
-  ) {
-    return error(
-      'BAD_REQUEST',
-      '이름과 직함만 변경할 수 있습니다.',
-    )
-  }
-
-  const name = body.name
-  const title = body.title
-  if (
-    (name !== undefined &&
-      (typeof name !== 'string' || name.trim() === '')) ||
-    (title !== undefined &&
-      (typeof title !== 'string' || title.trim() === ''))
-  ) {
-    return error('BAD_REQUEST', '이름과 직함은 빈 문자열일 수 없습니다.')
-  }
-
-  const result = await env.DB.prepare(
-    `UPDATE users
-    SET
-      name = COALESCE(?, name),
-      title = COALESCE(?, title),
-      updated_at = ?
-    WHERE id = ?
-      AND office_id = ?`,
-  )
-    .bind(
-      typeof name === 'string' ? name.trim() : null,
-      typeof title === 'string' ? title.trim() : null,
-      Date.now(),
-      session.userId,
-      session.officeId,
-    )
-    .run()
-
-  if (changes(result) !== 1) {
-    return error('UNAUTHORIZED', '로그인이 필요합니다.')
-  }
-
-  return meResponse(env, session)
-}
-
-async function patchSettings(
+async function patchMe(
   request: Request,
   env: Env,
+  clock: Clock,
 ): Promise<Response> {
   const session = await requireSession(request, env)
   if (session instanceof Response) return session
@@ -203,76 +256,235 @@ async function patchSettings(
   const body = await readJsonObject(request)
   if (body instanceof Response) return body
 
-  if (
-    !hasOnlyKeys(body, SETTING_KEYS) ||
-    Object.keys(body).length === 0
-  ) {
-    return error('BAD_REQUEST', '알림 설정 값이 필요합니다.')
-  }
+  const patch = parseProfilePatch(body)
+  if (patch instanceof Response) return patch
 
-  for (const key of SETTING_KEYS) {
-    if (body[key] !== undefined && typeof body[key] !== 'boolean') {
-      return error('BAD_REQUEST', '알림 설정은 참 또는 거짓이어야 합니다.')
-    }
-  }
+  const hasName = Number(patch.hasName)
+  const hasTitle = Number(patch.hasTitle)
+  const now = clock()
+  const differencePredicate = `(
+    (? = 1 AND name <> ?)
+    OR (? = 1 AND title <> ?)
+  )`
+  const differenceBindings = [
+    hasName,
+    patch.name,
+    hasTitle,
+    patch.title,
+  ] as const
 
-  const notifyNewChat =
-    typeof body.notifyNewChat === 'boolean'
-      ? Number(body.notifyNewChat)
-      : null
-  const notifyMineOnly =
-    typeof body.notifyMineOnly === 'boolean'
-      ? Number(body.notifyMineOnly)
-      : null
-  const notifySound =
-    typeof body.notifySound === 'boolean'
-      ? Number(body.notifySound)
-      : null
-  const now = Date.now()
-
-  await env.DB.prepare(
-    `INSERT INTO user_settings (
-      user_id,
-      notify_new_chat,
-      notify_mine_only,
-      notify_sound,
-      updated_at
-    ) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET
-      notify_new_chat = COALESCE(?, user_settings.notify_new_chat),
-      notify_mine_only = COALESCE(?, user_settings.notify_mine_only),
-      notify_sound = COALESCE(?, user_settings.notify_sound),
-      updated_at = excluded.updated_at`,
-  )
-    .bind(
-      session.userId,
-      notifyNewChat ?? Number(DEFAULT_USER_SETTINGS.notifyNewChat),
-      notifyMineOnly ?? Number(DEFAULT_USER_SETTINGS.notifyMineOnly),
-      notifySound ?? Number(DEFAULT_USER_SETTINGS.notifySound),
+  await executeBatch(env.DB, [
+    ...publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: USER_EVENT_TYPES.profileUpdated,
+        entity: USER_EVENT_ENTITY,
+        entityId: session.userId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: {
+          ...(patch.hasName ? { name: patch.name } : {}),
+          ...(patch.hasTitle ? { title: patch.title } : {}),
+        },
+        createdAt: now,
+      },
+      {
+        query: `SELECT 1
+                FROM users
+                WHERE id = ?
+                  AND office_id = ?
+                  AND ${differencePredicate}`,
+        bindings: [
+          session.userId,
+          session.officeId,
+          ...differenceBindings,
+        ],
+      },
+    ),
+    env.DB.prepare(
+      `UPDATE users
+      SET
+        name = CASE WHEN ? = 1 THEN ? ELSE name END,
+        title = CASE WHEN ? = 1 THEN ? ELSE title END,
+        updated_at = ?
+      WHERE id = ?
+        AND office_id = ?
+        AND ${differencePredicate}`,
+    ).bind(
+      hasName,
+      patch.name,
+      hasTitle,
+      patch.title,
       now,
-      notifyNewChat,
-      notifyMineOnly,
-      notifySound,
-    )
-    .run()
+      session.userId,
+      session.officeId,
+      ...differenceBindings,
+    ),
+  ])
 
   return meResponse(env, session)
 }
 
-export const routes: Route[] = [
-  {
-    method: 'GET',
-    path: '/api/me',
-    handler: getMe,
-  },
-  {
-    method: 'PATCH',
-    path: '/api/me',
-    handler: patchMe,
-  },
-  {
-    method: 'PATCH',
-    path: '/api/me/settings',
-    handler: patchSettings,
-  },
-]
+async function patchSettings(
+  request: Request,
+  env: Env,
+  clock: Clock,
+): Promise<Response> {
+  const session = await requireSession(request, env)
+  if (session instanceof Response) return session
+
+  const body = await readJsonObject(request)
+  if (body instanceof Response) return body
+
+  const patch = parseSettingsPatch(body)
+  if (patch instanceof Response) return patch
+
+  const hasNotifyNewChat = Number(
+    patch.notifyNewChat !== undefined,
+  )
+  const hasNotifyMineOnly = Number(
+    patch.notifyMineOnly !== undefined,
+  )
+  const hasNotifySound = Number(patch.notifySound !== undefined)
+  const notifyNewChat =
+    patch.notifyNewChat ?? DEFAULT_USER_SETTINGS_DB.notifyNewChat
+  const notifyMineOnly =
+    patch.notifyMineOnly ?? DEFAULT_USER_SETTINGS_DB.notifyMineOnly
+  const notifySound =
+    patch.notifySound ?? DEFAULT_USER_SETTINGS_DB.notifySound
+  const now = clock()
+  const differencePredicate = `(
+    (? = 1 AND notify_new_chat <> ?)
+    OR (? = 1 AND notify_mine_only <> ?)
+    OR (? = 1 AND notify_sound <> ?)
+  )`
+  const differenceBindings = [
+    hasNotifyNewChat,
+    notifyNewChat,
+    hasNotifyMineOnly,
+    notifyMineOnly,
+    hasNotifySound,
+    notifySound,
+  ] as const
+  const changeGuard = `SELECT 1
+    FROM users
+    WHERE users.id = ?
+      AND users.office_id = ?
+      AND (
+        NOT EXISTS (
+          SELECT 1
+          FROM user_settings
+          WHERE user_settings.user_id = users.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM user_settings
+          WHERE user_settings.user_id = users.id
+            AND ${differencePredicate}
+        )
+      )`
+
+  await executeBatch(env.DB, [
+    ...publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: USER_EVENT_TYPES.settingsUpdated,
+        entity: USER_EVENT_ENTITY,
+        entityId: session.userId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: {
+          ...(patch.notifyNewChat === undefined
+            ? {}
+            : {
+                notifyNewChat:
+                  DB_BOOLEAN_VALUES[patch.notifyNewChat],
+              }),
+          ...(patch.notifyMineOnly === undefined
+            ? {}
+            : {
+                notifyMineOnly:
+                  DB_BOOLEAN_VALUES[patch.notifyMineOnly],
+              }),
+          ...(patch.notifySound === undefined
+            ? {}
+            : {
+                notifySound: DB_BOOLEAN_VALUES[patch.notifySound],
+              }),
+        },
+        createdAt: now,
+      },
+      {
+        query: changeGuard,
+        bindings: [
+          session.userId,
+          session.officeId,
+          ...differenceBindings,
+        ],
+      },
+    ),
+    env.DB.prepare(
+      `INSERT INTO user_settings (
+        user_id,
+        notify_new_chat,
+        notify_mine_only,
+        notify_sound,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        notify_new_chat = CASE
+          WHEN ? = 1 THEN ?
+          ELSE user_settings.notify_new_chat
+        END,
+        notify_mine_only = CASE
+          WHEN ? = 1 THEN ?
+          ELSE user_settings.notify_mine_only
+        END,
+        notify_sound = CASE
+          WHEN ? = 1 THEN ?
+          ELSE user_settings.notify_sound
+        END,
+        updated_at = excluded.updated_at
+      WHERE ${differencePredicate}`,
+    ).bind(
+      session.userId,
+      notifyNewChat,
+      notifyMineOnly,
+      notifySound,
+      now,
+      ...differenceBindings,
+      ...differenceBindings,
+    ),
+  ])
+
+  return meResponse(env, session)
+}
+
+export function createMeRoutes(
+  dependencies: MeRouteDependencies = {},
+): Route[] {
+  const clock = dependencies.clock ?? Date.now
+
+  return [
+    {
+      method: 'GET',
+      path: '/api/me',
+      handler: getMe,
+    },
+    {
+      method: 'PATCH',
+      path: '/api/me',
+      handler: (request, env) => patchMe(request, env, clock),
+    },
+    {
+      method: 'PATCH',
+      path: '/api/me/settings',
+      handler: (request, env) =>
+        patchSettings(request, env, clock),
+    },
+  ]
+}
+
+export const routes = createMeRoutes()

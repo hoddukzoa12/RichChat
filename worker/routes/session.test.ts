@@ -10,6 +10,7 @@ import {
   SESSION_COOKIE_NAME,
 } from '../http/session'
 import { routes as devRoutes } from './dev'
+import { USER_EVENT_ENTITY, USER_EVENT_TYPES } from './me'
 
 declare module 'cloudflare:test' {
   interface ProvidedEnv extends Env {}
@@ -19,9 +20,26 @@ const ORIGIN = 'https://example.com'
 
 interface SeededSession {
   email: string
+  officeId: string
   sessionId: string
   token: string
   userId: string
+}
+
+interface StoredUser {
+  email: string
+  name: string
+  office_id: string
+  role: Role
+  status: UserStatus
+  title: string
+  works_sub: string | null
+}
+
+interface StoredSettings {
+  notify_new_chat: number
+  notify_mine_only: number
+  notify_sound: number
 }
 
 let seedSequence = 0
@@ -78,6 +96,7 @@ async function seedSession(
   const session = await createSession(env.DB, { userId, officeId }, now)
   return {
     email,
+    officeId,
     sessionId: session.id,
     token: session.token,
     userId,
@@ -96,19 +115,73 @@ async function getMe(token?: string): Promise<Response> {
 
 async function patch(
   path: string,
-  token: string,
+  token: string | undefined,
   body: Record<string, unknown>,
   origin = ORIGIN,
 ): Promise<Response> {
+  const headers = new Headers({
+    'content-type': 'application/json',
+    origin,
+  })
+  if (token) headers.set('cookie', cookie(token))
+
   return SELF.fetch(`${ORIGIN}${path}`, {
     method: 'PATCH',
-    headers: {
-      cookie: cookie(token),
-      'content-type': 'application/json',
-      origin,
-    },
+    headers,
     body: JSON.stringify(body),
   })
+}
+
+async function storedUser(userId: string): Promise<StoredUser | null> {
+  return env.DB.prepare(
+    `SELECT
+      email, name, office_id, role, status, title, works_sub
+    FROM users
+    WHERE id = ?`,
+  )
+    .bind(userId)
+    .first<StoredUser>()
+}
+
+async function storedSettings(
+  userId: string,
+): Promise<StoredSettings | null> {
+  return env.DB.prepare(
+    `SELECT notify_new_chat, notify_mine_only, notify_sound
+    FROM user_settings
+    WHERE user_id = ?`,
+  )
+    .bind(userId)
+    .first<StoredSettings>()
+}
+
+async function settingsRowCount(userId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+    FROM user_settings
+    WHERE user_id = ?`,
+  )
+    .bind(userId)
+    .first<{ count: number }>()
+
+  return row?.count ?? 0
+}
+
+async function userEventCount(
+  userId: string,
+  type: (typeof USER_EVENT_TYPES)[keyof typeof USER_EVENT_TYPES],
+): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+    FROM events
+    WHERE entity = ?
+      AND entity_id = ?
+      AND type = ?`,
+  )
+    .bind(USER_EVENT_ENTITY, userId, type)
+    .first<{ count: number }>()
+
+  return row?.count ?? 0
 }
 
 describe('Session authentication', () => {
@@ -327,6 +400,24 @@ describe('Development login', () => {
 })
 
 describe('Current user routes', () => {
+  it.each([
+    {
+      path: '/api/me',
+      body: { name: '인증 없는 변경' },
+    },
+    {
+      path: '/api/me/settings',
+      body: { notifySound: false },
+    },
+  ])(
+    'rejects an unauthenticated PATCH to $path',
+    async ({ path, body }) => {
+      const response = await patch(path, undefined, body)
+
+      expect(response.status).toBe(401)
+    },
+  )
+
   it('derives administrator access from the current database role', async () => {
     const session = await seedSession('활성', '상담 담당')
     const before = await getMe(session.token)
@@ -367,22 +458,67 @@ describe('Current user routes', () => {
         role: '세무사',
       },
     })
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.profileUpdated,
+      ),
+    ).toBe(1)
+
+    const nameOnly = await patch('/api/me', session.token, {
+      name: '이세무',
+    })
+    expect(nameOnly.status).toBe(200)
+    const reflected = await getMe(session.token)
+    expect(reflected.status).toBe(200)
+    await expect(reflected.json()).resolves.toMatchObject({
+      user: {
+        name: '이세무',
+        title: '대표 세무사',
+      },
+    })
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.profileUpdated,
+      ),
+    ).toBe(2)
+
+    const replay = await patch('/api/me', session.token, {
+      name: '이세무',
+    })
+    expect(replay.status).toBe(200)
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.profileUpdated,
+      ),
+    ).toBe(2)
 
     const rejected = await patch('/api/me', session.token, {
       email: 'changed@rich.example',
       role: '관리자',
+      status: '비활성',
+      office_id: 'attacker-office',
+      works_sub: 'attacker-sub',
     })
     expect(rejected.status).toBe(400)
 
-    const stored = await env.DB.prepare(
-      'SELECT email, role FROM users WHERE id = ?',
-    )
-      .bind(session.userId)
-      .first<{ email: string; role: Role }>()
-    expect(stored).toEqual({
+    expect(await storedUser(session.userId)).toEqual({
       email: session.email,
+      name: '이세무',
+      office_id: session.officeId,
       role: '세무사',
+      status: '활성',
+      title: '대표 세무사',
+      works_sub: null,
     })
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.profileUpdated,
+      ),
+    ).toBe(2)
   })
 
   it('updates notification settings independently', async () => {
@@ -400,6 +536,169 @@ describe('Current user routes', () => {
         notifySound: false,
       },
     })
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.settingsUpdated,
+      ),
+    ).toBe(1)
+  })
+
+  it('creates missing settings and keeps one row across patches', async () => {
+    const session = await seedSession()
+    await env.DB.prepare(
+      'DELETE FROM user_settings WHERE user_id = ?',
+    )
+      .bind(session.userId)
+      .run()
+
+    const created = await patch(
+      '/api/me/settings',
+      session.token,
+      {
+        notifyNewChat: 1,
+        notifyMineOnly: 'true',
+      },
+    )
+    expect(created.status).toBe(200)
+    expect(await storedSettings(session.userId)).toEqual({
+      notify_new_chat: 1,
+      notify_mine_only: 1,
+      notify_sound: 1,
+    })
+    expect(await settingsRowCount(session.userId)).toBe(1)
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.settingsUpdated,
+      ),
+    ).toBe(1)
+
+    const updated = await patch(
+      '/api/me/settings',
+      session.token,
+      { notifySound: 'false' },
+    )
+    expect(updated.status).toBe(200)
+    await expect(updated.json()).resolves.toMatchObject({
+      settings: {
+        notifyNewChat: true,
+        notifyMineOnly: true,
+        notifySound: false,
+      },
+    })
+    expect(await storedSettings(session.userId)).toEqual({
+      notify_new_chat: 1,
+      notify_mine_only: 1,
+      notify_sound: 0,
+    })
+    expect(await settingsRowCount(session.userId)).toBe(1)
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.settingsUpdated,
+      ),
+    ).toBe(2)
+
+    const replay = await patch(
+      '/api/me/settings',
+      session.token,
+      { notifySound: 'false' },
+    )
+    expect(replay.status).toBe(200)
+    expect(await settingsRowCount(session.userId)).toBe(1)
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.settingsUpdated,
+      ),
+    ).toBe(2)
+
+    const invalid = await patch(
+      '/api/me/settings',
+      session.token,
+      { notifySound: 'yes' },
+    )
+    expect(invalid.status).toBe(400)
+    expect(await storedSettings(session.userId)).toEqual({
+      notify_new_chat: 1,
+      notify_mine_only: 1,
+      notify_sound: 0,
+    })
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.settingsUpdated,
+      ),
+    ).toBe(2)
+  })
+
+  it('never targets a user ID from the request body', async () => {
+    const session = await seedSession()
+    const otherUserId = `other-${session.userId}`
+    const now = Date.now()
+    await env.DB.prepare(
+      `INSERT INTO users (
+        id, office_id, email, name, title, role, status, created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, '상담 담당', '활성', ?, ?)`,
+    )
+      .bind(
+        otherUserId,
+        session.officeId,
+        `${otherUserId}@rich.example`,
+        '다른 사용자',
+        '상담 담당',
+        now,
+        now,
+      )
+      .run()
+
+    const response = await patch('/api/me', session.token, {
+      id: otherUserId,
+      name: '공격자가 고른 이름',
+    })
+
+    expect(response.status).toBe(400)
+    expect((await storedUser(session.userId))?.name).toBe('박상담')
+    expect((await storedUser(otherUserId))?.name).toBe('다른 사용자')
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.profileUpdated,
+      ),
+    ).toBe(0)
+  })
+
+  it('does not expose contact or reply signature fields', async () => {
+    const session = await seedSession()
+    const rejected = await patch('/api/me', session.token, {
+      phone: '010-1234-5678',
+      signature: '세무법인 리치 박상담 드림',
+    })
+    expect(rejected.status).toBe(400)
+
+    const response = await getMe(session.token)
+    expect(response.status).toBe(200)
+    const payload = await response.json<Record<string, unknown>>()
+    expect(payload).not.toHaveProperty('phone')
+    expect(payload).not.toHaveProperty('signature')
+    expect(payload).not.toHaveProperty('user.phone')
+    expect(payload).not.toHaveProperty('user.signature')
+
+    const userColumns = await env.DB.prepare(
+      "PRAGMA table_info('users')",
+    ).all<{ name: string }>()
+    const settingsColumns = await env.DB.prepare(
+      "PRAGMA table_info('user_settings')",
+    ).all<{ name: string }>()
+    const columnNames = [
+      ...userColumns.results,
+      ...settingsColumns.results,
+    ].map(({ name }) => name)
+
+    expect(columnNames).not.toContain('phone')
+    expect(columnNames).not.toContain('signature')
   })
 
   it('rejects a cross-origin mutation', async () => {
