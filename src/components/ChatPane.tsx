@@ -304,6 +304,7 @@ function Header({
         </div>
 
         <AssigneePicker
+          key={cur.id}
           conversation={cur}
           members={members}
           teamLoading={teamLoading}
@@ -510,9 +511,9 @@ export function ChatPane({ breakpoint }: { breakpoint: Breakpoint }) {
       <Header
         breakpoint={breakpoint}
         cur={conversation}
-        members={[]}
-        teamLoading
-        teamError={null}
+        members={state.team}
+        teamLoading={state.teamLoading}
+        teamError={state.teamError}
       />
       <Thread conversation={conversation} />
     </div>
