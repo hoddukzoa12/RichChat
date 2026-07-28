@@ -515,7 +515,8 @@ describe('LGU+ MO webhook', () => {
     await expectSuccess(await post(payload(item)))
 
     const attachment = await env.DB.prepare(
-      `SELECT original_filename, byte_size, mime_type, r2_key, download_status
+      `SELECT original_filename, byte_size, mime_type, r2_key, download_status,
+              content_index
        FROM message_attachments`,
     ).first<{
       original_filename: string
@@ -523,6 +524,7 @@ describe('LGU+ MO webhook', () => {
       mime_type: string
       r2_key: string | null
       download_status: string
+      content_index: number
     }>()
 
     expect(attachment).toEqual({
@@ -531,7 +533,57 @@ describe('LGU+ MO webhook', () => {
       mime_type: 'image/jpeg',
       r2_key: null,
       download_status: '대기',
+      content_index: 0,
     })
+  })
+
+  it('preserves the attachment order from the MO payload', async () => {
+    await insertOffice('office-mo-attachment-order')
+    const item = mo({
+      moKey: 'mo-attachment-order',
+      moType: 'MMSMO',
+      contentInfoLst: [
+        {
+          contentName: '사업자등록증',
+          contentSize: 1024,
+          contentExt: 'jpg',
+          contentUrl: 'https://example.com/one-time-content/0',
+        },
+        {
+          contentName: '통장사본',
+          contentSize: 2048,
+          contentExt: 'jpg',
+          contentUrl: 'https://example.com/one-time-content/1',
+        },
+      ],
+    })
+
+    await expectSuccess(await post(payload(item)))
+
+    const attachments = await env.DB.prepare(
+      `SELECT original_filename, content_index
+       FROM message_attachments
+       WHERE message_id = (
+         SELECT id FROM messages WHERE mo_key = ?
+       )
+       ORDER BY content_index`,
+    )
+      .bind('mo-attachment-order')
+      .all<{
+        original_filename: string
+        content_index: number
+      }>()
+
+    expect(attachments.results).toEqual([
+      {
+        original_filename: '사업자등록증.jpg',
+        content_index: 0,
+      },
+      {
+        original_filename: '통장사본.jpg',
+        content_index: 1,
+      },
+    ])
   })
 
   it('keeps an unexpected RCS inbound visible by storing it as MMS', async () => {

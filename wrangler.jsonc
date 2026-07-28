@@ -42,6 +42,9 @@
       "bucket_name": "richchat-attachments"
     }
   ],
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  },
   "durable_objects": {
     "bindings": [
       {
