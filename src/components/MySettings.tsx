@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../api/AuthGate'
 import {
+  logout,
   updateMe,
   updateMeSettings,
   type MeResponse,
@@ -61,7 +62,7 @@ const AI_TOGGLES: { key: keyof AiSettings; name: string; sub: string }[] = [
 
 export function MySettings() {
   const { state, dispatch } = useInbox()
-  const { me, applyMeResponse } = useAuth()
+  const { me, applyMeResponse, completeLogout } = useAuth()
   const [profileDraft, setProfileDraft] = useState<ProfileDraft>(
     profileDraftFrom(me),
   )
@@ -72,6 +73,8 @@ export function MySettings() {
   const [notify, setNotify] = useState<UserSettings>(me.settings)
   const [notifySaving, setNotifySaving] = useState(false)
   const [notifyError, setNotifyError] = useState<string | null>(null)
+  const [logoutPending, setLogoutPending] = useState(false)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
 
   useEffect(() => {
     setProfileDraft(profileDraftFrom(me))
@@ -122,6 +125,23 @@ export function MySettings() {
       )
     } finally {
       setNotifySaving(false)
+    }
+  }
+
+  const logOut = async () => {
+    if (logoutPending) return
+    setLogoutPending(true)
+    setLogoutError(null)
+    try {
+      await logout()
+      completeLogout()
+    } catch (error: unknown) {
+      setLogoutPending(false)
+      setLogoutError(
+        error instanceof Error
+          ? error.message
+          : '로그아웃하지 못했습니다.',
+      )
     }
   }
 
@@ -247,17 +267,26 @@ export function MySettings() {
             </div>
           </Card>
 
-          <Card className="p-[18px] flex items-center gap-3">
-            <div>
-              <div className="text-[13.5px] font-semibold">로그아웃</div>
-              <div className="text-[12.5px] text-ink-400">이 기기에서 계정 연결을 해제합니다</div>
+          <Card className="p-[18px]">
+            <div className="flex items-center gap-3">
+              <div>
+                <div className="text-[13.5px] font-semibold">로그아웃</div>
+                <div className="text-[12.5px] text-ink-400">이 기기에서 계정 연결을 해제합니다</div>
+              </div>
+              <button
+                type="button"
+                disabled={logoutPending}
+                onClick={() => void logOut()}
+                className="ml-auto h-[34px] px-3.5 border border-danger-border rounded-[9px] flex items-center text-[13.5px] font-semibold text-open-fg hover:bg-open-bg disabled:cursor-wait disabled:opacity-60"
+              >
+                {logoutPending ? '로그아웃 중…' : '로그아웃'}
+              </button>
             </div>
-            <button
-              type="button"
-              className="ml-auto h-[34px] px-3.5 border border-danger-border rounded-[9px] flex items-center text-[13.5px] font-semibold text-open-fg hover:bg-open-bg"
-            >
-              로그아웃
-            </button>
+            {logoutError && (
+              <div role="alert" className="mt-2 text-[12.5px] text-open-fg">
+                {logoutError}
+              </div>
+            )}
           </Card>
         </div>
       </div>

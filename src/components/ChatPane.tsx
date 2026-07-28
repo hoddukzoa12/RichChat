@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConversationListItem } from '../../shared/wire/conversation'
 import type { OfficeMember } from '../../shared/wire/office'
 import { initialOf } from '../../shared/text'
@@ -12,6 +12,7 @@ import {
   getConversationMessages,
   sendConversationMessage,
 } from '../api/endpoints/messages'
+import { markConversationRead } from '../api/endpoints/reads'
 import { useInbox } from '../state/InboxContext'
 import { currentConv } from '../state/conversations'
 import { assigneeLabel } from '../state/selectors'
@@ -362,6 +363,11 @@ function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
 }
 
+interface ReadAttempt {
+  unreadCount: number
+  status: 'pending' | 'failed'
+}
+
 function Thread({
   conversation,
 }: {
@@ -370,6 +376,8 @@ function Thread({
   const { state, dispatch } = useInbox()
   const { me } = useAuth()
   const thread = threadFor(state, conversation.id)
+  const readAttemptsRef = useRef(new Map<string, ReadAttempt>())
+  const previousConversationIdRef = useRef<string | null>(null)
 
   const loadPage = useCallback(
     async (
@@ -412,6 +420,67 @@ function Thread({
     void loadPage(false, undefined, controller.signal)
     return () => controller.abort()
   }, [loadPage])
+
+  useEffect(() => {
+    if (previousConversationIdRef.current === conversation.id) return
+    previousConversationIdRef.current = conversation.id
+    const previousAttempt = readAttemptsRef.current.get(
+      conversation.id,
+    )
+    if (previousAttempt?.status === 'failed') {
+      readAttemptsRef.current.delete(conversation.id)
+    }
+  }, [conversation.id])
+
+  useEffect(() => {
+    const unreadCount = conversation.unreadCount
+    const previousAttempt = readAttemptsRef.current.get(
+      conversation.id,
+    )
+    if (
+      thread.loadStatus !== 'ready' ||
+      unreadCount === 0 ||
+      previousAttempt?.unreadCount === unreadCount
+    ) {
+      return
+    }
+
+    const attempt: ReadAttempt = {
+      unreadCount,
+      status: 'pending',
+    }
+    readAttemptsRef.current.set(conversation.id, attempt)
+    dispatch({
+      type: 'thread/readStarted',
+      conversationId: conversation.id,
+    })
+    void markConversationRead(conversation.id)
+      .then(() => {
+        if (
+          readAttemptsRef.current.get(conversation.id) === attempt
+        ) {
+          readAttemptsRef.current.delete(conversation.id)
+        }
+      })
+      .catch(() => {
+        if (
+          readAttemptsRef.current.get(conversation.id) !== attempt
+        ) {
+          return
+        }
+        attempt.status = 'failed'
+        dispatch({
+          type: 'thread/readFailed',
+          conversationId: conversation.id,
+          unreadCount,
+        })
+      })
+  }, [
+    conversation.id,
+    conversation.unreadCount,
+    dispatch,
+    thread.loadStatus,
+  ])
 
   const requestSend = useCallback(
     async (clientKey: string, body: string) => {

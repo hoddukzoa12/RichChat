@@ -13,6 +13,7 @@ import { getMe, type MeResponse } from './endpoints'
 interface AuthContextValue {
   me: MeResponse
   applyMeResponse: (me: MeResponse) => void
+  completeLogout: () => void
 }
 
 type AuthState =
@@ -28,6 +29,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' })
   const applyMeResponse = useCallback((me: MeResponse) => {
     setAuth({ status: 'authenticated', me })
+  }, [])
+  const completeLogout = useCallback(() => {
+    setAuth({ status: 'unauthenticated' })
   }, [])
 
   useEffect(() => {
@@ -82,7 +86,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ me: auth.me, applyMeResponse }}>
+    <AuthContext.Provider
+      value={{ me: auth.me, applyMeResponse, completeLogout }}
+    >
       {children}
     </AuthContext.Provider>
   )
