@@ -2,6 +2,9 @@ import { json } from './respond'
 
 export type ErrorCode =
   | 'BAD_REQUEST'
+  | 'MSG_TOO_LONG'
+  | 'MSG_EMOJI_UNSUPPORTED'
+  | 'MSG_ATTACHMENTS_UNSUPPORTED'
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'
   | 'NOT_FOUND'
@@ -12,6 +15,9 @@ export type ErrorCode =
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   BAD_REQUEST: 400,
+  MSG_TOO_LONG: 400,
+  MSG_EMOJI_UNSUPPORTED: 400,
+  MSG_ATTACHMENTS_UNSUPPORTED: 400,
   UNAUTHORIZED: 401,
   FORBIDDEN: 403,
   NOT_FOUND: 404,
