@@ -1,6 +1,11 @@
 import { changes, executeBatch } from './db/d1'
+import { applyDeliveryReports } from './db/delivery'
 import { publish } from './db/events'
 import type { LguFetch } from './lgu/protocol'
+import {
+  queryLguDeliveryReports,
+  type PendingReportQuery,
+} from './lgu/report'
 import {
   getLguAccessToken,
   type LguTokenEnv,
@@ -10,9 +15,11 @@ import {
 export const LGU_ATTACHMENT_RECOVERY_WINDOW_MS =
   7 * 24 * 60 * 60 * 1_000
 export const ATTACHMENT_DOWNLOAD_LEASE_MS = 10 * 60 * 1_000
+export const REPORT_RECONCILIATION_AGE_MS = 2 * 60 * 1_000
 
 const MAX_ATTACHMENTS_PER_RUN = 100
 const DEFINITIVE_MISSING_STATUSES = new Set([404, 410])
+const MAX_REPORTS_PER_REQUEST = 10
 
 interface AttachmentDownloadEnv extends LguTokenEnv {
   ATTACHMENTS: R2Bucket
@@ -36,9 +43,22 @@ interface AmbiguousMessage {
   attachment_count: number
 }
 
+interface PendingReportRow {
+  client_key: string
+  created_at: number
+  office_id: string
+}
+
 interface AttachmentLogger {
   error(message: string, detail?: unknown): void
   warn(message: string, detail?: unknown): void
+}
+
+interface DeliveryReportOptions {
+  fetch?: LguFetch
+  logger?: AttachmentLogger
+  now?: () => number
+  tokenProvider?: LguTokenProvider
 }
 
 interface AttachmentDownloadOptions {
@@ -56,6 +76,14 @@ export interface AttachmentDownloadSummary {
   ambiguousMessages: number
 }
 
+export interface DeliveryReportReconciliationSummary {
+  changed: number
+  queried: number
+  rejected: number
+  unchanged: number
+  unknown: number
+}
+
 type AttachmentOutcome = 'completed' | 'failed' | 'deferred'
 
 const OUTCOME_COUNTER: Record<
@@ -70,8 +98,18 @@ const OUTCOME_COUNTER: Record<
 export type ScheduledTask = (env: Env) => Promise<unknown>
 
 const SCHEDULED_TASKS: readonly ScheduledTask[] = [
+  runDeliveryReportReconciliation,
   runAttachmentDownloads,
 ]
+
+export const PENDING_DELIVERY_REPORT_QUERY =
+  `SELECT office_id, client_key, created_at
+   FROM messages INDEXED BY ix_messages_pending
+   WHERE delivery_status IN ('대기', '접수', '전송중')
+     AND created_at <= ?
+     AND client_key IS NOT NULL
+   ORDER BY delivery_status, created_at, id
+   LIMIT ?`
 
 function attachmentObjectKey(attachmentId: string): string {
   return `attachments/${attachmentId}`
@@ -448,6 +486,73 @@ export async function runAttachmentDownloads(
       resolvedOptions,
     )
     summary[OUTCOME_COUNTER[outcome]] += 1
+  }
+
+  return summary
+}
+
+export async function runDeliveryReportReconciliation(
+  env: Env,
+  options: DeliveryReportOptions = {},
+): Promise<DeliveryReportReconciliationSummary> {
+  const now = options.now ?? Date.now
+  const currentTime = now()
+  const logger = options.logger ?? console
+  const pending = await env.DB
+    .prepare(PENDING_DELIVERY_REPORT_QUERY)
+    .bind(
+      currentTime - REPORT_RECONCILIATION_AGE_MS,
+      MAX_REPORTS_PER_REQUEST,
+    )
+    .all<PendingReportRow>()
+  const summary: DeliveryReportReconciliationSummary = {
+    changed: 0,
+    queried: pending.results.length,
+    rejected: 0,
+    unchanged: 0,
+    unknown: 0,
+  }
+  if (pending.results.length === 0) return summary
+
+  const byOffice = new Map<string, PendingReportQuery[]>()
+  for (const row of pending.results) {
+    const officePending = byOffice.get(row.office_id) ?? []
+    officePending.push({
+      clientKey: row.client_key,
+      requestedAt: row.created_at,
+    })
+    byOffice.set(row.office_id, officePending)
+  }
+
+  for (const [officeId, officePending] of byOffice) {
+    const result = await queryLguDeliveryReports(
+      env,
+      officeId,
+      officePending,
+      {
+        fetch: options.fetch,
+        now: () => currentTime,
+        tokenProvider: options.tokenProvider,
+      },
+    )
+    for (const item of result.rejected) {
+      logger.warn('결정적으로 잘못된 LGU+ 조회 리포트를 격리합니다.', {
+        msgKey: item.msgKey,
+        receivedStatus: item.status,
+        reason: item.reason,
+      })
+    }
+
+    const applied = await applyDeliveryReports(env.DB, result.reports)
+    summary.changed += applied.changed
+    summary.rejected += result.rejected.length
+    summary.unchanged += applied.unchanged
+    summary.unknown += applied.unknown.length
+    if (applied.unknown.length > 0) {
+      logger.warn('LGU+ 조회 리포트를 메시지와 결합하지 못했습니다.', {
+        reportKeys: applied.unknown,
+      })
+    }
   }
 
   return summary
