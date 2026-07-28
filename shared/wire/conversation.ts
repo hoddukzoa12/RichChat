@@ -103,3 +103,16 @@ export interface ConversationDetail {
 export interface ConversationDetailResponse {
   conversation: ConversationDetail
 }
+
+export interface ConversationWriteState {
+  id: string
+  status: Status
+  label: string
+  archived: boolean
+  version: number
+  updatedAt: number
+}
+
+export interface ConversationWriteResponse {
+  conversation: ConversationWriteState
+}
