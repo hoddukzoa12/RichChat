@@ -19,7 +19,7 @@
   },
   "vars": {
     "DEV_LOGIN_ENABLED": "false",
-    "LGU_ENV": "local",
+    "LGU_ENV": "qa",
     "LGU_AUTH_HOST": "api.msghub-qa.uplus.co.kr",
     "LGU_SEND_HOST": "api-send.msghub-qa.uplus.co.kr",
     "LGU_CONTENT_HOST": "mnt-api.msghub-qa.uplus.co.kr",
