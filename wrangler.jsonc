@@ -4,6 +4,13 @@
   "main": "./worker/index.ts",
   "compatibility_date": "2026-07-28",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "chat.rich-group.kr",
+      "custom_domain": true
+    }
+  ],
   "assets": {
     "directory": "./dist/",
     "binding": "ASSETS",
