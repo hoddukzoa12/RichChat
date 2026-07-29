@@ -1,5 +1,9 @@
 import { changes } from '../db/d1'
 import {
+  fetchLgu,
+  type LguAccessEnv,
+} from './access'
+import {
   fetchLguJson,
   LguApiError,
   type LguFetch,
@@ -124,7 +128,7 @@ export class D1LguTokenStore implements LguTokenStore {
   }
 }
 
-export interface LguTokenEnv {
+export interface LguTokenEnv extends LguAccessEnv {
   DB: D1Database
   LGU_AUTH_HOST: string
   LGU_API_KEY: string
@@ -202,7 +206,7 @@ async function authenticate(
   const password = requireBinding(env.LGU_API_PASSWORD, 'LGU_API_PASSWORD')
   const apiPwd = await createApiPassword(password, randomString)
   const response = await fetchLguJson<AuthResponse>(
-    fetcher,
+    (input, init) => fetchLgu(env, fetcher, input, init),
     `https://${host}/auth/v1/${randomString}`,
     {
       method: 'POST',

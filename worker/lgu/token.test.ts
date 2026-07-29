@@ -261,4 +261,33 @@ describe('LGU token provider', () => {
       'https://configured-auth.example/auth/v1/fixed-random',
     )
   })
+
+  it('attaches Access headers to authentication requests', async () => {
+    const store = new MemoryTokenStore()
+    let requestedHeaders = new Headers()
+    const provider = createLguTokenProvider({
+      fetch: async (_input, init) => {
+        requestedHeaders = new Headers(init?.headers)
+        return authResponse('access-auth-token')
+      },
+      now: () => NOW,
+      randomString: () => 'fixed-random',
+      storeFactory: () => store,
+    })
+
+    await provider(
+      tokenEnv({
+        CF_ACCESS_CLIENT_ID: 'access-client-id',
+        CF_ACCESS_CLIENT_SECRET: 'access-client-secret',
+      }),
+      'office-access-auth',
+    )
+
+    expect(requestedHeaders.get('CF-Access-Client-Id')).toBe(
+      'access-client-id',
+    )
+    expect(requestedHeaders.get('CF-Access-Client-Secret')).toBe(
+      'access-client-secret',
+    )
+  })
 })

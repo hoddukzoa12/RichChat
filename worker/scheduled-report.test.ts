@@ -188,13 +188,18 @@ describe('LGU+ scheduled delivery reconciliation', () => {
     const createdAt = NOW - REPORT_RECONCILIATION_AGE_MS
     const messageId = await seedPending('202', createdAt)
     const requests: Array<{
+      accessClientId: string | null
+      accessClientSecret: string | null
       authorization: string | null
       body: unknown
       url: string
     }> = []
     const fetcher: LguFetch = async (input, init) => {
+      const headers = new Headers(init?.headers)
       requests.push({
-        authorization: new Headers(init?.headers).get('authorization'),
+        accessClientId: headers.get('CF-Access-Client-Id'),
+        accessClientSecret: headers.get('CF-Access-Client-Secret'),
+        authorization: headers.get('authorization'),
         body: JSON.parse(String(init?.body)),
         url: String(input),
       })
@@ -224,6 +229,8 @@ describe('LGU+ scheduled delivery reconciliation', () => {
     })
     expect(requests).toEqual([
       {
+        accessClientId: env.CF_ACCESS_CLIENT_ID,
+        accessClientSecret: env.CF_ACCESS_CLIENT_SECRET,
         authorization: `Bearer ${TOKEN}`,
         body: {
           cliKeyLst: [
