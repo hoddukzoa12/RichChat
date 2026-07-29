@@ -153,8 +153,19 @@ B21(실시간 DO)의 기준 3번을 "같은 사무소의 소켓 2개가 동시�
 
 ```sh
 python3 .claude/scripts/dead-exports.py    # 테스트에서만 쓰이는 export
-python3 .claude/scripts/unwired-routes.py  # 프론트가 안 부르는 서버 라우트
+python3 .claude/scripts/unwired-routes.py  # 프론트가 안 부르는 서버 라우트(메서드까지)
 ```
+
+**`unwired-routes.py`를 만들면서 세 번 틀렸다.** 처음엔 경로만 비교해
+`GET /api/conversations`가 있으니 `PATCH /api/conversations/:id`도 있는 줄
+알았다 — 그 결함이 운영까지 나갔다. 파라미터 자리를 버려도 같은 문제가
+생기고, 파일 단위로 뭉개면 거짓 음성이 난다.
+
+지금은 이 저장소의 규약(모든 서버 호출은 `src/api/endpoints/*`를 거친다)을
+이용해 **라우트를 자원 모듈에 대응시키고 메서드 유무를 본다.**
+
+**거짓 음성이 거짓 양성보다 나쁘다.** 0건이라고 안심시키는 도구는 없는 것만
+못하다. 도구를 고칠 때는 **이미 아는 결함을 잡는지** 먼저 확인해라.
 
 **이 패턴이 이 프로젝트에서 세 번 났다:**
 
