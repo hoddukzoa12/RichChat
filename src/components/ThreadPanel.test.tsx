@@ -7,6 +7,10 @@ import {
   MessageComposer,
   restoredScrollTop,
 } from './ThreadPanel'
+import {
+  ImageViewer,
+  wrappedViewerIndex,
+} from './ImageViewer'
 
 function message(
   overrides: Partial<ConversationMessage> = {},
@@ -116,8 +120,55 @@ describe('thread presentation', () => {
       'href="/api/attachments/attachment-1"',
     )
     expect(markup).toContain('다운로드')
+    expect(markup).toContain('aria-haspopup="dialog"')
+    expect(markup).toContain('사업자등록증.jpg 크게 보기')
     expect(markup).toContain('첨부 파일 받는 중')
     expect(markup).not.toContain('http')
+  })
+
+  it('renders accessible image viewer controls with authenticated URLs', () => {
+    const markup = renderToStaticMarkup(
+      <ImageViewer
+        attachments={[
+          {
+            id: 'attachment/1',
+            originalFilename: '사업자등록증.jpg',
+            byteSize: 100,
+            mimeType: 'image/jpeg',
+            downloadStatus: '완료',
+            createdAt: 1,
+          },
+          {
+            id: 'attachment/2',
+            originalFilename: '영수증.png',
+            byteSize: 200,
+            mimeType: 'image/png',
+            downloadStatus: '완료',
+            createdAt: 2,
+          },
+        ]}
+        initialIndex={1}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(markup).toContain('role="dialog"')
+    expect(markup).toContain('aria-modal="true"')
+    expect(markup).toContain('이미지 크게 보기 닫기')
+    expect(markup).toContain('이전 이미지')
+    expect(markup).toContain('다음 이미지')
+    expect(markup).toContain(
+      'src="/api/attachments/attachment%2F2?mode=inline"',
+    )
+    expect(markup).toContain(
+      'href="/api/attachments/attachment%2F2"',
+    )
+    expect(markup).not.toContain('http')
+  })
+
+  it('wraps image viewer navigation in both directions', () => {
+    expect(wrappedViewerIndex(-1, 3)).toBe(2)
+    expect(wrappedViewerIndex(3, 3)).toBe(0)
   })
 
   it('shows byte counters, message types, and pre-send emoji errors', () => {
