@@ -1,7 +1,9 @@
 import {
   STATUSES,
+  USER_STATUSES,
   type JsonValue,
   type Status,
+  type UserStatus,
 } from '../../shared/domain'
 import type {
   ConversationWriteResponse,
@@ -31,6 +33,7 @@ const CONVERSATION_VERSION_PREDICATE = `id = ?
 const ASSIGNEE_PREDICATE = `conversation_id = ?
   AND office_id = ?
   AND user_id = ?`
+const ACTIVE_USER_STATUS = USER_STATUSES[1]
 
 interface ConversationRow {
   id: string
@@ -283,21 +286,21 @@ async function patchConversation(
   } satisfies ConversationWriteResponse)
 }
 
-async function userExists(
+async function assigneeStatus(
   env: Env,
   session: SessionContext,
   userId: string,
-): Promise<boolean> {
+): Promise<UserStatus | null> {
   const row = await env.DB.prepare(
-    `SELECT 1 AS found
+    `SELECT status
      FROM users
      WHERE id = ?
        AND office_id = ?`,
   )
     .bind(userId, session.officeId)
-    .first<{ found: number }>()
+    .first<{ status: UserStatus }>()
 
-  return row !== null
+  return row?.status ?? null
 }
 
 function assignmentGuard(
@@ -315,6 +318,7 @@ function assignmentGuard(
                 FROM users
                 WHERE id = ?
                   AND office_id = ?
+                  AND status = ?
               )
               AND NOT EXISTS (
                 SELECT 1
@@ -326,6 +330,7 @@ function assignmentGuard(
       session.officeId,
       userId,
       session.officeId,
+      ACTIVE_USER_STATUS,
       conversationId,
       session.officeId,
       userId,
@@ -393,8 +398,15 @@ async function assignConversation(
     return error('NOT_FOUND', '대화를 찾을 수 없습니다.')
   }
 
-  if (!(await userExists(env, session, userId))) {
+  const status = await assigneeStatus(env, session, userId)
+  if (!status) {
     return error('NOT_FOUND', '담당자를 찾을 수 없습니다.')
+  }
+  if (status !== ACTIVE_USER_STATUS) {
+    return error(
+      'CONFLICT',
+      '활성 직원만 담당자로 배정할 수 있습니다.',
+    )
   }
 
   return new Response(null, { status: 204 })

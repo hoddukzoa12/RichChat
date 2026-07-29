@@ -1009,7 +1009,7 @@ describe('Office administration', () => {
     })
   })
 
-  it('deactivates without deleting authored history and rejects the old session', async () => {
+  it('deactivates by clearing assignments and sessions while preserving authored history', async () => {
     const fixture = await seedFixture()
     const customerId = `customer-${fixture.suffix}`
     const conversationId = `conversation-${fixture.suffix}`
@@ -1070,6 +1070,17 @@ describe('Office administration', () => {
         now,
         now,
       ),
+      env.DB.prepare(
+        `INSERT INTO conversation_assignees (
+          conversation_id, office_id, user_id, assigned_at, assigned_by
+        ) VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        conversationId,
+        fixture.officeId,
+        fixture.member.id,
+        now,
+        fixture.admin.id,
+      ),
     ])
 
     const response = await request(
@@ -1086,11 +1097,36 @@ describe('Office administration', () => {
     const history = await env.DB.prepare(
       `SELECT
         (SELECT COUNT(*) FROM messages WHERE id = ?) AS messages,
-        (SELECT COUNT(*) FROM notes WHERE id = ?) AS notes`,
+        (SELECT COUNT(*) FROM notes WHERE id = ?) AS notes,
+        (
+          SELECT COUNT(*)
+          FROM conversation_assignees
+          WHERE user_id = ?
+        ) AS assignments,
+        (
+          SELECT COUNT(*)
+          FROM auth_sessions
+          WHERE user_id = ?
+        ) AS sessions`,
     )
-      .bind(messageId, noteId)
-      .first<{ messages: number; notes: number }>()
-    expect(history).toEqual({ messages: 1, notes: 1 })
+      .bind(
+        messageId,
+        noteId,
+        fixture.member.id,
+        fixture.member.id,
+      )
+      .first<{
+        messages: number
+        notes: number
+        assignments: number
+        sessions: number
+      }>()
+    expect(history).toEqual({
+      messages: 1,
+      notes: 1,
+      assignments: 0,
+      sessions: 0,
+    })
     expect(
       (
         await request(
@@ -1102,7 +1138,7 @@ describe('Office administration', () => {
     ).toBe(401)
   })
 
-  it('reactivates a member and restores their existing session', async () => {
+  it('reactivates a member without restoring their old session', async () => {
     const fixture = await seedFixture()
     const deactivate = await request(
       'PATCH',
@@ -1132,6 +1168,24 @@ describe('Office administration', () => {
           'GET',
           '/api/me',
           fixture.member.token,
+        )
+      ).status,
+    ).toBe(401)
+
+    const newSession = await createSession(
+      env.DB,
+      {
+        userId: fixture.member.id,
+        officeId: fixture.officeId,
+      },
+      Date.now(),
+    )
+    expect(
+      (
+        await request(
+          'GET',
+          '/api/me',
+          newSession.token,
         )
       ).status,
     ).toBe(200)
