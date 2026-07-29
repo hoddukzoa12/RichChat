@@ -152,9 +152,41 @@ B21(실시간 DO)의 기준 3번을 "같은 사무소의 소켓 2개가 동시�
 그리고 **기계적 검사를 붙여라.** 두 스크립트를 만들어뒀다:
 
 ```sh
-python3 .claude/scripts/dead-exports.py    # 테스트에서만 쓰이는 export
-python3 .claude/scripts/unwired-routes.py  # 프론트가 안 부르는 서버 라우트(메서드까지)
+python3 .claude/scripts/dead-exports.py      # 테스트에서만 쓰이는 export
+python3 .claude/scripts/unwired-routes.py    # 프론트가 안 부르는 서버 라우트(메서드까지)
+python3 .claude/scripts/positional-consts.py # 닫힌 집합을 위치로 꺼내는 곳
 ```
+
+### 규칙이 금지하지 않는 형태는 계속 다시 들어온다
+
+`AGENTS.md` §2가 "닫힌 집합의 분기는 `Record`로"라고 요구하는데,
+**`ROLES[0]`이나 `const [A, B] = ROLES` 같은 위치 접근은 그 규칙이 막는 형태가
+아니다.** 그래서 슬라이스마다 새로 들어온다. 이 저장소에서 네 번 났다:
+
+| 위치 접근 | 결과 |
+|---|---|
+| `const [ADMIN_ROLE, …] = ROLES` | 역할이 셋→넷일 때 `상담 담당` 누락 |
+| `(typeof ROLES)[0]` | 초대 가능 역할 계산이 어긋남 |
+| `USER_STATUSES[1]` | 값이 하나 끼면 활성 직원 배정이 전부 막힘 |
+| `NOTE_BODY_KEYS[0]` | 길이는 배열에서 파생하는데 0번만 검증 |
+
+넷 다 `npm run check` 통과 상태였고 **독립 리뷰도 통과했다.** 눈으로는 안 보인다.
+
+옳은 형태는 이름 + `satisfies`다 — 유니온에 없는 값이면 컴파일이 깨진다.
+
+```ts
+const ADMIN_ROLE = '관리자' satisfies Role
+```
+
+**스크립트를 만들 때 이미 아는 결함을 잡는지 먼저 확인해라.** 과거 커밋을
+인자로 주면 그때 상태를 검사한다:
+
+```sh
+python3 .claude/scripts/positional-consts.py <커밋>
+```
+
+처음 돌렸을 때 1건만 나와서 하마터면 통과시킬 뻔했다. 내가 엉뚱한 커밋을
+가리키고 있었다. **0건에 가까운 결과가 나오면 도구를 먼저 의심해라.**
 
 **`unwired-routes.py`를 만들면서 세 번 틀렸다.** 처음엔 경로만 비교해
 `GET /api/conversations`가 있으니 `PATCH /api/conversations/:id`도 있는 줄
