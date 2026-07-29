@@ -1,6 +1,7 @@
 import { changes } from './db/d1'
 import { applyDeliveryReports } from './db/delivery'
 import { publish } from './db/events'
+import { fetchLgu } from './lgu/access'
 import type { LguFetch } from './lgu/protocol'
 import {
   queryLguDeliveryReports,
@@ -396,7 +397,7 @@ async function processAttachment(
       `/mo/v1/file/${encodeURIComponent(attachment.mo_key)}`,
       `https://${requiredContentHost(env)}`,
     )
-    const response = await options.fetch(url, {
+    const response = await fetchLgu(env, options.fetch, url, {
       method: 'GET',
       headers: {
         authorization: `Bearer ${token}`,

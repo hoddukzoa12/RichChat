@@ -2,6 +2,7 @@ import type {
   DeliveryReport,
   ReportDeliveryStatus,
 } from '../db/delivery'
+import { fetchLgu } from './access'
 import {
   fetchLguJson,
   LGU_SUCCESS_CODE,
@@ -265,7 +266,7 @@ export async function queryLguDeliveryReports(
   const eventAt = (options.now ?? Date.now)()
   const accessToken = await tokenProvider(env, officeId)
   const response = await fetchLguJson<LguReportResponse>(
-    fetcher,
+    (input, init) => fetchLgu(env, fetcher, input, init),
     new URL('/msg/v1/sent', `https://${env.LGU_AUTH_HOST}`).toString(),
     {
       method: 'POST',

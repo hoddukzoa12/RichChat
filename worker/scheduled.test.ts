@@ -162,12 +162,20 @@ describe('Attachment scheduled download', () => {
   it('streams one MO attachment to R2 and completes it once', async () => {
     const { attachmentIds, moKey } = await seedAttachments('101')
     const attachmentId = attachmentIds[0]
-    const requests: Array<{ authorization: string | null; url: string }> = []
+    const requests: Array<{
+      accessClientId: string | null
+      accessClientSecret: string | null
+      authorization: string | null
+      url: string
+    }> = []
     const response = binaryResponse(['큰 파일 조각 1', '큰 파일 조각 2'])
     const arrayBuffer = vi.spyOn(response, 'arrayBuffer')
     const fetcher: LguFetch = async (input, init) => {
+      const headers = new Headers(init?.headers)
       requests.push({
-        authorization: new Headers(init?.headers).get('authorization'),
+        accessClientId: headers.get('CF-Access-Client-Id'),
+        accessClientSecret: headers.get('CF-Access-Client-Secret'),
+        authorization: headers.get('authorization'),
         url: String(input),
       })
       return response
@@ -192,6 +200,8 @@ describe('Attachment scheduled download', () => {
     expect(second.claimed).toBe(0)
     expect(requests).toEqual([
       {
+        accessClientId: env.CF_ACCESS_CLIENT_ID,
+        accessClientSecret: env.CF_ACCESS_CLIENT_SECRET,
         authorization: `Bearer ${TOKEN}`,
         url: `https://${env.LGU_CONTENT_HOST}/mo/v1/file/${moKey}`,
       },

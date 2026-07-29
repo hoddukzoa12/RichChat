@@ -20,6 +20,8 @@ export default defineWorkersConfig(async () => {
               directory: '.',
             },
             bindings: {
+              CF_ACCESS_CLIENT_ID: 'test-access-client-id',
+              CF_ACCESS_CLIENT_SECRET: 'test-access-client-secret',
               DEV_LOGIN_ENABLED: 'true',
               LGU_ENV: 'local',
               LGU_AUTH_HOST: 'lgu-auth.test.invalid',

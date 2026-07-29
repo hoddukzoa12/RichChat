@@ -1,3 +1,4 @@
+import { fetchLgu } from './access'
 import { fetchLguJson, type LguFetch } from './protocol'
 import {
   getLguAccessToken,
@@ -43,7 +44,8 @@ export function createLguHttpClient(options: LguHttpOptions = {}) {
     headers.set('authorization', `Bearer ${accessToken}`)
 
     return await fetchLguJson<T>(
-      fetcher,
+      (input, requestInit) =>
+        fetchLgu(env, fetcher, input, requestInit),
       new URL(path, `https://${host}`).toString(),
       {
         ...init,
