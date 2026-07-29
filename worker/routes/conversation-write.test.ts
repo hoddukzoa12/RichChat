@@ -1,6 +1,6 @@
 import { env, SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
-import type { Status } from '../../shared/domain'
+import type { Status, UserStatus } from '../../shared/domain'
 import type {
   ConversationWriteResponse,
   ConversationWriteState,
@@ -165,6 +165,17 @@ async function assignees(conversationId: string): Promise<string[]> {
     .all<{ user_id: string }>()
 
   return results.map(({ user_id: userId }) => userId)
+}
+
+async function setUserStatus(
+  userId: string,
+  status: UserStatus,
+): Promise<void> {
+  await env.DB.prepare(
+    'UPDATE users SET status = ?, updated_at = ? WHERE id = ?',
+  )
+    .bind(status, FIXED_NOW, userId)
+    .run()
 }
 
 async function eventTotals(officeId: string): Promise<EventTotals> {
@@ -337,6 +348,51 @@ describe('Conversation writes', () => {
       eventCount: 1,
       eventSeq: 1,
     })
+  })
+
+  it('rejects an inactive assignee without storing or publishing', async () => {
+    const fixture = await seedFixture()
+    const userId = fixture.assigneeIds[0]
+    await setUserStatus(userId, '비활성')
+
+    const response = await mutate(
+      'POST',
+      assigneePath(fixture.conversationId, userId),
+      fixture.token,
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'CONFLICT' },
+    })
+    await expect(assignees(fixture.conversationId)).resolves.toEqual(
+      [],
+    )
+    await expect(eventTotals(fixture.officeId)).resolves.toEqual({
+      eventCount: 0,
+      eventSeq: 0,
+    })
+  })
+
+  it('unassigns an inactive existing assignee', async () => {
+    const fixture = await seedFixture()
+    const userId = fixture.assigneeIds[0]
+    const path = assigneePath(fixture.conversationId, userId)
+    expect((await mutate('POST', path, fixture.token)).status).toBe(
+      204,
+    )
+    await setUserStatus(userId, '비활성')
+
+    const response = await mutate('DELETE', path, fixture.token)
+
+    expect(response.status).toBe(204)
+    await expect(assignees(fixture.conversationId)).resolves.toEqual(
+      [],
+    )
+    await expect(eventTypes(fixture.officeId)).resolves.toEqual([
+      'conversation.assignee_assigned',
+      'conversation.assignee_unassigned',
+    ])
   })
 
   it('alternates assignment directions without drifting', async () => {

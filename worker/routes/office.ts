@@ -1052,6 +1052,47 @@ export function createOfficeRoutes(
       'team:manage-administrator',
       'status_administrator_manager',
     )
+    const statusMutationGuard = `member.id = ?
+      AND member.office_id = ?
+      AND member.status <> ?
+      AND ${managePermission.sql}
+      AND (
+        member.role <> ?
+        OR ${manageAdminPermission.sql}
+      )
+      AND NOT (
+        member.id = ?
+        AND ? = ?
+      )
+      AND (
+        member.role <> ?
+        OR member.status <> ?
+        OR ? <> ?
+        OR EXISTS (
+          SELECT 1
+          FROM users AS other_administrator
+          WHERE other_administrator.id <> member.id
+            AND other_administrator.role = ?
+            AND other_administrator.status = ?
+        )
+      )`
+    const statusMutationBindings = [
+      memberId,
+      session.officeId,
+      patch.status,
+      ...managePermission.bindings,
+      ADMIN_ROLE,
+      ...manageAdminPermission.bindings,
+      session.userId,
+      patch.status,
+      INACTIVE_STATUS,
+      ADMIN_ROLE,
+      ACTIVE_STATUS,
+      patch.status,
+      INACTIVE_STATUS,
+      ADMIN_ROLE,
+      ACTIVE_STATUS,
+    ] as const
     const publication = publish(
       env.DB,
       {
@@ -1070,52 +1111,47 @@ export function createOfficeRoutes(
       },
     )
     const statements = [
+      // 담당 배정은 현재 응대 라우팅이므로 비활성 전이에 함께 제거한다.
+      env.DB.prepare(
+        `DELETE FROM conversation_assignees
+        WHERE user_id = ?
+          AND ? = ?
+          AND EXISTS (
+            SELECT 1
+            FROM users AS member
+            WHERE ${statusMutationGuard}
+          )`,
+      ).bind(
+        memberId,
+        patch.status,
+        INACTIVE_STATUS,
+        ...statusMutationBindings,
+      ),
+      // 재활성화가 퇴사 시점의 쿠키까지 되살리지 않도록 세션을 폐기한다.
+      env.DB.prepare(
+        `DELETE FROM auth_sessions
+        WHERE user_id = ?
+          AND ? = ?
+          AND EXISTS (
+            SELECT 1
+            FROM users AS member
+            WHERE ${statusMutationGuard}
+          )`,
+      ).bind(
+        memberId,
+        patch.status,
+        INACTIVE_STATUS,
+        ...statusMutationBindings,
+      ),
       env.DB.prepare(
         `UPDATE users AS member
         SET status = ?,
           updated_at = ?
-        WHERE id = ?
-          AND office_id = ?
-          AND status <> ?
-          AND ${managePermission.sql}
-          AND (
-            role <> ?
-            OR ${manageAdminPermission.sql}
-          )
-          AND NOT (
-            id = ?
-            AND ? = ?
-          )
-          AND (
-            role <> ?
-            OR status <> ?
-            OR ? <> ?
-            OR EXISTS (
-              SELECT 1
-              FROM users AS other_administrator
-              WHERE other_administrator.id <> member.id
-                AND other_administrator.role = ?
-                AND other_administrator.status = ?
-            )
-          )`,
+        WHERE ${statusMutationGuard}`,
       ).bind(
         patch.status,
         now,
-        memberId,
-        session.officeId,
-        patch.status,
-        ...managePermission.bindings,
-        ADMIN_ROLE,
-        ...manageAdminPermission.bindings,
-        session.userId,
-        patch.status,
-        INACTIVE_STATUS,
-        ADMIN_ROLE,
-        ACTIVE_STATUS,
-        patch.status,
-        INACTIVE_STATUS,
-        ADMIN_ROLE,
-        ACTIVE_STATUS,
+        ...statusMutationBindings,
       ),
       ...publication,
       permissionAuthorizationProbe(
@@ -1124,7 +1160,7 @@ export function createOfficeRoutes(
         'team:manage',
       ),
     ]
-    const [updateResult] = await executeBatchAndBroadcast(
+    const [, , updateResult] = await executeBatchAndBroadcast(
       env.DB,
       statements,
       [publication],
