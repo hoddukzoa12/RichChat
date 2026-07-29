@@ -246,6 +246,10 @@ function Header({
   const [labelDraft, setLabelDraft] = useState(cur.label)
   const customerInitial = initialOf(cur.customer.name)
 
+  useEffect(() => {
+    setLabelDraft(cur.label)
+  }, [cur.label])
+
   return (
     <div className="h-[66px] flex-none px-5 border-b border-line flex items-center gap-3 relative whitespace-nowrap">
       {breakpoint === 'mobile' && (
