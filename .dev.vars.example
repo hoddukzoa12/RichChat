@@ -57,13 +57,13 @@ LGU_API_PASSWORD=
 
 # 발급: LGU+가 아니라 우리가 URL 안전 문자로 생성한다.
 # 생성: `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`
-# 등록: LGU+ 관리자콘솔의 MO 수신 URL에 `https://<도메인>/api/hooks/lgu/mo/<생성한값>` 전체를 입력한다.
+# 등록: 문서에 MO 등록 절차·화면이 없으므로 LGU+에 문의해 창구를 확인한 뒤 `https://<도메인>/api/hooks/lgu/mo/<생성한값>` 전체를 등록한다.
 # 미설정 시: LGU+가 보낸 SMS/MMS MO 웹훅을 인증해 수신할 수 없다.
 LGU_MO_WEBHOOK_SECRET=
 
 # 발급: LGU+가 아니라 우리가 URL 안전 문자로 생성한다.
 # 생성: `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`
-# 등록: LGU+ 관리자콘솔의 리포트 수신 URL에 `https://<도메인>/api/hooks/lgu/report/<생성한값>` 전체를 입력한다.
+# 등록: 관리자콘솔 > 프로젝트 상세 > API KEY > 수정 > 결과수신 방법 Webhook에 `https://<도메인>/api/hooks/lgu/report/<생성한값>` 전체를 입력한다.
 # 미설정 시: LGU+ 발송 결과 웹훅을 인증해 수신할 수 없어 메시지 도달 상태를 갱신할 수 없다.
 LGU_REPORT_WEBHOOK_SECRET=
 
