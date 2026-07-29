@@ -419,12 +419,12 @@ describe('Current user routes', () => {
   )
 
   it('derives administrator access from the current database role', async () => {
-    const session = await seedSession('활성', '상담 담당')
+    const session = await seedSession('활성', '부관리자')
     const before = await getMe(session.token)
 
     expect(before.status).toBe(200)
     await expect(before.json()).resolves.toMatchObject({
-      user: { id: session.userId, role: '상담 담당' },
+      user: { id: session.userId, role: '부관리자' },
       isAdmin: false,
     })
 

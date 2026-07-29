@@ -7,12 +7,12 @@ import {
 export const RETENTION_YEARS_MIN = 1
 export const RETENTION_YEARS_MAX = 100
 
-type AdministratorRole = (typeof ROLES)[0]
+type AdministratorRole = '관리자'
 
 export type InviteRole = Exclude<Role, AdministratorRole>
 
 export const INVITE_ROLES: readonly InviteRole[] = ROLES.filter(
-  (role): role is InviteRole => role !== ROLES[0],
+  (role): role is InviteRole => role !== '관리자',
 )
 
 export interface OfficeSettings {
