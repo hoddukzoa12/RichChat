@@ -1,11 +1,18 @@
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
+  type ChangeEvent,
   type KeyboardEvent,
 } from 'react'
 import { attachmentUrl } from '../api/endpoints/attachments'
+import {
+  COMPOSE_IMAGE_LIMITS,
+  imageSelectionError,
+  prepareComposeImage,
+} from '../lib/composeImage'
 import {
   composerMetrics,
   type ComposerIssueCode,
@@ -14,6 +21,7 @@ import {
   type ThreadMessage,
 } from '../state/thread'
 import { DELIVERY_STATUS_BADGE } from '../theme'
+import { LMS_MAX_BYTES } from '../../shared/sms'
 import { initialOf } from '../../shared/text'
 import type { MessageAttachment } from '../../shared/wire/message'
 import { ImageViewer } from './ImageViewer'
@@ -447,6 +455,34 @@ export interface MessageComposerProps {
   onSend: () => void
 }
 
+interface ConvertingComposerImage {
+  id: string
+  originalName: string
+  status: 'converting'
+}
+
+interface ReadyComposerImage {
+  id: string
+  originalName: string
+  status: 'ready'
+  file: File
+  previewUrl: string
+  width: number
+  height: number
+}
+
+type ComposerImage = ConvertingComposerImage | ReadyComposerImage
+
+function composerImageId(): string {
+  return crypto.randomUUID()
+}
+
+function imageLimitMessage(rejectedCount: number): string {
+  return rejectedCount === 1
+    ? '이미지는 최대 3장까지 첨부할 수 있습니다. 4장째 이미지는 추가하지 않았습니다.'
+    : `이미지는 최대 3장까지 첨부할 수 있습니다. ${rejectedCount}장은 추가하지 않았습니다.`
+}
+
 export function MessageComposer({
   draft,
   sendError,
@@ -454,16 +490,57 @@ export function MessageComposer({
   onDraftChange,
   onSend,
 }: MessageComposerProps) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const activeImageIdsRef = useRef(new Set<string>())
+  const objectUrlsRef = useRef(new Set<string>())
+  const [images, setImages] = useState<ComposerImage[]>([])
+  const [selectionErrors, setSelectionErrors] = useState<string[]>([])
+  const [attachmentSendError, setAttachmentSendError] = useState<
+    string | null
+  >(null)
   const metrics = composerMetrics(draft)
   const localError = metrics.issue
     ? SEND_ERROR_COPY[metrics.issue]
     : null
-  const error = localError ?? failureMessage(sendError)
+  const error =
+    localError ??
+    attachmentSendError ??
+    failureMessage(sendError)
+  const readyImages = images.filter(
+    (image): image is ReadyComposerImage =>
+      image.status === 'ready',
+  )
+  const converting = images.some(
+    (image) => image.status === 'converting',
+  )
+  const hasImages = images.length > 0
   const canSend =
-    draft.trim().length > 0 && metrics.issue === null && !sending
+    (draft.trim().length > 0 || readyImages.length > 0) &&
+    metrics.issue === null &&
+    !sending &&
+    !converting
+
+  useEffect(
+    () => () => {
+      activeImageIdsRef.current.clear()
+      for (const objectUrl of objectUrlsRef.current) {
+        URL.revokeObjectURL(objectUrl)
+      }
+      objectUrlsRef.current.clear()
+    },
+    [],
+  )
 
   const submit = () => {
-    if (canSend) onSend()
+    if (!canSend) return
+    if (readyImages.length > 0) {
+      // 서버 업로드가 열리기 전 텍스트만 따로 발송되는 사고를 막는다.
+      setAttachmentSendError(
+        SEND_ERROR_COPY.MSG_ATTACHMENTS_UNSUPPORTED,
+      )
+      return
+    }
+    onSend()
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -472,10 +549,113 @@ export function MessageComposer({
     submit()
   }
 
-  const typeLabel =
-    metrics.messageType === 'TOO_LONG'
+  const typeLabel = hasImages
+    ? metrics.messageType === 'TOO_LONG'
+      ? 'MMS 본문 한도 초과'
+      : 'MMS'
+    : metrics.messageType === 'TOO_LONG'
       ? 'LMS 한도 초과'
       : metrics.messageType
+  const byteLimit = hasImages ? LMS_MAX_BYTES : metrics.limit
+
+  const chooseFiles = () => {
+    inputRef.current?.click()
+  }
+
+  const addSelectedFiles = (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const selectedFiles = Array.from(event.currentTarget.files ?? [])
+    event.currentTarget.value = ''
+    setAttachmentSendError(null)
+
+    const candidates: File[] = []
+    const errors: string[] = []
+    for (const file of selectedFiles) {
+      const validationError = imageSelectionError(file)
+      if (validationError) {
+        errors.push(validationError)
+      } else {
+        candidates.push(file)
+      }
+    }
+
+    const available =
+      COMPOSE_IMAGE_LIMITS.count - activeImageIdsRef.current.size
+    const accepted = candidates.slice(0, Math.max(0, available))
+    const rejectedCount = candidates.length - accepted.length
+    if (rejectedCount > 0) {
+      errors.push(imageLimitMessage(rejectedCount))
+    }
+    setSelectionErrors(errors)
+
+    const additions = accepted.map((file) => {
+      const id = composerImageId()
+      activeImageIdsRef.current.add(id)
+      return {
+        file,
+        image: {
+          id,
+          originalName: file.name,
+          status: 'converting' as const,
+        },
+      }
+    })
+    setImages((current) => [
+      ...current,
+      ...additions.map(({ image }) => image),
+    ])
+
+    for (const { file, image } of additions) {
+      void prepareComposeImage(file)
+        .then((prepared) => {
+          if (!activeImageIdsRef.current.has(image.id)) return
+          const previewUrl = URL.createObjectURL(prepared.file)
+          objectUrlsRef.current.add(previewUrl)
+          setImages((current) =>
+            current.map((candidate) =>
+              candidate.id === image.id
+                ? {
+                    ...image,
+                    status: 'ready',
+                    file: prepared.file,
+                    previewUrl,
+                    width: prepared.width,
+                    height: prepared.height,
+                  }
+                : candidate,
+            ),
+          )
+        })
+        .catch((conversionError: unknown) => {
+          activeImageIdsRef.current.delete(image.id)
+          setImages((current) =>
+            current.filter(
+              (candidate) => candidate.id !== image.id,
+            ),
+          )
+          setSelectionErrors((current) => [
+            ...current,
+            conversionError instanceof Error
+              ? conversionError.message
+              : `${file.name} 이미지를 읽거나 변환할 수 없습니다.`,
+          ])
+        })
+    }
+  }
+
+  const removeImage = (image: ComposerImage) => {
+    activeImageIdsRef.current.delete(image.id)
+    if (image.status === 'ready') {
+      URL.revokeObjectURL(image.previewUrl)
+      objectUrlsRef.current.delete(image.previewUrl)
+    }
+    setImages((current) =>
+      current.filter((candidate) => candidate.id !== image.id),
+    )
+    setSelectionErrors([])
+    setAttachmentSendError(null)
+  }
 
   return (
     <div className="flex-none border-t border-line bg-white px-5 pt-3.5 pb-4">
@@ -487,16 +667,92 @@ export function MessageComposer({
           placeholder="메시지를 입력하세요 (Enter 전송 · Shift+Enter 줄바꿈)"
           className="h-[76px] w-full resize-none border-none bg-transparent px-[15px] pt-3.5 pb-1.5 font-sans text-[14.5px] leading-[1.55] text-ink outline-none"
         />
+        {images.length > 0 && (
+          <ul
+            aria-label="첨부 이미지"
+            className="grid grid-cols-3 gap-2 px-3 pb-2"
+          >
+            {images.map((image) => (
+              <li
+                key={image.id}
+                className="relative min-w-0 overflow-hidden rounded-lg border border-line bg-fill"
+                data-image-status={image.status}
+                {...(image.status === 'ready'
+                  ? {
+                      'data-image-byte-size': image.file.size,
+                      'data-image-width': image.width,
+                      'data-image-height': image.height,
+                    }
+                  : {})}
+              >
+                {image.status === 'converting' ? (
+                  <div
+                    className="flex aspect-[4/3] items-center justify-center px-2 text-center text-xs font-medium text-ink-500"
+                    aria-live="polite"
+                  >
+                    JPEG로 변환 중…
+                  </div>
+                ) : (
+                  <>
+                    <img
+                      src={image.previewUrl}
+                      alt={`${image.originalName} 미리보기`}
+                      className="aspect-[4/3] w-full bg-white object-contain"
+                    />
+                    <div className="min-w-0 px-2 py-1.5">
+                      <div className="truncate text-[11px] text-ink-600">
+                        {image.originalName}
+                      </div>
+                      <div className="truncate text-[10px] text-ink-400">
+                        {image.width} × {image.height} ·{' '}
+                        {image.file.size.toLocaleString('ko-KR')} byte
+                      </div>
+                    </div>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => removeImage(image)}
+                  aria-label={`${image.originalName} 첨부에서 제거`}
+                  className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/65 text-sm font-bold text-white hover:bg-black/80"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {selectionErrors.length > 0 && (
+          <div
+            role="alert"
+            className="mx-3 mb-2 rounded-md bg-open-bg px-3 py-2 text-xs text-open-fg"
+          >
+            {selectionErrors.map((message, index) => (
+              <div key={`${index}:${message}`}>{message}</div>
+            ))}
+          </div>
+        )}
         <div className="flex items-center gap-2 px-3 pb-[11px]">
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*,.heic,.heif"
+            multiple
+            onChange={addSelectedFiles}
+            className="sr-only"
+            aria-label="이미지 파일 선택"
+          />
           <button
             type="button"
+            onClick={chooseFiles}
+            disabled={sending}
             className="flex h-[30px] items-center rounded-lg border border-line px-[11px] text-[13px] font-medium text-ink-600 hover:border-brand hover:text-brand"
           >
             ＋ 파일
           </button>
           <span className="ml-0.5 text-xs text-ink-400">
             {metrics.byteLength.toLocaleString('ko-KR')} /{' '}
-            {metrics.limit.toLocaleString('ko-KR')} byte · {typeLabel}
+            {byteLimit.toLocaleString('ko-KR')} byte · {typeLabel}
           </span>
           <button
             type="button"

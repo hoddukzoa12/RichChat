@@ -205,6 +205,23 @@ describe('thread presentation', () => {
     expect(emoji).toContain('disabled=""')
   })
 
+  it('renders an accessible multi-image file chooser', () => {
+    const markup = renderToStaticMarkup(
+      <MessageComposer
+        draft=""
+        sendError={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+      />,
+    )
+
+    expect(markup).toContain('type="file"')
+    expect(markup).toContain('accept="image/*,.heic,.heif"')
+    expect(markup).toContain('multiple=""')
+    expect(markup).toContain('aria-label="이미지 파일 선택"')
+    expect(markup).toContain('＋ 파일')
+  })
+
   it('maps dedicated server error codes without depending on copy', () => {
     const markup = renderToStaticMarkup(
       <MessageComposer
