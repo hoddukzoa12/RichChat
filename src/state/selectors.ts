@@ -1,6 +1,7 @@
 import {
   CONVERSATION_LIST_DEFAULT_LIMIT,
   type ConversationListAssignee,
+  type ConversationListItem,
   type ConversationListParams,
 } from '../../shared/wire/conversation'
 import type { InboxState } from './inbox'
@@ -35,4 +36,18 @@ export function conversationListParams(
     q: normalizedQuery || undefined,
     limit: CONVERSATION_LIST_DEFAULT_LIMIT,
   }
+}
+
+/**
+ * 서버 페이지를 유지한 채 낙관적으로 필터 밖으로 이동한 대화만 숨긴다.
+ * 실패 시 같은 항목을 복원하면 별도 목록 스냅샷 없이 즉시 다시 나타난다.
+ */
+export function visibleConversations(
+  state: Pick<InboxState, 'archivedView' | 'convs' | 'filter'>,
+): ConversationListItem[] {
+  return state.convs.filter(
+    (conversation) =>
+      conversation.archived === state.archivedView &&
+      (state.filter === '전체' || conversation.status === state.filter),
+  )
 }

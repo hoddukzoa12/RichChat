@@ -11,9 +11,10 @@ import {
   type Action,
   type InboxState,
 } from './inbox'
+import { visibleConversations } from './selectors'
 import { threadFor } from './thread'
 
-const ACTION_TYPES_AFTER_LIST_API = [
+const EXPECTED_ACTION_TYPES = [
   'select',
   'setPage',
   'setTab',
@@ -27,9 +28,7 @@ const ACTION_TYPES_AFTER_LIST_API = [
   'conversationListLoadStarted',
   'conversationListLoadSucceeded',
   'conversationListLoadFailed',
-  'setStatus',
-  'archive',
-  'unarchive',
+  'conversationWriteApplied',
   'assigneeAssigned',
   'assigneeUnassigned',
   'thread/loadStarted',
@@ -185,7 +184,7 @@ function conversationDetail(): ConversationDetail {
 describe('inbox reducer', () => {
   it('preserves every registered action name after adding the list API', () => {
     expect([...ACTION_TYPES].sort()).toEqual(
-      [...ACTION_TYPES_AFTER_LIST_API].sort(),
+      [...EXPECTED_ACTION_TYPES].sort(),
     )
   })
 
@@ -207,14 +206,33 @@ describe('inbox reducer', () => {
         response,
       },
       { type: 'select', id: 'conversation-2' },
-      { type: 'setStatus', value: '완료' },
-      { type: 'archive' },
+      {
+        type: 'conversationWriteApplied',
+        conversationId: 'conversation-2',
+        conversation: {
+          status: '완료',
+          label: '',
+          archived: false,
+          version: 2,
+        },
+      },
+      {
+        type: 'conversationWriteApplied',
+        conversationId: 'conversation-2',
+        conversation: {
+          status: '완료',
+          label: '',
+          archived: true,
+          version: 3,
+        },
+      },
     ])
 
     const selectedAfter = {
       ...response.conversations[1],
       status: '완료' as const,
       archived: true,
+      version: 3,
     }
 
     expect(state).toEqual({
@@ -222,11 +240,129 @@ describe('inbox reducer', () => {
       selected: 'conversation-2',
       mobileView: 'chat',
       convs: [response.conversations[0], selectedAfter],
-      facets: response.facets,
+      facets: {
+        ...response.facets,
+        status: {
+          전체: 1,
+          미처리: 1,
+          처리중: 0,
+          완료: 0,
+        },
+        archive: { active: 1, archived: 13 },
+      },
       nextCursor: 'next-page',
       listLoadStatus: 'loaded',
       listRequestId: 1,
     })
+  })
+
+  it('updates status facets and restores the previous optimistic value', () => {
+    const response = listResponse(['conversation-1', 'conversation-2'])
+    const loaded = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+    ])
+    const optimistic = reducer(loaded, {
+      type: 'conversationWriteApplied',
+      conversationId: 'conversation-1',
+      conversation: {
+        status: '처리중',
+        label: '부가세',
+        archived: false,
+        version: 1,
+      },
+    })
+
+    expect(optimistic.convs[0]).toMatchObject({
+      status: '처리중',
+      label: '부가세',
+      version: 1,
+    })
+    expect(optimistic.facets.status).toEqual({
+      전체: 2,
+      미처리: 1,
+      처리중: 1,
+      완료: 0,
+    })
+
+    const rolledBack = reducer(optimistic, {
+      type: 'conversationWriteApplied',
+      conversationId: 'conversation-1',
+      conversation: {
+        status: '미처리',
+        label: '',
+        archived: false,
+        version: 1,
+      },
+    })
+
+    expect(rolledBack.convs[0]).toEqual(response.conversations[0])
+    expect(rolledBack.facets.status).toEqual(response.facets.status)
+  })
+
+  it('moves archived conversations without changing their status', () => {
+    const response = listResponse(['conversation-1'])
+    response.conversations[0] = {
+      ...response.conversations[0],
+      status: '처리중',
+    }
+    response.facets.status = {
+      전체: 1,
+      미처리: 0,
+      처리중: 1,
+      완료: 0,
+    }
+    const loaded = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+    ])
+    const archived = reducer(loaded, {
+      type: 'conversationWriteApplied',
+      conversationId: 'conversation-1',
+      conversation: {
+        status: '처리중',
+        label: '',
+        archived: true,
+        version: 2,
+      },
+    })
+
+    expect(archived.convs[0]).toMatchObject({
+      status: '처리중',
+      archived: true,
+      version: 2,
+    })
+    expect(visibleConversations(archived)).toEqual([])
+    expect(archived.facets.archive).toEqual({
+      active: 0,
+      archived: 13,
+    })
+
+    const archivedView = {
+      ...archived,
+      archivedView: true,
+    }
+    expect(visibleConversations(archivedView)).toEqual([
+      archived.convs[0],
+    ])
   })
 
   it('keeps card detail separate while synchronizing customer list fields', () => {

@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ConversationListResponse } from '../../../shared/wire/conversation'
-import { getConversations } from './conversations'
+import type {
+  ConversationListResponse,
+  ConversationWriteState,
+} from '../../../shared/wire/conversation'
+import {
+  conversationVersionConflict,
+  getConversations,
+  patchConversation,
+} from './conversations'
 
 const RESPONSE: ConversationListResponse = {
   conversations: [
@@ -83,5 +90,85 @@ describe('conversation list endpoint', () => {
     await getConversations({})
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/conversations')
+  })
+
+  it('sends the version and requested fields in a PATCH request', async () => {
+    const conversation: ConversationWriteState = {
+      id: 'conversation/1',
+      status: '처리중',
+      label: '부가세',
+      archived: true,
+      version: 4,
+      updatedAt: 1_785_233_160_001,
+    }
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(Response.json({ conversation })),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await patchConversation('conversation/1', {
+      status: '처리중',
+      archived: true,
+      label: '부가세',
+      version: 3,
+    })
+
+    const [path, init] = fetchMock.mock.calls[0]
+    expect(path).toBe('/api/conversations/conversation%2F1')
+    expect(init).toMatchObject({
+      credentials: 'same-origin',
+      method: 'PATCH',
+    })
+    expect(new Headers(init?.headers).get('content-type')).toBe(
+      'application/json',
+    )
+    expect(JSON.parse(String(init?.body))).toEqual({
+      status: '처리중',
+      archived: true,
+      label: '부가세',
+      version: 3,
+    })
+    expect(result).toEqual({ conversation })
+  })
+
+  it('returns the current server state from a version conflict', async () => {
+    const current: ConversationWriteState = {
+      id: 'conversation-1',
+      status: '완료',
+      label: '서버 라벨',
+      archived: false,
+      version: 7,
+      updatedAt: 1_785_233_160_002,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          Response.json(
+            {
+              error: {
+                code: 'CONFLICT_VERSION',
+                message: '다른 사용자가 먼저 대화를 변경했습니다.',
+                detail: { conversation: current },
+              },
+            },
+            { status: 409 },
+          ),
+        ),
+      ),
+    )
+
+    let failure: unknown
+    try {
+      await patchConversation('conversation-1', {
+        status: '처리중',
+        version: 6,
+      })
+    } catch (error: unknown) {
+      failure = error
+    }
+
+    expect(conversationVersionConflict(failure)).toEqual(current)
   })
 })
