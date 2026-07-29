@@ -24,6 +24,8 @@ export interface SettingsState {
   teamError: string | null
   inviteOpen: boolean
   inviteEmail: string
+  inviteName: string
+  inviteTitle: string
   inviteRole: Role
 }
 
@@ -35,6 +37,8 @@ export const initialSettingsState: SettingsState = {
   teamError: null,
   inviteOpen: false,
   inviteEmail: '',
+  inviteName: '',
+  inviteTitle: '',
   inviteRole: '상담 담당',
 }
 
@@ -53,6 +57,8 @@ export type SettingsAction =
   | { type: 'openInvite' }
   | { type: 'closeInvite' }
   | { type: 'setInviteEmail'; value: string }
+  | { type: 'setInviteName'; value: string }
+  | { type: 'setInviteTitle'; value: string }
   | { type: 'setInviteRole'; value: Role }
 
 export const settingsHandlers = {
@@ -102,12 +108,18 @@ export const settingsHandlers = {
     ...state,
     inviteOpen: true,
     inviteEmail: '',
+    inviteName: '',
+    inviteTitle: '',
     inviteRole: '상담 담당',
   }),
 
   closeInvite: (state) => ({ ...state, inviteOpen: false }),
 
   setInviteEmail: (state, action) => ({ ...state, inviteEmail: action.value }),
+
+  setInviteName: (state, action) => ({ ...state, inviteName: action.value }),
+
+  setInviteTitle: (state, action) => ({ ...state, inviteTitle: action.value }),
 
   setInviteRole: (state, action) => ({ ...state, inviteRole: action.value }),
 } satisfies ActionHandlers<InboxState, SettingsAction>

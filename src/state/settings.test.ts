@@ -16,8 +16,8 @@ const ACTIVE_MEMBER: OfficeMember = {
 const INVITED_MEMBER: OfficeMemberWithStatus = {
   id: 'invite-1',
   email: 'invite@rich.kr',
-  name: 'invite@rich.kr',
-  title: '세무사',
+  name: '초대 직원',
+  title: '주임',
   role: '세무사',
   status: '초대',
 }
@@ -51,6 +51,50 @@ describe('Settings state', () => {
     expect(repeated.team[0]).toMatchObject({
       email: INVITED_MEMBER.email,
       role: '상담 담당',
+    })
+  })
+
+  it('keeps every invite field in its own draft slot', () => {
+    const opened = reducer(initialState, { type: 'openInvite' })
+    const withEmail = reducer(opened, {
+      type: 'setInviteEmail',
+      value: 'new@rich.kr',
+    })
+    const withName = reducer(withEmail, {
+      type: 'setInviteName',
+      value: '신입 직원',
+    })
+    const withTitle = reducer(withName, {
+      type: 'setInviteTitle',
+      value: '대리',
+    })
+    const complete = reducer(withTitle, {
+      type: 'setInviteRole',
+      value: '부관리자',
+    })
+
+    expect(complete).toMatchObject({
+      inviteEmail: 'new@rich.kr',
+      inviteName: '신입 직원',
+      inviteTitle: '대리',
+      inviteRole: '부관리자',
+    })
+  })
+
+  it('keeps a deactivated member in the team list', () => {
+    const loaded = reducer(initialState, {
+      type: 'loadTeam',
+      members: [INVITED_MEMBER],
+    })
+    const deactivated = reducer(loaded, {
+      type: 'upsertTeamMember',
+      member: { ...INVITED_MEMBER, status: '비활성' },
+    })
+
+    expect(deactivated.team).toHaveLength(1)
+    expect(deactivated.team[0]).toMatchObject({
+      id: INVITED_MEMBER.id,
+      status: '비활성',
     })
   })
 })

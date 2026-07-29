@@ -59,7 +59,7 @@ export function Rail() {
       />
 
       <div className="mt-auto flex flex-col items-center gap-2.5">
-        {me.permissions['office:manage'] && (
+        {me.permissions['team:manage'] && (
           <RailButton page="office" emoji="🏢" label="사무소" />
         )}
         <RailButton page="settings" emoji="⚙️" label="설정" />

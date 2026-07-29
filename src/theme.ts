@@ -1,4 +1,9 @@
-import type { DeliveryStatus, Status, TaskKind } from './types'
+import type {
+  DeliveryStatus,
+  Status,
+  TaskKind,
+  UserStatus,
+} from './types'
 
 export const STATUS_BADGE: Record<Status, string> = {
   미처리: 'text-open-fg bg-open-bg',
@@ -25,6 +30,35 @@ export const DELIVERY_STATUS_BADGE: Record<DeliveryStatus, string> = {
   전송중: 'text-doing-fg bg-doing-bg',
   완료: 'text-done-fg bg-done-bg',
   실패: 'text-open-fg bg-open-bg',
+}
+
+export const MEMBER_STATUS_VIEW: Record<
+  UserStatus,
+  {
+    label: string
+    badgeClass: string
+    rowClass: string
+    avatarClass: string
+  }
+> = {
+  초대: {
+    label: '초대 발송됨',
+    badgeClass: 'text-doing-fg bg-doing-bg',
+    rowClass: '',
+    avatarClass: 'opacity-55',
+  },
+  활성: {
+    label: '활성',
+    badgeClass: 'text-done-fg bg-done-bg',
+    rowClass: '',
+    avatarClass: '',
+  },
+  비활성: {
+    label: '비활성',
+    badgeClass: 'text-ink-500 bg-fill',
+    rowClass: 'bg-surface-sunken opacity-70',
+    avatarClass: 'grayscale',
+  },
 }
 
 export const TASK_KIND_VIEW: Record<

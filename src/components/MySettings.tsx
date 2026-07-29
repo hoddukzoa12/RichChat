@@ -26,9 +26,15 @@ const PROFILE_FIELDS: Array<{
   key: keyof ProfileDraft
   label: string
   readOnly: boolean
+  help?: string
 }> = [
   { key: 'name', label: '이름', readOnly: false },
-  { key: 'title', label: '직함', readOnly: true },
+  {
+    key: 'title',
+    label: '직함',
+    readOnly: true,
+    help: '직함은 사무소의 직원 관리 화면에서 변경할 수 있습니다.',
+  },
   { key: 'email', label: '이메일', readOnly: true },
 ]
 
@@ -171,26 +177,33 @@ export function MySettings() {
 
             <div className="flex flex-col gap-3">
               {PROFILE_FIELDS.map((p) => (
-                <div key={p.key} className="flex items-center gap-3">
+                <div key={p.key} className="flex items-start gap-3">
                   <span className="w-24 flex-none text-[13px] text-ink-500">{p.label}</span>
-                  <input
-                    value={profileDraft[p.key]}
-                    readOnly={p.readOnly}
-                    onChange={
-                      p.readOnly
-                        ? undefined
-                        : (event) =>
-                            setProfileDraft((current) => ({
-                              ...current,
-                              [p.key]: event.target.value,
-                            }))
-                    }
-                    className={`flex-1 min-w-0 text-[13.5px] border border-line-strong rounded-lg px-[11px] py-2 outline-none ${
-                      p.readOnly
-                        ? 'text-ink-500 bg-fill cursor-not-allowed'
-                        : 'text-ink focus:border-brand'
-                    }`}
-                  />
+                  <span className="flex-1 min-w-0">
+                    <input
+                      value={profileDraft[p.key]}
+                      readOnly={p.readOnly}
+                      onChange={
+                        p.readOnly
+                          ? undefined
+                          : (event) =>
+                              setProfileDraft((current) => ({
+                                ...current,
+                                [p.key]: event.target.value,
+                              }))
+                      }
+                      className={`w-full text-[13.5px] border border-line-strong rounded-lg px-[11px] py-2 outline-none ${
+                        p.readOnly
+                          ? 'text-ink-500 bg-fill cursor-not-allowed'
+                          : 'text-ink focus:border-brand'
+                      }`}
+                    />
+                    {p.help && (
+                      <span className="mt-1 block text-[11.5px] text-ink-400">
+                        {p.help}
+                      </span>
+                    )}
+                  </span>
                 </div>
               ))}
             </div>
