@@ -9,7 +9,7 @@ import {
   type LguTokenEnv,
   type LguTokenStore,
 } from './token'
-import type { LguFetch } from './protocol'
+import { LguApiError, type LguFetch } from './protocol'
 
 declare module 'cloudflare:test' {
   interface ProvidedEnv extends Env {}
@@ -90,8 +90,15 @@ function tokenEnv(overrides: Partial<LguTokenEnv> = {}): LguTokenEnv {
 
 function authResponse(accessToken: string): Response {
   return Response.json({
+    // 운영 실측: { code, message, data: { token, refreshToken } }
+    // 문서의 최상위 accessToken은 실제와 다르다.
+    // 리프레시 토큰은 발급 IP에 묶이므로 Workers에서 저장하거나 쓰지 않는다.
     code: '10000',
-    accessToken,
+    message: '성공',
+    data: {
+      token: accessToken,
+      refreshToken: 'unused-refresh-token',
+    },
   })
 }
 
@@ -235,6 +242,42 @@ describe('LGU token provider', () => {
       expect.objectContaining({
         name: 'LguConfigurationError',
         message: expect.stringContaining('LGU_API_KEY'),
+      }),
+    )
+  })
+
+  it.each([
+    {
+      label: 'missing data',
+      body: { code: '10000', message: '성공' },
+    },
+    {
+      label: 'non-string token',
+      body: {
+        code: '10000',
+        message: '성공',
+        data: { token: 123 },
+      },
+    },
+  ])('rejects an authentication response with $label', async ({ body }) => {
+    const store = new MemoryTokenStore()
+    const provider = createLguTokenProvider({
+      fetch: async () => Response.json(body),
+      now: () => NOW,
+      storeFactory: () => store,
+    })
+
+    const error = await provider(
+      tokenEnv(),
+      `office-invalid-${body.data === undefined ? 'data' : 'token'}`,
+    ).catch((cause: unknown) => cause)
+
+    expect(error).toBeInstanceOf(LguApiError)
+    expect(error).toEqual(
+      expect.objectContaining({
+        code: 'INVALID_RESPONSE',
+        status: 200,
+        body,
       }),
     )
   })

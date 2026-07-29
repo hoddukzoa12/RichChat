@@ -137,7 +137,7 @@ export interface LguTokenEnv extends LguAccessEnv {
 
 interface AuthResponse {
   code: string
-  accessToken?: unknown
+  data?: unknown
 }
 
 interface TokenProviderOptions {
@@ -217,7 +217,13 @@ async function authenticate(
     },
   )
 
-  if (typeof response.accessToken !== 'string' || response.accessToken === '') {
+  if (
+    typeof response.data !== 'object' ||
+    response.data === null ||
+    !('token' in response.data) ||
+    typeof response.data.token !== 'string' ||
+    response.data.token === ''
+  ) {
     throw new LguApiError(
       'INVALID_RESPONSE',
       200,
@@ -226,7 +232,7 @@ async function authenticate(
     )
   }
 
-  return response.accessToken
+  return response.data.token
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {
