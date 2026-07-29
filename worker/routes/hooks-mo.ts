@@ -1,4 +1,5 @@
 import type { SendChannel } from '../../shared/domain'
+import { SMS_MAX_BYTES, smsByteLength } from '../../shared/sms'
 import { changes } from '../db/d1'
 import { publish } from '../db/events'
 import { error } from '../http/error'
@@ -14,29 +15,25 @@ const INVALID_ENVELOPE_KEY_PREFIX = 'invalid-envelope-sha256:'
 const SUCCESS_BODY = { code: '10000', message: 'success' } as const
 const RETRY_BODY = { code: '99999', message: 'retry' } as const
 
-type MoType = 'SMSMO' | 'MMSMO' | 'RCSMO'
+type KnownMoType = 'SMSMO' | 'LMSMO' | 'MMSMO'
 
 interface MoContent {
-  contentName: string
-  contentSize: number
-  contentExt: string
-  contentUrl: string
+  contentName: string | null
+  contentSize: number | null
+  contentExt: string | null
 }
 
 interface MoItem {
   moKey: string
-  moNumber: string
-  moType: MoType
+  moNumber: string | null
+  moType: string
   moCallback: string
   moMsg: string
   moRecvDt: string
-  telco: string
-  contentCnt: number
   contentInfoLst: MoContent[]
 }
 
 interface MoEnvelope {
-  moCnt: number
   moLst: unknown[]
 }
 
@@ -69,11 +66,15 @@ class PayloadValidationError extends Error {
   }
 }
 
-const MO_CHANNEL: Record<MoType, SendChannel> = {
+/**
+ * 문서는 SMSMO·MMSMO·RCSMO만 적었으나 운영에서 LMSMO가 왔다.
+ * 목록이 완전하지 않으니 모르는 값을 버리지 않는다.
+ * RCS는 이 사무소가 쓰지 않아 명시하지 않는다. 오면 모르는 타입 규칙을 탄다.
+ */
+const MO_CHANNEL: Record<KnownMoType, SendChannel> = {
   SMSMO: 'SMS',
+  LMSMO: 'LMS',
   MMSMO: 'MMS',
-  // RCS 계약 없음. 고객 문의 유실보다 부정확한 채널 라벨을 택한다.
-  RCSMO: 'MMS',
 }
 
 const MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -93,8 +94,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isMoType(value: unknown): value is MoType {
-  return typeof value === 'string' && Object.hasOwn(MO_CHANNEL, value)
+function isKnownMoType(value: string): value is KnownMoType {
+  return Object.hasOwn(MO_CHANNEL, value)
 }
 
 function requiredString(
@@ -108,18 +109,15 @@ function requiredString(
   return value
 }
 
-function stringValue(
+function nullableString(
   source: Record<string, unknown>,
   key: string,
-): string {
+): string | null {
   const value = source[key]
-  if (typeof value !== 'string') {
-    throw new PayloadValidationError(`${key} 값이 올바르지 않습니다.`)
-  }
-  return value
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-function nonNegativeInteger(value: unknown, key: string): number {
+function nullableNonNegativeInteger(value: unknown): number | null {
   const parsed =
     typeof value === 'string' && value.trim() !== ''
       ? Number(value)
@@ -130,7 +128,7 @@ function nonNegativeInteger(value: unknown, key: string): number {
     !Number.isSafeInteger(parsed) ||
     parsed < 0
   ) {
-    throw new PayloadValidationError(`${key} 값이 올바르지 않습니다.`)
+    return null
   }
   return parsed
 }
@@ -143,10 +141,9 @@ function parseContent(value: unknown): MoContent {
   }
 
   return {
-    contentName: requiredString(value, 'contentName'),
-    contentSize: nonNegativeInteger(value.contentSize, 'contentSize'),
-    contentExt: requiredString(value, 'contentExt'),
-    contentUrl: requiredString(value, 'contentUrl'),
+    contentName: nullableString(value, 'contentName'),
+    contentSize: nullableNonNegativeInteger(value.contentSize),
+    contentExt: nullableString(value, 'contentExt'),
   }
 }
 
@@ -156,32 +153,28 @@ function parseItem(value: unknown): MoItem {
   }
 
   const moType = value.moType
-  if (!isMoType(moType)) {
+  if (typeof moType !== 'string' || moType.length === 0) {
     throw new PayloadValidationError('moType 값이 올바르지 않습니다.')
   }
 
   const rawContentInfoLst = value.contentInfoLst
-  if (rawContentInfoLst !== null && !Array.isArray(rawContentInfoLst)) {
+  if (
+    rawContentInfoLst !== undefined &&
+    rawContentInfoLst !== null &&
+    !Array.isArray(rawContentInfoLst)
+  ) {
     throw new PayloadValidationError('contentInfoLst 값이 올바르지 않습니다.')
   }
 
-  const contentCnt = nonNegativeInteger(value.contentCnt, 'contentCnt')
   const contentInfoLst = rawContentInfoLst?.map(parseContent) ?? []
-  if (contentCnt !== contentInfoLst.length) {
-    throw new PayloadValidationError(
-      'contentCnt와 contentInfoLst 길이가 다릅니다.',
-    )
-  }
 
   return {
     moKey: requiredString(value, 'moKey'),
-    moNumber: requiredString(value, 'moNumber'),
+    moNumber: nullableString(value, 'moNumber'),
     moType,
     moCallback: requiredString(value, 'moCallback'),
-    moMsg: stringValue(value, 'moMsg'),
+    moMsg: typeof value.moMsg === 'string' ? value.moMsg : '',
     moRecvDt: requiredString(value, 'moRecvDt'),
-    telco: requiredString(value, 'telco'),
-    contentCnt,
     contentInfoLst,
   }
 }
@@ -191,12 +184,7 @@ function parseEnvelope(value: unknown): MoEnvelope {
     throw new PayloadValidationError('MO 페이로드가 올바르지 않습니다.')
   }
 
-  const moCnt = nonNegativeInteger(value.moCnt, 'moCnt')
-  if (moCnt !== value.moLst.length) {
-    throw new PayloadValidationError('moCnt와 moLst 길이가 다릅니다.')
-  }
-
-  return { moCnt, moLst: value.moLst }
+  return { moLst: value.moLst }
 }
 
 /**
@@ -325,7 +313,10 @@ function successResponse(): Response {
   return json(SUCCESS_BODY)
 }
 
-function originalFilename(content: MoContent): string {
+function originalFilename(content: MoContent): string | null {
+  if (content.contentName === null) return null
+  if (content.contentExt === null) return content.contentName
+
   const extension = content.contentExt.replace(/^\./, '')
   const suffix = `.${extension}`.toLocaleLowerCase('en-US')
   return content.contentName.toLocaleLowerCase('en-US').endsWith(suffix)
@@ -333,9 +324,17 @@ function originalFilename(content: MoContent): string {
     : `${content.contentName}.${extension}`
 }
 
-function mimeType(content: MoContent): string {
+function mimeType(content: MoContent): string | null {
+  if (content.contentExt === null) return null
+
   const extension = content.contentExt.replace(/^\./, '').toLowerCase()
   return MIME_TYPE_BY_EXTENSION[extension] ?? 'application/octet-stream'
+}
+
+function messageChannel(item: MoItem): SendChannel {
+  if (isKnownMoType(item.moType)) return MO_CHANNEL[item.moType]
+  if (item.contentInfoLst.length > 0) return 'MMS'
+  return smsByteLength(item.moMsg) <= SMS_MAX_BYTES ? 'SMS' : 'LMS'
 }
 
 function prepareItem(raw: unknown, inputIndex: number): PreparedMo {
@@ -353,7 +352,7 @@ function prepareItem(raw: unknown, inputIndex: number): PreparedMo {
     occurredAt,
     inputIndex,
     phoneE164: normalizeKoreanPhone(item.moCallback),
-    channel: MO_CHANNEL[item.moType],
+    channel: messageChannel(item),
   }
 }
 
@@ -454,6 +453,13 @@ async function processItem(
     moType: item.moType,
     storedChannel: channel,
   })
+  if (!isKnownMoType(item.moType)) {
+    console.warn('알 수 없는 LGU+ MO 타입을 추론한 채널로 저장합니다.', {
+      moKey: item.moKey,
+      moType: item.moType,
+      storedChannel: channel,
+    })
+  }
 
   const statements: D1PreparedStatement[] = [
     db

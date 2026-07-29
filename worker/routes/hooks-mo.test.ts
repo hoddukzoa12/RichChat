@@ -1,5 +1,5 @@
 import { env, SELF } from 'cloudflare:test'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   INVALID_ITEM_KEY_PREFIX,
   parseMoRecvDt,
@@ -15,8 +15,8 @@ const OFFICE_NAME = '세무법인 리치'
 interface MoInput {
   moKey: string
   moCallback?: string
-  moType?: 'SMSMO' | 'MMSMO' | 'RCSMO'
-  moMsg?: string
+  moType?: string
+  moMsg?: string | null
   moRecvDt?: string
   contentInfoLst?: Array<{
     contentName: string
@@ -41,7 +41,8 @@ function mo(input: MoInput) {
     moNumber: '15445367',
     moType: input.moType ?? 'SMSMO',
     moCallback: input.moCallback ?? '01022334455',
-    moMsg: input.moMsg ?? '부가세 문의드려요',
+    moMsg:
+      input.moMsg === undefined ? '부가세 문의드려요' : input.moMsg,
     telco: 'LGU',
     moRecvDt: input.moRecvDt ?? kstTimestamp(),
     contentCnt: contentInfoLst.length,
@@ -123,6 +124,98 @@ describe('LGU+ MO webhook', () => {
       occurred_at: Date.UTC(2026, 6, 29, 1, 26, 38),
     })
     expect(attachmentCount?.count).toBe(0)
+  })
+
+  it('stores the real photo-only MMS payload and normalizes its metadata', async () => {
+    await insertOffice('office-mo-real-mms')
+    const actualItem = JSON.parse(
+      `{"moKey":"l0sSZPvGii.6gLlQs","moNumber":"18771239","moType":"MMSMO","moCallback":"01077955363","productCode":"MMSMO","moTitle":"제목없음","moMsg":null,"telco":"KT","contentCnt":1,"contentInfoLst":[{"contentName":"FL9yvTRGkR_0.jpg","contentSize":"94254","contentExt":"jpg","contentUrl":"https://df25hb5tuwkue.cloudfront.net/mmsmo/null/null/2026/07/29/FL9yvTRGkR_0.jpg"}],"moRecvDt":"2026-07-29T10:46:12"}`,
+    )
+
+    await expectSuccess(await post(payload(actualItem)))
+
+    const message = await env.DB.prepare(
+      `SELECT id, channel, title, body
+       FROM messages
+       WHERE mo_key = ?`,
+    )
+      .bind('l0sSZPvGii.6gLlQs')
+      .first<{
+        id: string
+        channel: string
+        title: string | null
+        body: string
+      }>()
+    const attachment = await env.DB.prepare(
+      `SELECT original_filename, byte_size, download_status, content_index
+       FROM message_attachments
+       WHERE message_id = ?`,
+    )
+      .bind(message!.id)
+      .first<{
+        original_filename: string
+        byte_size: number
+        download_status: string
+        content_index: number
+      }>()
+
+    expect(message).toMatchObject({
+      channel: 'MMS',
+      title: null,
+      body: '',
+    })
+    expect(attachment).toEqual({
+      original_filename: 'FL9yvTRGkR_0.jpg',
+      byte_size: 94254,
+      download_status: '대기',
+      content_index: 0,
+    })
+  })
+
+  it('stores the real LMSMO payload through its explicit channel mapping', async () => {
+    await insertOffice('office-mo-real-lms')
+    const actualItem = JSON.parse(
+      `{"moKey":"Iw42AUhnhL.6gLlQu","moNumber":"18771239","moType":"LMSMO","moCallback":"01077955363","productCode":"LMSMO","moTitle":"제목없음","moMsg":"세금 정보 알림 신청하신 김진우님, 경정청구 신청 정보를 안내드려요.…","telco":"KT","contentCnt":0,"contentInfoLst":null,"moRecvDt":"2026-07-29T10:48:02"}`,
+    )
+
+    await expectSuccess(await post(payload(actualItem)))
+
+    const message = await env.DB.prepare(
+      'SELECT channel, body FROM messages WHERE mo_key = ?',
+    )
+      .bind('Iw42AUhnhL.6gLlQu')
+      .first<{ channel: string; body: string }>()
+    expect(message).toEqual({
+      channel: 'LMS',
+      body: '세금 정보 알림 신청하신 김진우님, 경정청구 신청 정보를 안내드려요.…',
+    })
+  })
+
+  it('stores a message when only persistence-critical fields are usable', async () => {
+    await insertOffice('office-mo-minimal-fields')
+    const minimalItem = {
+      moKey: 'mo-minimal-fields',
+      moNumber: null,
+      moType: 'SMSMO',
+      moCallback: '01077955363',
+      moTitle: null,
+      moMsg: null,
+      telco: null,
+      contentCnt: null,
+      contentInfoLst: null,
+      moRecvDt: '2026-07-29T10:49:00',
+    }
+
+    await expectSuccess(
+      await post(JSON.stringify({ moLst: [minimalItem] })),
+    )
+
+    const message = await env.DB.prepare(
+      'SELECT channel, body FROM messages WHERE mo_key = ?',
+    )
+      .bind('mo-minimal-fields')
+      .first<{ channel: string; body: string }>()
+    expect(message).toEqual({ channel: 'SMS', body: '' })
   })
 
   it('commits a new customer conversation and idempotent message before ack', async () => {
@@ -645,18 +738,67 @@ describe('LGU+ MO webhook', () => {
     ])
   })
 
-  it('keeps an unexpected RCS inbound visible by storing it as MMS', async () => {
-    await insertOffice('office-mo-rcs')
+  it('infers unknown MO channels without losing the original type log', async () => {
+    await insertOffice('office-mo-unknown-types')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await expectSuccess(
-      await post(payload(mo({ moKey: 'mo-rcs', moType: 'RCSMO' }))),
-    )
+    try {
+      await expectSuccess(
+        await post(
+          payload(
+            mo({
+              moKey: 'mo-unknown-short',
+              moType: 'XXXMO',
+              moMsg: '가'.repeat(45),
+            }),
+            mo({
+              moKey: 'mo-unknown-long',
+              moType: 'LONGMO',
+              moMsg: '가'.repeat(46),
+            }),
+            mo({
+              moKey: 'mo-unknown-attachment',
+              moType: 'FILEMO',
+              contentInfoLst: [
+                {
+                  contentName: '사진.jpg',
+                  contentSize: 1,
+                  contentExt: 'jpg',
+                  contentUrl: 'https://example.com/ignored',
+                },
+              ],
+            }),
+            mo({
+              moKey: 'mo-unknown-rcs',
+              moType: 'RCSMO',
+              moMsg: '계약하지 않은 타입',
+            }),
+          ),
+        ),
+      )
 
-    const message = await env.DB.prepare(
-      'SELECT channel FROM messages WHERE mo_key = ?',
-    )
-      .bind('mo-rcs')
-      .first<{ channel: string }>()
-    expect(message?.channel).toBe('MMS')
+      const { results } = await env.DB.prepare(
+        `SELECT mo_key, channel
+         FROM messages
+         WHERE office_id = ?
+         ORDER BY mo_key`,
+      )
+        .bind('office-mo-unknown-types')
+        .all<{ mo_key: string; channel: string }>()
+      expect(results).toEqual([
+        { mo_key: 'mo-unknown-attachment', channel: 'MMS' },
+        { mo_key: 'mo-unknown-long', channel: 'LMS' },
+        { mo_key: 'mo-unknown-rcs', channel: 'SMS' },
+        { mo_key: 'mo-unknown-short', channel: 'SMS' },
+      ])
+      for (const moType of ['XXXMO', 'LONGMO', 'FILEMO', 'RCSMO']) {
+        expect(warn).toHaveBeenCalledWith(
+          '알 수 없는 LGU+ MO 타입을 추론한 채널로 저장합니다.',
+          expect.objectContaining({ moType }),
+        )
+      }
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
