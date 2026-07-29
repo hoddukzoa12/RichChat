@@ -1,11 +1,12 @@
 import type {
+  ConversationArchiveFilter,
+  ConversationListItem,
   ConversationListFacets,
   ConversationListResponse,
   ConversationScope,
   ConversationStatusFilter,
+  ConversationWriteState,
 } from '../../shared/wire/conversation'
-import type { Status } from '../types'
-import { patchSelectedConversation } from './conversations'
 import type { ActionHandlers, InboxState } from './inbox'
 
 export type ConversationListLoadStatus =
@@ -70,9 +71,112 @@ export type ListAction =
       append: boolean
       message: string
     }
-  | { type: 'setStatus'; value: Status }
-  | { type: 'archive' }
-  | { type: 'unarchive' }
+  | {
+      type: 'conversationWriteApplied'
+      conversationId: string
+      conversation: Pick<
+        ConversationWriteState,
+        'archived' | 'label' | 'status' | 'version'
+      >
+    }
+
+const ARCHIVE_FILTER: Record<
+  `${boolean}`,
+  ConversationArchiveFilter
+> = {
+  false: 'active',
+  true: 'archived',
+}
+
+function adjustedCount(count: number, delta: number): number {
+  return Math.max(0, count + delta)
+}
+
+function applyStatusFacetChange(
+  state: InboxState,
+  previous: ConversationListItem,
+  next: ConversationListItem,
+): ConversationListFacets['status'] {
+  const status = { ...state.facets.status }
+  const previousIncluded =
+    previous.archived === state.archivedView
+  const nextIncluded = next.archived === state.archivedView
+
+  if (previousIncluded) {
+    status[previous.status] = adjustedCount(
+      status[previous.status],
+      -1,
+    )
+    status.전체 = adjustedCount(status.전체, -1)
+  }
+  if (nextIncluded) {
+    status[next.status] = adjustedCount(status[next.status], 1)
+    status.전체 = adjustedCount(status.전체, 1)
+  }
+
+  return status
+}
+
+function matchesStatusFilter(
+  status: ConversationListItem['status'],
+  filter: ConversationStatusFilter,
+): boolean {
+  return filter === '전체' || status === filter
+}
+
+function applyArchiveFacetChange(
+  state: InboxState,
+  previous: ConversationListItem,
+  next: ConversationListItem,
+): ConversationListFacets['archive'] {
+  const archive = { ...state.facets.archive }
+  const previousIncluded = matchesStatusFilter(
+    previous.status,
+    state.filter,
+  )
+  const nextIncluded = matchesStatusFilter(next.status, state.filter)
+  const previousArchive = ARCHIVE_FILTER[`${previous.archived}`]
+  const nextArchive = ARCHIVE_FILTER[`${next.archived}`]
+
+  if (previousIncluded) {
+    archive[previousArchive] = adjustedCount(
+      archive[previousArchive],
+      -1,
+    )
+  }
+  if (nextIncluded) {
+    archive[nextArchive] = adjustedCount(archive[nextArchive], 1)
+  }
+
+  return archive
+}
+
+function applyConversationWrite(
+  state: InboxState,
+  conversationId: string,
+  write: Pick<
+    ConversationWriteState,
+    'archived' | 'label' | 'status' | 'version'
+  >,
+): InboxState {
+  const previous = state.convs.find(
+    (conversation) => conversation.id === conversationId,
+  )
+  if (!previous) return state
+
+  const next = { ...previous, ...write }
+  return {
+    ...state,
+    convs: state.convs.map((conversation) =>
+      conversation.id === conversationId ? next : conversation,
+    ),
+    facets: {
+      ...state.facets,
+      status: applyStatusFacetChange(state, previous, next),
+      archive: applyArchiveFacetChange(state, previous, next),
+    },
+  }
+}
 
 function mergeConversationPage(
   current: InboxState['convs'],
@@ -156,19 +260,10 @@ export const listHandlers = {
     }
   },
 
-  setStatus: (state, action) => ({
-    ...state,
-    menu: null,
-    convs: patchSelectedConversation(state, () => ({ status: action.value })),
-  }),
-
-  archive: (state) => ({
-    ...state,
-    convs: patchSelectedConversation(state, () => ({ archived: true, status: '완료' })),
-  }),
-
-  unarchive: (state) => ({
-    ...state,
-    convs: patchSelectedConversation(state, () => ({ archived: false, status: '처리중' })),
-  }),
+  conversationWriteApplied: (state, action) =>
+    applyConversationWrite(
+      state,
+      action.conversationId,
+      action.conversation,
+    ),
 } satisfies ActionHandlers<InboxState, ListAction>

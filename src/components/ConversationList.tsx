@@ -1,5 +1,8 @@
 import { useInbox } from '../state/InboxContext'
-import { assigneeLabel } from '../state/selectors'
+import {
+  assigneeLabel,
+  visibleConversations,
+} from '../state/selectors'
 import { Avatar, MenuItem, Popover, StatusBadge } from './ui'
 import type { Breakpoint } from '../hooks/useBreakpoint'
 import {
@@ -109,7 +112,7 @@ function Row({ conv }: { conv: ConversationListItem }) {
 export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
   const { state, dispatch } = useInbox()
   const { loadMore, retry } = useConversationList(state, dispatch)
-  const list = state.convs
+  const list = visibleConversations(state)
   const counts = state.facets.status
 
   const width =

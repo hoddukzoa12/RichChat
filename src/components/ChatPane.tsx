@@ -13,6 +13,7 @@ import {
   sendConversationMessage,
 } from '../api/endpoints/messages'
 import { markConversationRead } from '../api/endpoints/reads'
+import { useConversationWrite } from '../hooks/useConversationWrite'
 import { useInbox } from '../state/InboxContext'
 import { currentConv } from '../state/conversations'
 import { assigneeLabel } from '../state/selectors'
@@ -241,6 +242,8 @@ function Header({
   teamError: string | null
 }) {
   const { state, dispatch } = useInbox()
+  const { error, mutate, pending } = useConversationWrite(cur, dispatch)
+  const [labelDraft, setLabelDraft] = useState(cur.label)
   const customerInitial = initialOf(cur.customer.name)
 
   return (
@@ -275,9 +278,10 @@ function Header({
         <div className="relative flex-none">
           <button
             type="button"
+            disabled={pending}
             className={`h-[34px] px-3 border border-line-strong rounded-[9px] flex items-center gap-1.5 text-[13.5px] font-semibold bg-white cursor-pointer ${
               STATUS_TEXT[cur.status]
-            }`}
+            } disabled:cursor-wait disabled:opacity-60`}
             onClick={() =>
               dispatch({ type: 'setMenu', value: state.menu === 'status' ? null : 'status' })
             }
@@ -289,18 +293,53 @@ function Header({
           <Popover
             open={state.menu === 'status'}
             onClose={() => dispatch({ type: 'setMenu', value: null })}
-            className="top-10 left-0 w-[150px]"
+            className="top-10 left-0 w-[210px]"
           >
             {STATUSES.map((o) => (
               <MenuItem
                 key={o}
                 active={o === cur.status}
-                onClick={() => dispatch({ type: 'setStatus', value: o })}
+                onClick={() => {
+                  dispatch({ type: 'setMenu', value: null })
+                  if (o !== cur.status) void mutate({ status: o })
+                }}
               >
                 <span className={`w-[7px] h-[7px] rounded-full ${STATUS_DOT[o]}`} />
                 {o}
               </MenuItem>
             ))}
+            <form
+              className="mt-1 border-t border-line px-1.5 pt-2 pb-1"
+              onSubmit={(event) => {
+                event.preventDefault()
+                dispatch({ type: 'setMenu', value: null })
+                if (labelDraft !== cur.label) {
+                  void mutate({ label: labelDraft })
+                }
+              }}
+            >
+              <label
+                htmlFor={`conversation-label-${cur.id}`}
+                className="block text-[11.5px] font-bold text-ink-400"
+              >
+                라벨
+              </label>
+              <div className="mt-1 flex gap-1.5">
+                <input
+                  id={`conversation-label-${cur.id}`}
+                  value={labelDraft}
+                  onChange={(event) => setLabelDraft(event.target.value)}
+                  placeholder="라벨 없음"
+                  className="min-w-0 flex-1 rounded-md border border-line-strong px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-brand"
+                />
+                <button
+                  type="submit"
+                  className="rounded-md bg-brand px-2.5 text-[12px] font-semibold text-white"
+                >
+                  저장
+                </button>
+              </div>
+            </form>
           </Popover>
         </div>
 
@@ -315,16 +354,18 @@ function Header({
         {cur.archived ? (
           <button
             type="button"
-            onClick={() => dispatch({ type: 'unarchive' })}
-            className="h-[34px] px-3.5 border border-line-strong rounded-[9px] bg-white text-ink-700 flex items-center text-[13.5px] font-semibold hover:border-brand hover:text-brand flex-none whitespace-nowrap"
+            disabled={pending}
+            onClick={() => void mutate({ archived: false })}
+            className="h-[34px] px-3.5 border border-line-strong rounded-[9px] bg-white text-ink-700 flex items-center text-[13.5px] font-semibold hover:border-brand hover:text-brand flex-none whitespace-nowrap disabled:cursor-wait disabled:opacity-60"
           >
             보관 해제
           </button>
         ) : (
           <button
             type="button"
-            onClick={() => dispatch({ type: 'archive' })}
-            className="h-[34px] px-3.5 rounded-[9px] bg-brand text-white flex items-center text-[13.5px] font-semibold shadow-[0_1px_2px_rgba(16,24,40,.1)] hover:bg-brand-hover flex-none whitespace-nowrap"
+            disabled={pending}
+            onClick={() => void mutate({ archived: true })}
+            className="h-[34px] px-3.5 rounded-[9px] bg-brand text-white flex items-center text-[13.5px] font-semibold shadow-[0_1px_2px_rgba(16,24,40,.1)] hover:bg-brand-hover flex-none whitespace-nowrap disabled:cursor-wait disabled:opacity-60"
           >
             보관
           </button>
@@ -345,6 +386,14 @@ function Header({
           </span>
         </button>
       </div>
+      {error && (
+        <div
+          role="alert"
+          className="absolute right-5 top-[58px] z-40 max-w-[420px] whitespace-normal rounded-lg border border-open-bg bg-white px-3 py-2 text-xs text-open-fg shadow-[0_8px_24px_rgba(16,24,40,.14)]"
+        >
+          {error}
+        </div>
+      )}
     </div>
   )
 }
@@ -578,6 +627,7 @@ export function ChatPane({ breakpoint }: { breakpoint: Breakpoint }) {
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-white">
       <Header
+        key={conversation.id}
         breakpoint={breakpoint}
         cur={conversation}
         members={state.team}
