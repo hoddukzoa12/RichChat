@@ -1,6 +1,7 @@
+import { OUTBOUND_IMAGE_LIMITS } from '../../shared/attachments'
+
 export const COMPOSE_IMAGE_LIMITS = Object.freeze({
-  count: 3,
-  byteSize: 300 * 1024,
+  ...OUTBOUND_IMAGE_LIMITS,
   width: 1500,
   height: 1440,
 })

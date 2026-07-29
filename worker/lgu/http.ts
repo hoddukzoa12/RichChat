@@ -13,6 +13,14 @@ export interface LguHttpEnv extends LguTokenEnv {
   LGU_CONTENT_HOST: string
 }
 
+export type LguRequest = <T>(
+  env: LguHttpEnv,
+  officeId: string,
+  service: LguApiService,
+  path: string,
+  init: RequestInit,
+) => Promise<T>
+
 const HOST_BINDING: Record<
   LguApiService,
   'LGU_SEND_HOST' | 'LGU_CONTENT_HOST'

@@ -1,12 +1,12 @@
 import {
   LguApiError,
   requestLgu,
-  type LguHttpEnv,
+  type LguRequest,
 } from './http'
 import { LGU_SUCCESS_CODE } from './protocol'
 import { LguConfigurationError } from './token'
 
-export type OutboundTextChannel = 'SMS' | 'LMS'
+export type OutboundChannel = 'SMS' | 'LMS' | 'MMS'
 
 export interface AcceptedSendResult {
   kind: 'accepted'
@@ -29,13 +29,7 @@ export type ConfirmedSendResult =
   | RejectedSendResult
 export type LguSendResult = ConfirmedSendResult | UncertainSendResult
 
-export type LguRequest = <T>(
-  env: LguHttpEnv,
-  officeId: string,
-  service: 'send',
-  path: string,
-  init: RequestInit,
-) => Promise<T>
+export type { LguRequest } from './http'
 
 interface LguRecipientResult {
   cliKey?: unknown
@@ -51,16 +45,20 @@ interface LguSendResponse {
 interface SendTextInput {
   body: string
   callback: string
-  channel: OutboundTextChannel
+  channel: OutboundChannel
+  fileIds?: string[]
   officeId: string
   phone: string
   providerKey: string
   timeoutMs?: number
 }
 
-const LGU_SEND_PATH: Record<OutboundTextChannel, string> = {
+const LGU_SEND_PATH: Record<OutboundChannel, string> = {
   SMS: '/msg/v1/sms',
   LMS: '/msg/v1/mms',
+  // 발신번호 등록 전이라 MMS 실발송은 미검증이다.
+  // 동작 중인 msg 계열의 LMS 경로를 유지한다.
+  MMS: '/msg/v1/mms',
 }
 export const LGU_SEND_TIMEOUT_MS = 3_000
 const ERROR_TEXT_MAX_LENGTH = 500
@@ -81,6 +79,11 @@ function requestBody(
     apiKey: env.LGU_API_KEY,
     callback: input.callback,
     msg: input.body,
+    ...(input.fileIds && input.fileIds.length > 0
+      ? { fileIdLst: input.fileIds }
+      : {}),
+    // 컴포저에 제목 입력이 없으므로 title은 보내지 않는다.
+    // 본문에서 파생하면 UI에 없는 두 번째 콘텐츠가 생긴다.
     recvInfoLst: [
       {
         cliKey: input.providerKey,

@@ -185,7 +185,7 @@ function acceptedLguRequest(): LguRequest {
   return async <T>(
     _env: Parameters<LguRequest>[0],
     _officeId: string,
-    _service: 'send',
+    _service: Parameters<LguRequest>[2],
     _path: string,
     init: RequestInit,
   ): Promise<T> => {

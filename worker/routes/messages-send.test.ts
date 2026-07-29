@@ -8,6 +8,7 @@ import {
   it,
 } from 'vitest'
 import type { Status } from '../../shared/domain'
+import type { MessageAttachment } from '../../shared/wire/message'
 import type { SendMessageResponse } from '../../shared/wire/message-send'
 import {
   createSession,
@@ -21,6 +22,7 @@ declare module 'cloudflare:test' {
 
 const ORIGIN = 'https://example.com'
 const LGU_SEND_ORIGIN = `https://${env.LGU_SEND_HOST}`
+const LGU_CONTENT_ORIGIN = `https://${env.LGU_CONTENT_HOST}`
 const DEFAULT_CALLBACK = '0255550000'
 
 interface Fixture {
@@ -52,6 +54,7 @@ interface StoredMessage {
 interface LguRequestBody {
   apiKey?: string
   callback: string
+  fileIdLst?: string[]
   msg: string
   recvInfoLst: Array<{
     cliKey: string
@@ -63,7 +66,7 @@ interface LguRequestBody {
 
 interface MockLguOptions {
   accessToken?: string
-  channel?: 'SMS' | 'LMS'
+  channel?: 'SMS' | 'LMS' | 'MMS'
   clientKey: string
   data?: string | Record<string, unknown>
   delay?: number
@@ -74,6 +77,7 @@ interface MockLguOptions {
 
 let seedSequence = 0
 const lguRequests: LguRequestBody[] = []
+const lguUploadRequests: string[] = []
 
 beforeAll(() => {
   fetchMock.activate()
@@ -83,6 +87,7 @@ beforeAll(() => {
 afterEach(() => {
   fetchMock.assertNoPendingInterceptors()
   lguRequests.length = 0
+  lguUploadRequests.length = 0
 })
 
 afterAll(() => {
@@ -241,6 +246,34 @@ function postMessage(
   })
 }
 
+async function uploadAttachment(
+  fixture: Fixture,
+  file = new File(
+    [Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])],
+    '답변.jpg',
+    { type: 'image/jpeg' },
+  ),
+): Promise<MessageAttachment> {
+  const form = new FormData()
+  form.append('files', file)
+  const response = await SELF.fetch(
+    `${ORIGIN}/api/conversations/${fixture.conversationId}/attachments`,
+    {
+      method: 'POST',
+      headers: {
+        cookie: cookie(fixture.token),
+        origin: ORIGIN,
+      },
+      body: form,
+    },
+  )
+  const body = await response.json<{ attachments: MessageAttachment[] }>()
+  expect(response.status).toBe(201)
+  const attachment = body.attachments[0]
+  if (!attachment) throw new Error('업로드한 첨부를 반환받지 못했습니다.')
+  return attachment
+}
+
 function acceptedResponse(
   providerKey: string,
   msgKey: string,
@@ -299,6 +332,48 @@ function mockLgu(options: MockLguOptions): void {
 
   if (options.delay !== undefined) scope.delay(options.delay)
   if (options.persistent) scope.persist()
+}
+
+function mockLguUpload(
+  fileId: string,
+  response: {
+    code?: string
+    message?: string
+    status?: number
+  } = {},
+): void {
+  fetchMock
+    .get(LGU_CONTENT_ORIGIN)
+    .intercept({
+      method: 'POST',
+      path: '/file/v1/mms',
+      headers: {
+        authorization: /^Bearer access-token-message-send-\d+$/,
+        'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
+        'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+      },
+    })
+    .reply(
+      response.status ?? 200,
+      () => {
+        lguUploadRequests.push(fileId)
+        return JSON.stringify({
+          code: response.code ?? '10000',
+          message: response.message ?? '성공',
+          data:
+            response.code === undefined || response.code === '10000'
+              ? {
+                  ch: 'mms',
+                  imgUrl: null,
+                  imgUrlLst: null,
+                  fileId,
+                  fileExpDt: '2027-07-29T00:00:00',
+                }
+              : null,
+        })
+      },
+      { headers: { 'content-type': 'application/json' } },
+    )
 }
 
 function mockNetworkFailure(): void {
@@ -447,6 +522,93 @@ describe('Message send route', () => {
     expect(responses.every((response) => response.ok)).toBe(true)
     expect(lguRequests).toHaveLength(1)
     expect(await storedMessages(fixture)).toHaveLength(1)
+  })
+
+  it('uploads and sends one photo-only MMS once for a duplicate client key', async () => {
+    const fixture = await seedFixture()
+    const attachment = await uploadAttachment(fixture)
+    const clientKey = 'mms-idempotency'
+    mockLguUpload(attachment.id)
+    mockLgu({
+      accessToken: fixture.accessToken,
+      channel: 'MMS',
+      clientKey,
+      persistent: true,
+    })
+    const request = {
+      clientKey,
+      body: '',
+      attachments: [{ id: attachment.id }],
+    }
+
+    const [first, second] = await Promise.all([
+      postMessage(fixture.conversationId, request, fixture.token),
+      postMessage(fixture.conversationId, request, fixture.token),
+    ])
+    const firstBody = await first.json<SendMessageResponse>()
+    const secondBody = await second.json<SendMessageResponse>()
+
+    expect([first.status, second.status].sort()).toEqual([200, 201])
+    expect(lguUploadRequests).toEqual([attachment.id])
+    expect(lguRequests).toHaveLength(1)
+    expect(lguRequests[0]).toMatchObject({
+      msg: '',
+      fileIdLst: [attachment.id],
+    })
+    expect(lguRequests[0]).not.toHaveProperty('title')
+    await expect(storedMessages(fixture)).resolves.toEqual([
+      expect.objectContaining({
+        channel: 'MMS',
+        delivery_status: '접수',
+      }),
+    ])
+    expect(firstBody.message.attachments).toEqual([attachment])
+    expect(secondBody.message.attachments).toEqual([attachment])
+    const object = await env.ATTACHMENTS.head(
+      `attachments/${attachment.id}`,
+    )
+    expect(object?.size).toBe(attachment.byteSize)
+
+    const pageResponse = await SELF.fetch(
+      `${ORIGIN}${messagePath(fixture.conversationId)}`,
+      { headers: { cookie: cookie(fixture.token) } },
+    )
+    const page = await pageResponse.json<{
+      messages: Array<{ attachments: MessageAttachment[] }>
+    }>()
+    expect(page.messages[0]?.attachments).toEqual([attachment])
+  })
+
+  it('does not call the send API when an attachment upload fails', async () => {
+    const fixture = await seedFixture()
+    const attachment = await uploadAttachment(fixture)
+    mockLguUpload(attachment.id, {
+      code: '21006',
+      message: '첨부파일 확장자 오류',
+      status: 400,
+    })
+
+    const response = await postMessage(
+      fixture.conversationId,
+      {
+        clientKey: 'mms-upload-failure',
+        body: '사진을 확인해 주세요',
+        attachments: [{ id: attachment.id }],
+      },
+      fixture.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(lguUploadRequests).toEqual([attachment.id])
+    expect(lguRequests).toEqual([])
+    await expect(storedMessages(fixture)).resolves.toEqual([
+      expect.objectContaining({
+        channel: 'MMS',
+        delivery_status: '실패',
+        result_code: '21006',
+        error_text: expect.stringContaining('첨부 업로드'),
+      }),
+    ])
   })
 
   it('selects SMS at 90 EUC-KR bytes and LMS at 92 bytes', async () => {
@@ -690,7 +852,7 @@ describe('Message send route', () => {
     })
   })
 
-  it('rejects attachments and emoji with dedicated codes', async () => {
+  it('rejects an unknown attachment and emoji before inserting', async () => {
     const fixture = await seedFixture()
 
     const attachment = await postMessage(
@@ -710,7 +872,7 @@ describe('Message send route', () => {
 
     expect(attachment.status).toBe(400)
     await expect(attachment.json()).resolves.toMatchObject({
-      error: { code: 'MSG_ATTACHMENTS_UNSUPPORTED' },
+      error: { code: 'BAD_REQUEST' },
     })
     expect(emoji.status).toBe(400)
     await expect(emoji.json()).resolves.toMatchObject({

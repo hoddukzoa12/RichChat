@@ -12,6 +12,7 @@ import { routes as healthRoutes } from './routes/health'
 import { routes as hooksMoRoutes } from './routes/hooks-mo'
 import { routes as hooksReportRoutes } from './routes/hooks-report'
 import { routes as meRoutes } from './routes/me'
+import { routes as messageAttachmentUploadRoutes } from './routes/message-attachments-upload'
 import { routes as messagesSendRoutes } from './routes/messages-send'
 import { routes as notesRoutes } from './routes/notes'
 import { routes as officeRoutes } from './routes/office'
@@ -36,6 +37,7 @@ const routes: Route[] = [
   ...notesRoutes,
   ...tasksRoutes,
   ...officeRoutes,
+  ...messageAttachmentUploadRoutes,
   ...messagesSendRoutes,
   ...hooksMoRoutes,
   ...hooksReportRoutes,

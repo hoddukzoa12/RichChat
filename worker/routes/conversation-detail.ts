@@ -1,7 +1,6 @@
 import type { Note } from '../../shared/wire/note'
 import type { Task } from '../../shared/wire/task'
 import type {
-  AttachmentDownloadStatus,
   DeliveryStatus,
   Direction,
   SendChannel,
@@ -20,6 +19,7 @@ import {
   type MessagePageResponse,
   type MessageSender,
 } from '../../shared/wire/message'
+import { loadMessageAttachments } from '../attachments'
 import { error } from '../http/error'
 import type { Route, RouteParams } from '../http/router'
 import { requireSession } from '../http/session'
@@ -90,16 +90,6 @@ interface MessageRow {
   result_code: string | null
   delivered_at: number | null
   error_text: string | null
-}
-
-interface AttachmentRow {
-  id: string
-  message_id: string
-  original_filename: string | null
-  byte_size: number | null
-  mime_type: string | null
-  download_status: AttachmentDownloadStatus
-  created_at: number
 }
 
 interface MessageCursor {
@@ -402,48 +392,6 @@ function messageStatement(
     )
 }
 
-async function loadAttachments(
-  db: D1Database,
-  officeId: string,
-  messageIds: string[],
-): Promise<Map<string, MessageAttachment[]>> {
-  const byMessage = new Map<string, MessageAttachment[]>()
-  for (const messageId of messageIds) byMessage.set(messageId, [])
-  if (messageIds.length === 0) return byMessage
-
-  const placeholders = messageIds.map(() => '?').join(', ')
-  const { results } = await db
-    .prepare(
-      `SELECT
-        id,
-        message_id,
-        original_filename,
-        byte_size,
-        mime_type,
-        download_status,
-        created_at
-      FROM message_attachments
-      WHERE office_id = ?
-        AND message_id IN (${placeholders})
-      ORDER BY message_id, created_at, id`,
-    )
-    .bind(officeId, ...messageIds)
-    .all<AttachmentRow>()
-
-  for (const row of results) {
-    byMessage.get(row.message_id)?.push({
-      id: row.id,
-      originalFilename: row.original_filename,
-      byteSize: row.byte_size,
-      mimeType: row.mime_type,
-      downloadStatus: row.download_status,
-      createdAt: row.created_at,
-    })
-  }
-
-  return byMessage
-}
-
 function toMessage(
   row: MessageRow,
   attachments: Map<string, MessageAttachment[]>,
@@ -500,7 +448,7 @@ async function getMessages(
   const hasMore = descendingRows.length > page.limit
   const pageRows = descendingRows.slice(0, page.limit)
   const oldest = pageRows.at(-1)
-  const attachments = await loadAttachments(
+  const attachments = await loadMessageAttachments(
     env.DB,
     session.officeId,
     pageRows.map((row) => row.id),

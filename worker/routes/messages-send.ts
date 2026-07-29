@@ -1,13 +1,18 @@
 import type { SendChannel } from '../../shared/domain'
+import { OUTBOUND_IMAGE_LIMITS } from '../../shared/attachments'
 import {
   containsEmoji,
   pickMessageType,
 } from '../../shared/sms'
-import type { ConversationMessage } from '../../shared/wire/message'
 import type {
-  SendMessageRequest,
+  ConversationMessage,
+  MessageAttachment,
+} from '../../shared/wire/message'
+import type {
+  SendMessageAttachment,
   SendMessageResponse,
 } from '../../shared/wire/message-send'
+import { loadMessageAttachments } from '../attachments'
 import { changes } from '../db/d1'
 import {
   publish,
@@ -20,20 +25,24 @@ import {
   requireSession,
   type SessionContext,
 } from '../http/session'
+import { LguApiError } from '../lgu/http'
 import {
   LGU_SEND_TIMEOUT_MS,
   sendTextMessage,
   type ConfirmedSendResult,
   type LguRequest,
-  type OutboundTextChannel,
+  type OutboundChannel,
 } from '../lgu/send'
+import { uploadMmsFile } from '../lgu/upload'
 import { createId, type Clock } from '../lib/ids'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
-type OutboundChannel = OutboundTextChannel
 type JsonObject = Record<string, unknown>
-type ParsedSendMessage = SendMessageRequest & {
+interface ParsedSendMessage {
+  attachments: SendMessageAttachment[]
+  body: string
   channel: OutboundChannel
+  clientKey: string
 }
 
 interface SendContext {
@@ -65,6 +74,19 @@ interface MessageSendDependencies {
 interface MessageCreationPlan {
   publication: EventPublication
   statements: D1PreparedStatement[]
+}
+
+interface StagedAttachment {
+  id: string
+  original_filename: string
+  byte_size: number
+  mime_type: string
+  r2_key: string
+  created_at: number
+}
+
+interface PreparedAttachment extends StagedAttachment {
+  bytes: ArrayBuffer
 }
 
 const MESSAGE_PATH = '/api/conversations/:id/messages'
@@ -99,17 +121,34 @@ async function readRequest(
     return error('BAD_REQUEST', 'JSON 객체가 필요합니다.')
   }
 
-  const attachments = value.attachments
+  const rawAttachments = value.attachments
   if (
-    attachments !== undefined &&
-    (!Array.isArray(attachments) || attachments.length > 0)
+    rawAttachments !== undefined &&
+    !Array.isArray(rawAttachments)
   ) {
-    return Array.isArray(attachments)
-      ? error(
-          'MSG_ATTACHMENTS_UNSUPPORTED',
-          '첨부 발송은 아직 지원하지 않습니다.',
-        )
-      : error('BAD_REQUEST', '첨부 입력값을 확인해 주세요.')
+    return error('BAD_REQUEST', '첨부 입력값을 확인해 주세요.')
+  }
+  const attachmentValues = rawAttachments ?? []
+  if (attachmentValues.length > OUTBOUND_IMAGE_LIMITS.count) {
+    return error(
+      'BAD_REQUEST',
+      `첨부 이미지는 최대 ${OUTBOUND_IMAGE_LIMITS.count}장까지 보낼 수 있습니다.`,
+    )
+  }
+
+  const attachments: SendMessageAttachment[] = []
+  const attachmentIds = new Set<string>()
+  for (const attachment of attachmentValues) {
+    if (
+      !isJsonObject(attachment) ||
+      typeof attachment.id !== 'string' ||
+      attachment.id.trim() === '' ||
+      attachmentIds.has(attachment.id)
+    ) {
+      return error('BAD_REQUEST', '첨부 입력값을 확인해 주세요.')
+    }
+    attachmentIds.add(attachment.id)
+    attachments.push({ id: attachment.id })
   }
 
   if (
@@ -119,7 +158,7 @@ async function readRequest(
     value.clientKey.length > 128 ||
     !hasOwn(value, 'body') ||
     typeof value.body !== 'string' ||
-    value.body.trim() === ''
+    (value.body.trim() === '' && attachments.length === 0)
   ) {
     return error('BAD_REQUEST', '메시지 입력값을 확인해 주세요.')
   }
@@ -131,8 +170,8 @@ async function readRequest(
     )
   }
 
-  const channel = pickMessageType(value.body)
-  if (channel === 'TOO_LONG') {
+  const textChannel = pickMessageType(value.body)
+  if (textChannel === 'TOO_LONG') {
     return error(
       'MSG_TOO_LONG',
       '문자 메시지는 EUC-KR 기준 2,000바이트를 넘을 수 없습니다.',
@@ -142,14 +181,71 @@ async function readRequest(
   return {
     clientKey: value.clientKey,
     body: value.body,
-    channel,
-    ...(attachments === undefined ? {} : { attachments }),
+    channel: attachments.length > 0 ? 'MMS' : textChannel,
+    attachments,
   }
 }
 
 function koreanPhone(value: string): string | null {
   const match = /^\+82(\d{8,10})$/.exec(value)
   return match ? `0${match[1]}` : null
+}
+
+async function prepareAttachments(
+  env: Env,
+  conversationId: string,
+  references: SendMessageAttachment[],
+): Promise<PreparedAttachment[] | Response> {
+  if (references.length === 0) return []
+
+  const placeholders = references.map(() => '?').join(', ')
+  const { results } = await env.DB
+    .prepare(
+      `SELECT
+         id,
+         original_filename,
+         byte_size,
+         mime_type,
+         r2_key,
+         created_at
+       FROM outbound_attachment_uploads
+       WHERE conversation_id = ?
+         AND id IN (${placeholders})`,
+    )
+    .bind(conversationId, ...references.map(({ id }) => id))
+    .all<StagedAttachment>()
+  const byId = new Map(results.map((row) => [row.id, row]))
+
+  if (byId.size !== references.length) {
+    return error(
+      'BAD_REQUEST',
+      '보낼 수 있는 첨부 이미지를 찾지 못했습니다.',
+    )
+  }
+
+  const prepared: PreparedAttachment[] = []
+  for (const { id } of references) {
+    const row = byId.get(id)
+    if (!row) {
+      return error(
+        'BAD_REQUEST',
+        '보낼 수 있는 첨부 이미지를 찾지 못했습니다.',
+      )
+    }
+    const object = await env.ATTACHMENTS.get(row.r2_key)
+    if (object === null || object.size !== row.byte_size) {
+      return error(
+        'CONFLICT',
+        '저장된 첨부 이미지를 확인할 수 없습니다.',
+      )
+    }
+    prepared.push({
+      ...row,
+      bytes: await object.arrayBuffer(),
+    })
+  }
+
+  return prepared
 }
 
 async function loadExistingMessage(
@@ -183,10 +279,19 @@ async function loadExistingMessage(
     .bind(clientKey, session.officeId, conversationId)
     .first<MessageRow>()
 
-  return row ? messageFromRow(row) : null
+  if (!row) return null
+  const attachments = await loadMessageAttachments(
+    db,
+    session.officeId,
+    [row.id],
+  )
+  return messageFromRow(row, attachments.get(row.id) ?? [])
 }
 
-function messageFromRow(row: MessageRow): ConversationMessage {
+function messageFromRow(
+  row: MessageRow,
+  attachments: MessageAttachment[],
+): ConversationMessage {
   return {
     id: row.id,
     direction: 'out',
@@ -203,7 +308,7 @@ function messageFromRow(row: MessageRow): ConversationMessage {
     resultCode: row.result_code,
     deliveredAt: row.delivered_at,
     errorText: row.error_text,
-    attachments: [],
+    attachments,
   }
 }
 
@@ -237,6 +342,7 @@ async function loadSendContext(
 function createStatements(
   db: D1Database,
   values: {
+    attachments: PreparedAttachment[]
     body: string
     channel: OutboundChannel
     clientKey: string
@@ -247,6 +353,7 @@ function createStatements(
   },
 ): MessageCreationPlan {
   const {
+    attachments,
     body,
     channel,
     clientKey,
@@ -281,6 +388,49 @@ function createStatements(
     },
     createdGuard,
   )
+  const attachmentStatements = attachments.flatMap(
+    (attachment, contentIndex) => [
+      db
+        .prepare(
+          `INSERT INTO message_attachments (
+             id, office_id, message_id, original_filename, byte_size,
+             mime_type, r2_key, download_status, created_at, content_index
+           )
+           SELECT ?, ?, ?, ?, ?, ?, ?, '완료', ?, ?
+           WHERE EXISTS (
+             SELECT 1
+             FROM messages
+             WHERE id = ?
+               AND client_key = ?
+           )`,
+        )
+        .bind(
+          attachment.id,
+          session.officeId,
+          messageId,
+          attachment.original_filename,
+          attachment.byte_size,
+          attachment.mime_type,
+          attachment.r2_key,
+          attachment.created_at,
+          contentIndex,
+          messageId,
+          clientKey,
+        ),
+      db
+        .prepare(
+          `DELETE FROM outbound_attachment_uploads
+           WHERE id = ?
+             AND EXISTS (
+               SELECT 1
+               FROM messages
+               WHERE id = ?
+                 AND client_key = ?
+             )`,
+        )
+        .bind(attachment.id, messageId, clientKey),
+    ],
+  )
 
   return {
     publication,
@@ -311,6 +461,7 @@ function createStatements(
           conversationId,
           session.officeId,
         ),
+      ...attachmentStatements,
       db
         .prepare(
           `UPDATE conversations
@@ -455,6 +606,40 @@ async function recordDeliveryResult(
   )
 }
 
+async function uploadAttachmentsToLgu(
+  env: Env,
+  officeId: string,
+  attachments: PreparedAttachment[],
+  lguRequest?: LguRequest,
+): Promise<void> {
+  for (const attachment of attachments) {
+    await uploadMmsFile(
+      env,
+      {
+        bytes: attachment.bytes,
+        fileId: attachment.id,
+        filename: attachment.original_filename,
+        mimeType: attachment.mime_type,
+        officeId,
+      },
+      lguRequest,
+    )
+  }
+}
+
+function attachmentUploadFailure(cause: unknown): ConfirmedSendResult {
+  const code =
+    cause instanceof LguApiError
+      ? cause.code
+      : 'ATTACHMENT_UPLOAD_FAILED'
+
+  return {
+    kind: 'rejected',
+    code,
+    errorText: `LGU+ 첨부 업로드에 실패했습니다. (${code})`,
+  }
+}
+
 function messageResponse(
   clientKey: string,
   message: ConversationMessage,
@@ -506,12 +691,29 @@ export function createMessageSendRoutes(
     if (!phone) {
       return error('INTERNAL_ERROR', '수신번호를 확인할 수 없습니다.')
     }
+    const attachments = await prepareAttachments(
+      env,
+      params.id,
+      input.attachments,
+    )
+    if (attachments instanceof Response) {
+      const duplicate = await loadExistingMessage(
+        env.DB,
+        session,
+        params.id,
+        input.clientKey,
+      )
+      return duplicate
+        ? messageResponse(input.clientKey, duplicate)
+        : attachments
+    }
 
     const messageId = idFactory()
     const now = clock()
     let creationResults: D1Result[]
     try {
       const plan = createStatements(env.DB, {
+        attachments,
         body: input.body,
         channel: input.channel,
         clientKey: input.clientKey,
@@ -543,12 +745,49 @@ export function createMessageSendRoutes(
         : error('CONFLICT', '메시지 요청을 처리할 수 없습니다.')
     }
 
+    if (attachments.length > 0) {
+      try {
+        await uploadAttachmentsToLgu(
+          env,
+          session.officeId,
+          attachments,
+          lguRequest,
+        )
+      } catch (cause) {
+        try {
+          await recordDeliveryResult(env, ctx, {
+            conversationId: params.id,
+            messageId,
+            now: clock(),
+            result: attachmentUploadFailure(cause),
+            session,
+          })
+        } catch {
+          return error(
+            'INTERNAL_ERROR',
+            '첨부 업로드 실패 결과를 저장하지 못했습니다.',
+          )
+        }
+
+        const failedMessage = await loadExistingMessage(
+          env.DB,
+          session,
+          params.id,
+          input.clientKey,
+        )
+        return failedMessage
+          ? messageResponse(input.clientKey, failedMessage, 201)
+          : error('INTERNAL_ERROR', '메시지를 불러오지 못했습니다.')
+      }
+    }
+
     const sendResult = await sendTextMessage(
       env,
       {
         body: input.body,
         callback: context.callback,
         channel: input.channel,
+        fileIds: attachments.map(({ id }) => id),
         officeId: session.officeId,
         phone,
         providerKey: messageId,

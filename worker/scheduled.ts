@@ -1,6 +1,7 @@
 import { changes } from './db/d1'
 import { applyDeliveryReports } from './db/delivery'
 import { publish } from './db/events'
+import { attachmentObjectKey } from './attachments'
 import type { LguFetch } from './lgu/protocol'
 import {
   queryLguDeliveryReports,
@@ -106,10 +107,6 @@ export const PENDING_DELIVERY_REPORT_QUERY =
      AND client_key IS NOT NULL
    ORDER BY delivery_status, created_at, id
    LIMIT ?`
-
-function attachmentObjectKey(attachmentId: string): string {
-  return `attachments/${attachmentId}`
-}
 
 async function claimNextAttachment(
   db: D1Database,
