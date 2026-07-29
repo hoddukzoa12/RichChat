@@ -1,5 +1,4 @@
 import {
-  ROLES,
   USER_STATUSES,
   type Role,
   type UserStatus,
@@ -64,7 +63,7 @@ const EMAIL_MAX_LENGTH = 254
 const EMAIL_LOCAL_MAX_LENGTH = 64
 const EMAIL_PATTERN =
   /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
-const [ADMIN_ROLE, TAX_ACCOUNTANT_ROLE, COUNSELOR_ROLE] = ROLES
+const ADMIN_ROLE = '관리자' satisfies Role
 const [INVITED_STATUS, ACTIVE_STATUS] = USER_STATUSES
 const ADMIN_EXISTS_SQL = `SELECT 1
                           FROM users AS administrator
@@ -230,9 +229,10 @@ const MEMBER_MAPPERS: Record<
   Role,
   (row: OfficeMemberRow) => OfficeMember | OfficeMemberWithStatus
 > = {
-  [ADMIN_ROLE]: memberWithStatusFromRow,
-  [TAX_ACCOUNTANT_ROLE]: memberFromRow,
-  [COUNSELOR_ROLE]: memberFromRow,
+  관리자: memberWithStatusFromRow,
+  부관리자: memberFromRow,
+  세무사: memberFromRow,
+  '상담 담당': memberFromRow,
 }
 
 function adminAuthorizationProbe(

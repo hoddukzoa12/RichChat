@@ -51,6 +51,7 @@ const OFFICE_TOGGLES: Array<{
 ]
 
 const ROLE_DESCRIPTION: Record<InviteRole, string> = {
+  부관리자: '관리자 기능을 함께 쓰되 관리자 지정은 할 수 없습니다',
   '상담 담당': '대화 응대와 고객 정보 편집',
   세무사: '담당 고객 대화 확인과 응대',
 }

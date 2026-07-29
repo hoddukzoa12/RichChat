@@ -10,7 +10,7 @@ export const DELIVERY_STATUSES = [
   '실패',
 ] as const
 export const SEND_CHANNELS = ['SMS', 'LMS', 'MMS'] as const
-export const ROLES = ['관리자', '세무사', '상담 담당'] as const
+export const ROLES = ['관리자', '부관리자', '세무사', '상담 담당'] as const
 export const USER_STATUSES = ['초대', '활성', '비활성'] as const
 export const ATTACHMENT_DOWNLOAD_STATUSES = ['대기', '완료', '실패'] as const
 export const EVENT_ACTOR_KINDS = ['user', 'customer', 'system'] as const
