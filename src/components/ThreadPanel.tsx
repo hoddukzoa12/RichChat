@@ -1,6 +1,8 @@
 import {
+  useCallback,
   useLayoutEffect,
   useRef,
+  useState,
   type KeyboardEvent,
 } from 'react'
 import { attachmentUrl } from '../api/endpoints/attachments'
@@ -14,6 +16,7 @@ import {
 import { DELIVERY_STATUS_BADGE } from '../theme'
 import { initialOf } from '../../shared/text'
 import type { MessageAttachment } from '../../shared/wire/message'
+import { ImageViewer } from './ImageViewer'
 
 const INLINE_IMAGE_MIME_TYPES = new Set([
   'image/gif',
@@ -69,8 +72,10 @@ function attachmentName(attachment: MessageAttachment): string {
 
 export function MessageAttachmentView({
   attachment,
+  onOpen,
 }: {
   attachment: MessageAttachment
+  onOpen: () => void
 }) {
   if (attachment.downloadStatus === '대기') {
     return (
@@ -92,11 +97,19 @@ export function MessageAttachmentView({
   return (
     <div className="mt-2 min-w-[190px] overflow-hidden rounded-lg bg-white/90 text-ink">
       {isInlineImage(attachment) && (
-        <img
-          src={attachmentUrl(attachment.id, 'inline')}
-          alt={name}
-          className="max-h-64 w-full object-contain bg-fill"
-        />
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={`${name} 크게 보기`}
+          aria-haspopup="dialog"
+          className="block w-full cursor-zoom-in bg-fill"
+        >
+          <img
+            src={attachmentUrl(attachment.id, 'inline')}
+            alt={name}
+            className="pointer-events-none max-h-64 w-full object-contain"
+          />
+        </button>
       )}
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="min-w-0 flex-1 truncate text-xs">{name}</span>
@@ -128,6 +141,16 @@ export function MessageBubble({
   onRetry: (clientKey: string) => void
 }) {
   const inbound = message.direction === 'in'
+  const imageAttachments = message.attachments.filter(isInlineImage)
+  const [viewerAttachmentId, setViewerAttachmentId] = useState<
+    string | null
+  >(null)
+  const viewerIndex = imageAttachments.findIndex(
+    (attachment) => attachment.id === viewerAttachmentId,
+  )
+  const closeViewer = useCallback(() => {
+    setViewerAttachmentId(null)
+  }, [])
   const senderInitial = inbound
     ? customerInitial
     : initialOf(message.sender?.name ?? '') || '?'
@@ -179,6 +202,7 @@ export function MessageBubble({
             <MessageAttachmentView
               key={attachment.id}
               attachment={attachment}
+              onOpen={() => setViewerAttachmentId(attachment.id)}
             />
           ))}
         </div>
@@ -225,6 +249,13 @@ export function MessageBubble({
           </div>
         )}
       </div>
+      {viewerIndex >= 0 && (
+        <ImageViewer
+          attachments={imageAttachments}
+          initialIndex={viewerIndex}
+          onClose={closeViewer}
+        />
+      )}
     </div>
   )
 }
