@@ -16,6 +16,7 @@ import { ApiRequestError } from '../api/client'
 import { initialState } from '../state/inbox'
 import { RealtimeCursor } from '../state/realtime'
 import {
+  createPollingSchedule,
   pollingDelay,
   reconnectDelay,
   reloadInboxState,
@@ -24,8 +25,27 @@ import {
 } from './useRealtime'
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
+
+class FakeSocket {
+  readonly #listeners: Record<'open' | 'close', Set<() => void>> = {
+    open: new Set(),
+    close: new Set(),
+  }
+
+  addEventListener(
+    type: 'open' | 'close',
+    listener: () => void,
+  ): void {
+    this.#listeners[type].add(listener)
+  }
+
+  dispatch(type: 'open' | 'close'): void {
+    for (const listener of this.#listeners[type]) listener()
+  }
+}
 
 const conversation: ConversationListItem = {
   id: 'conversation-1',
@@ -120,8 +140,35 @@ describe('Realtime subscription', () => {
   })
 
   it('polls less often while the page is hidden', () => {
-    expect(pollingDelay(false)).toBe(5_000)
-    expect(pollingDelay(true)).toBe(30_000)
+    expect(pollingDelay(false, false)).toBe(5_000)
+    expect(pollingDelay(true, false)).toBe(30_000)
+    expect(pollingDelay(false, true)).toBe(60_000)
+    expect(pollingDelay(true, true)).toBe(300_000)
+  })
+
+  it('reschedules polling immediately across socket transitions', async () => {
+    vi.useFakeTimers()
+    const poll = vi.fn(() => Promise.resolve())
+    const schedule = createPollingSchedule(poll, () => false)
+    const socket = new FakeSocket()
+    schedule.observe(socket)
+    schedule.start()
+
+    await vi.advanceTimersByTimeAsync(4_999)
+    socket.dispatch('open')
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(poll).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(poll).toHaveBeenCalledTimes(1)
+
+    socket.dispatch('close')
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(poll).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(poll).toHaveBeenCalledTimes(2)
+    schedule.stop()
   })
 
   it('reloads server state before adopting a gone cursor', async () => {

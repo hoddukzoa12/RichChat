@@ -19,9 +19,21 @@ import {
 } from '../state/realtime'
 import { conversationListParams } from '../state/selectors'
 
-const POLL_INTERVAL_MS: Record<'hidden' | 'visible', number> = {
-  visible: 5_000,
-  hidden: 30_000,
+type PageVisibility = 'hidden' | 'visible'
+type SocketConnection = 'connected' | 'disconnected'
+
+const POLL_INTERVAL_MS: Record<
+  SocketConnection,
+  Record<PageVisibility, number>
+> = {
+  disconnected: {
+    visible: 5_000,
+    hidden: 30_000,
+  },
+  connected: {
+    visible: 60_000,
+    hidden: 300_000,
+  },
 }
 const RECONNECT_BASE_MS = 1_000
 const RECONNECT_MAX_MS = 30_000
@@ -45,6 +57,20 @@ interface RealtimeCallbacks {
 interface RealtimeLocation {
   href: string
   protocol: string
+}
+
+interface SocketEventSource {
+  addEventListener(
+    type: 'open' | 'close',
+    listener: () => void,
+  ): void
+}
+
+interface PollingSchedule {
+  start: () => void
+  reschedule: () => void
+  observe: (socket: SocketEventSource) => void
+  stop: () => void
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -104,9 +130,53 @@ export function reconnectDelay(attempt: number): number {
   )
 }
 
-export function pollingDelay(hidden: boolean): number {
+export function pollingDelay(
+  hidden: boolean,
+  connected: boolean,
+): number {
   const visibility = hidden ? 'hidden' : 'visible'
-  return POLL_INTERVAL_MS[visibility]
+  const connection = connected ? 'connected' : 'disconnected'
+  return POLL_INTERVAL_MS[connection][visibility]
+}
+
+export function createPollingSchedule(
+  poll: () => Promise<void>,
+  isHidden: () => boolean,
+): PollingSchedule {
+  let timer: number | undefined
+  let connected = false
+  let disposed = false
+
+  const schedule = (): void => {
+    globalThis.clearTimeout(timer)
+    if (disposed) return
+    timer = globalThis.setTimeout(() => {
+      timer = undefined
+      void poll().catch(() => undefined).finally(schedule)
+    }, pollingDelay(isHidden(), connected))
+  }
+
+  return {
+    start: schedule,
+    reschedule: schedule,
+    observe(socket) {
+      socket.addEventListener('open', () => {
+        if (disposed) return
+        connected = true
+        schedule()
+      })
+      socket.addEventListener('close', () => {
+        if (disposed) return
+        connected = false
+        schedule()
+      })
+    },
+    stop() {
+      disposed = true
+      globalThis.clearTimeout(timer)
+      timer = undefined
+    },
+  }
 }
 
 function isGoneDetail(
@@ -160,7 +230,6 @@ function useRealtimeSubscription({
     let disposed = false
     let socket: WebSocket | null = null
     let connecting = false
-    let pollTimer: number | undefined
     let reconnectTimer: number | undefined
     let reconnectAttempt = 0
     let queue: Promise<void> = Promise.resolve()
@@ -233,6 +302,11 @@ function useRealtimeSubscription({
       }
     }
 
+    const pollingSchedule = createPollingSchedule(
+      () => enqueue(catchUp),
+      () => document.hidden,
+    )
+
     const scheduleReconnect = (): void => {
       if (disposed || reconnectTimer !== undefined) return
       const delay = reconnectDelay(reconnectAttempt)
@@ -258,6 +332,7 @@ function useRealtimeSubscription({
         return
       }
       socket = nextSocket
+      pollingSchedule.observe(nextSocket)
 
       nextSocket.addEventListener('open', () => {
         if (disposed || socket !== nextSocket) return
@@ -302,19 +377,8 @@ function useRealtimeSubscription({
       openSocket()
     }
 
-    const schedulePoll = (): void => {
-      window.clearTimeout(pollTimer)
-      if (disposed) return
-      pollTimer = window.setTimeout(() => {
-        pollTimer = undefined
-        void enqueue(catchUp)
-          .catch(() => undefined)
-          .finally(schedulePoll)
-      }, pollingDelay(document.hidden))
-    }
-
     const onVisibilityChange = (): void => {
-      schedulePoll()
+      pollingSchedule.reschedule()
       if (document.hidden) return
       void enqueue(recoverAndConnect).catch(() => undefined)
     }
@@ -330,7 +394,7 @@ function useRealtimeSubscription({
       onVisibilityChange,
     )
     window.addEventListener('online', onOnline)
-    schedulePoll()
+    pollingSchedule.start()
     void enqueue(recoverAndConnect).catch(scheduleReconnect)
 
     return () => {
@@ -340,7 +404,7 @@ function useRealtimeSubscription({
         onVisibilityChange,
       )
       window.removeEventListener('online', onOnline)
-      window.clearTimeout(pollTimer)
+      pollingSchedule.stop()
       window.clearTimeout(reconnectTimer)
       for (const controller of activeRequests) controller.abort()
       activeRequests.clear()
