@@ -1,9 +1,24 @@
-import { env, SELF } from 'cloudflare:test'
-import { describe, expect, it, vi } from 'vitest'
 import {
+  createExecutionContext,
+  env,
+  fetchMock,
+  SELF,
+  waitOnExecutionContext,
+} from 'cloudflare:test'
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
+import {
+  createMoWebhookHandler,
   INVALID_ITEM_KEY_PREFIX,
   parseMoRecvDt,
 } from './hooks-mo'
+import { runAttachmentDownloads } from '../scheduled'
 
 declare module 'cloudflare:test' {
   interface ProvidedEnv extends Env {}
@@ -22,7 +37,7 @@ interface MoInput {
     contentName: string
     contentSize: number | string
     contentExt: string
-    contentUrl: string
+    contentUrl?: string | null
   }>
 }
 
@@ -93,6 +108,15 @@ async function expectRetry(
   })
 }
 
+beforeAll(() => {
+  fetchMock.activate()
+  fetchMock.disableNetConnect()
+})
+
+afterAll(() => {
+  fetchMock.deactivate()
+})
+
 describe('LGU+ MO webhook', () => {
   it('accepts the real LGU+ payload with null attachments and an ISO KST timestamp', async () => {
     await insertOffice('office-mo-real-payload')
@@ -147,7 +171,8 @@ describe('LGU+ MO webhook', () => {
         body: string
       }>()
     const attachment = await env.DB.prepare(
-      `SELECT original_filename, byte_size, download_status, content_index
+      `SELECT original_filename, byte_size, download_status, content_index,
+              content_url
        FROM message_attachments
        WHERE message_id = ?`,
     )
@@ -157,6 +182,7 @@ describe('LGU+ MO webhook', () => {
         byte_size: number
         download_status: string
         content_index: number
+        content_url: string
       }>()
 
     expect(message).toMatchObject({
@@ -169,6 +195,8 @@ describe('LGU+ MO webhook', () => {
       byte_size: 94254,
       download_status: '대기',
       content_index: 0,
+      content_url:
+        'https://df25hb5tuwkue.cloudfront.net/mmsmo/null/null/2026/07/29/FL9yvTRGkR_0.jpg',
     })
   })
 
@@ -659,7 +687,8 @@ describe('LGU+ MO webhook', () => {
           contentName: '영수증',
           contentSize: '1024',
           contentExt: 'jpg',
-          contentUrl: 'https://example.com/one-time-content',
+          contentUrl:
+            'https://df25hb5tuwkue.cloudfront.net/mmsmo/receipt.jpg',
         },
       ],
     })
@@ -668,7 +697,7 @@ describe('LGU+ MO webhook', () => {
 
     const attachment = await env.DB.prepare(
       `SELECT original_filename, byte_size, mime_type, r2_key, download_status,
-              content_index
+              content_index, content_url
        FROM message_attachments`,
     ).first<{
       original_filename: string
@@ -677,6 +706,7 @@ describe('LGU+ MO webhook', () => {
       r2_key: string | null
       download_status: string
       content_index: number
+      content_url: string
     }>()
 
     expect(attachment).toEqual({
@@ -686,6 +716,8 @@ describe('LGU+ MO webhook', () => {
       r2_key: null,
       download_status: '대기',
       content_index: 0,
+      content_url:
+        'https://df25hb5tuwkue.cloudfront.net/mmsmo/receipt.jpg',
     })
   })
 
@@ -699,13 +731,15 @@ describe('LGU+ MO webhook', () => {
           contentName: '사업자등록증',
           contentSize: 1024,
           contentExt: 'jpg',
-          contentUrl: 'https://example.com/one-time-content/0',
+          contentUrl:
+            'https://df25hb5tuwkue.cloudfront.net/mmsmo/registration.jpg',
         },
         {
           contentName: '통장사본',
           contentSize: 2048,
           contentExt: 'jpg',
-          contentUrl: 'https://example.com/one-time-content/1',
+          contentUrl:
+            'https://df25hb5tuwkue.cloudfront.net/mmsmo/bankbook.jpg',
         },
       ],
     })
@@ -738,6 +772,203 @@ describe('LGU+ MO webhook', () => {
     ])
   })
 
+  it('starts all attachment downloads after commit without delaying the ack', async () => {
+    await insertOffice('office-mo-immediate-attachments')
+    const bodies = ['first', 'second', 'third']
+    const urls = bodies.map(
+      (_, index) =>
+        `https://df25hb5tuwkue.cloudfront.net/mmsmo/immediate-${index}.jpg`,
+    )
+    const item = mo({
+      moKey: 'mo-immediate-attachments',
+      moType: 'MMSMO',
+      contentInfoLst: bodies.map((body, index) => ({
+        contentName: `첨부-${index}.jpg`,
+        contentSize: body.length,
+        contentExt: 'jpg',
+        contentUrl: urls[index],
+      })),
+    })
+    const requested: string[] = []
+    const ctx = createExecutionContext()
+    const handler = createMoWebhookHandler(
+      Date.now,
+      (downloadEnv, downloadCtx) =>
+        runAttachmentDownloads(
+          downloadEnv,
+          {
+            fetch: async (input) => {
+              const url = String(input)
+              requested.push(url)
+              const index = urls.indexOf(url)
+              return new Response(bodies[index], {
+                headers: { 'content-type': 'image/jpeg' },
+              })
+            },
+          },
+          downloadCtx,
+        ),
+    )
+
+    const response = await handler(
+      new Request(hookUrl(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload(item),
+      }),
+      env,
+      { secret: env.LGU_MO_WEBHOOK_SECRET },
+      ctx,
+    )
+
+    await expectSuccess(response)
+    expect(requested.length).toBeLessThanOrEqual(1)
+    await waitOnExecutionContext(ctx)
+    expect(requested).toEqual(urls)
+
+    const attachments = await env.DB.prepare(
+      `SELECT id, content_index, byte_size, r2_key, download_status
+       FROM message_attachments
+       WHERE message_id = (
+         SELECT id FROM messages WHERE mo_key = ?
+       )
+       ORDER BY content_index`,
+    )
+      .bind('mo-immediate-attachments')
+      .all<{
+        id: string
+        content_index: number
+        byte_size: number
+        r2_key: string
+        download_status: string
+      }>()
+    expect(attachments.results.map((row) => row.content_index)).toEqual([
+      0, 1, 2,
+    ])
+    for (const [index, attachment] of attachments.results.entries()) {
+      expect(attachment.download_status).toBe('완료')
+      const object = await env.ATTACHMENTS.get(attachment.r2_key)
+      expect(object?.size).toBe(attachment.byte_size)
+      await expect(object?.text()).resolves.toBe(bodies[index])
+    }
+  })
+
+  it('acks a committed message even when the immediate download fails', async () => {
+    await insertOffice('office-mo-download-failure')
+    let releaseDownload: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseDownload = resolve
+    })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const ctx = createExecutionContext()
+    const handler = createMoWebhookHandler(Date.now, async () => {
+      await gate
+      throw new Error('download failed')
+    })
+
+    const response = await handler(
+      new Request(hookUrl(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload(
+          mo({
+            moKey: 'mo-download-failure',
+            moType: 'MMSMO',
+            contentInfoLst: [
+              {
+                contentName: 'failure.jpg',
+                contentSize: 1,
+                contentExt: 'jpg',
+                contentUrl:
+                  'https://df25hb5tuwkue.cloudfront.net/mmsmo/failure.jpg',
+              },
+            ],
+          }),
+        ),
+      }),
+      env,
+      { secret: env.LGU_MO_WEBHOOK_SECRET },
+      ctx,
+    )
+
+    await expectSuccess(response)
+    const message = await env.DB.prepare(
+      'SELECT id FROM messages WHERE mo_key = ?',
+    )
+      .bind('mo-download-failure')
+      .first<{ id: string }>()
+    expect(message).not.toBeNull()
+
+    releaseDownload?.()
+    await waitOnExecutionContext(ctx)
+    expect(error).toHaveBeenCalledWith(
+      'MO 첨부 즉시 다운로드에 실패했습니다.',
+      expect.any(Object),
+    )
+  })
+
+  it('keeps message and attachment idempotency when an MO is replayed', async () => {
+    await insertOffice('office-mo-attachment-replay')
+    const withoutUrls = mo({
+      moKey: 'mo-attachment-replay',
+      moType: 'MMSMO',
+      contentInfoLst: [0, 1, 2].map((contentIndex) => ({
+        contentName: `replay-${contentIndex}.jpg`,
+        contentSize: 1,
+        contentExt: 'jpg',
+        contentUrl: null,
+      })),
+    })
+    const replayed = mo({
+      moKey: 'mo-attachment-replay',
+      moType: 'MMSMO',
+      contentInfoLst: [0, 1, 2].map((contentIndex) => ({
+        contentName: `replay-${contentIndex}.jpg`,
+        contentSize: 1,
+        contentExt: 'jpg',
+        contentUrl: `https://df25hb5tuwkue.cloudfront.net/mmsmo/replay-${contentIndex}.jpg`,
+      })),
+    })
+
+    await expectSuccess(await post(payload(withoutUrls)))
+    await expectSuccess(await post(payload(replayed)))
+
+    const messageCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM messages WHERE mo_key = ?',
+    )
+      .bind('mo-attachment-replay')
+      .first<{ count: number }>()
+    const attachments = await env.DB.prepare(
+      `SELECT content_index, content_url
+       FROM message_attachments
+       WHERE message_id = (
+         SELECT id FROM messages WHERE mo_key = ?
+       )
+       ORDER BY content_index`,
+    )
+      .bind('mo-attachment-replay')
+      .all<{ content_index: number; content_url: string }>()
+
+    expect(messageCount?.count).toBe(1)
+    expect(attachments.results).toEqual([
+      {
+        content_index: 0,
+        content_url:
+          'https://df25hb5tuwkue.cloudfront.net/mmsmo/replay-0.jpg',
+      },
+      {
+        content_index: 1,
+        content_url:
+          'https://df25hb5tuwkue.cloudfront.net/mmsmo/replay-1.jpg',
+      },
+      {
+        content_index: 2,
+        content_url:
+          'https://df25hb5tuwkue.cloudfront.net/mmsmo/replay-2.jpg',
+      },
+    ])
+  })
+
   it('infers unknown MO channels without losing the original type log', async () => {
     await insertOffice('office-mo-unknown-types')
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -764,7 +995,8 @@ describe('LGU+ MO webhook', () => {
                   contentName: '사진.jpg',
                   contentSize: 1,
                   contentExt: 'jpg',
-                  contentUrl: 'https://example.com/ignored',
+                  contentUrl:
+                    'https://df25hb5tuwkue.cloudfront.net/mmsmo/ignored.jpg',
                 },
               ],
             }),

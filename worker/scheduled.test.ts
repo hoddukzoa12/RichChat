@@ -19,7 +19,12 @@ declare module 'cloudflare:test' {
 }
 
 const NOW = 1_800_000_000_000
-const TOKEN = 'attachment-access-token'
+const DEFAULT_ATTACHMENT_BODY = '사업자등록증'
+const DEFAULT_ATTACHMENT_SIZE = new TextEncoder().encode(
+  DEFAULT_ATTACHMENT_BODY,
+).byteLength
+const CLOUDFRONT_ORIGIN =
+  'https://df25hb5tuwkue.cloudfront.net/mmsmo/2026/07/29'
 
 interface AttachmentRow {
   download_status: string
@@ -29,6 +34,8 @@ interface AttachmentRow {
 
 interface SeedOptions {
   attachmentCount?: number
+  byteSize?: number | null
+  contentUrls?: readonly string[]
   createdAt?: number
 }
 
@@ -40,7 +47,7 @@ function quietLogger() {
 }
 
 function binaryResponse(
-  chunks: readonly string[] = ['사업자', '등록증'],
+  chunks: readonly string[] = [DEFAULT_ATTACHMENT_BODY],
   contentType = 'image/jpeg',
 ): Response {
   return new Response(chunks.join(''), {
@@ -67,6 +74,15 @@ async function seedAttachments(
     { length: attachmentCount },
     (_, index) => `scheduled-attachment-${suffix}-${index}`,
   )
+  const contentUrls =
+    options.contentUrls ??
+    attachmentIds.map(
+      (_, index) => `${CLOUDFRONT_ORIGIN}/attachment-${suffix}-${index}.jpg`,
+    )
+  const byteSize =
+    options.byteSize === undefined
+      ? DEFAULT_ATTACHMENT_SIZE
+      : options.byteSize
   const statements = [
     env.DB.prepare(
       'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
@@ -112,18 +128,20 @@ async function seedAttachments(
         .prepare(
           `INSERT INTO message_attachments (
              id, office_id, message_id, original_filename, byte_size,
-             mime_type, download_status, created_at, content_index
-           ) VALUES (?, ?, ?, ?, ?, ?, '대기', ?, ?)`,
+             mime_type, download_status, created_at, content_index,
+             content_url
+           ) VALUES (?, ?, ?, ?, ?, ?, '대기', ?, ?, ?)`,
         )
         .bind(
           attachmentId,
           officeId,
           messageId,
           `증빙-${contentIndex}.jpg`,
-          1024,
+          byteSize,
           'image/jpeg',
           createdAt,
           contentIndex,
+          contentUrls[contentIndex],
         ),
     ),
   ]
@@ -150,7 +168,6 @@ function downloadOptions(
     fetch: fetcher,
     logger: quietLogger(),
     now,
-    tokenProvider: async () => TOKEN,
   }
 }
 
@@ -160,15 +177,19 @@ afterEach(() => {
 
 describe('Attachment scheduled download', () => {
   it('streams one MO attachment to R2 and completes it once', async () => {
-    const { attachmentIds, moKey } = await seedAttachments('101')
+    const body = '큰 파일 조각 1큰 파일 조각 2'
+    const { attachmentIds } = await seedAttachments('101', {
+      byteSize: new TextEncoder().encode(body).byteLength,
+    })
     const attachmentId = attachmentIds[0]
     const requests: Array<{
       accessClientId: string | null
       accessClientSecret: string | null
       authorization: string | null
+      redirect: RequestRedirect | undefined
       url: string
     }> = []
-    const response = binaryResponse(['큰 파일 조각 1', '큰 파일 조각 2'])
+    const response = binaryResponse([body])
     const arrayBuffer = vi.spyOn(response, 'arrayBuffer')
     const fetcher: LguFetch = async (input, init) => {
       const headers = new Headers(init?.headers)
@@ -176,6 +197,7 @@ describe('Attachment scheduled download', () => {
         accessClientId: headers.get('CF-Access-Client-Id'),
         accessClientSecret: headers.get('CF-Access-Client-Secret'),
         authorization: headers.get('authorization'),
+        redirect: init?.redirect,
         url: String(input),
       })
       return response
@@ -195,15 +217,15 @@ describe('Attachment scheduled download', () => {
       completed: 1,
       failed: 0,
       deferred: 0,
-      ambiguousMessages: 0,
     })
     expect(second.claimed).toBe(0)
     expect(requests).toEqual([
       {
-        accessClientId: env.CF_ACCESS_CLIENT_ID,
-        accessClientSecret: env.CF_ACCESS_CLIENT_SECRET,
-        authorization: `Bearer ${TOKEN}`,
-        url: `https://${env.LGU_CONTENT_HOST}/mo/v1/file/${moKey}`,
+        accessClientId: null,
+        accessClientSecret: null,
+        authorization: null,
+        redirect: 'manual',
+        url: `${CLOUDFRONT_ORIGIN}/attachment-101-0.jpg`,
       },
     ])
     expect(arrayBuffer).not.toHaveBeenCalled()
@@ -217,7 +239,7 @@ describe('Attachment scheduled download', () => {
     const object = await env.ATTACHMENTS.get(`attachments/${attachmentId}`)
     expect(object).not.toBeNull()
     await expect(object?.text()).resolves.toBe(
-      '큰 파일 조각 1큰 파일 조각 2',
+      body,
     )
 
     const eventCount = await env.DB.prepare(
@@ -268,9 +290,12 @@ describe('Attachment scheduled download', () => {
   })
 
   it('does not restrict the inbound attachment format', async () => {
-    const { attachmentIds } = await seedAttachments('108')
+    const body = '{"증빙":true}'
+    const { attachmentIds } = await seedAttachments('108', {
+      byteSize: new TextEncoder().encode(body).byteLength,
+    })
     const fetcher: LguFetch = async () =>
-      binaryResponse(['{"증빙":true}'], 'application/json')
+      binaryResponse([body], 'application/json')
 
     const summary = await runAttachmentDownloads(
       env,
@@ -282,7 +307,7 @@ describe('Attachment scheduled download', () => {
       `attachments/${attachmentIds[0]}`,
     )
     expect(object?.httpMetadata?.contentType).toBe('application/json')
-    await expect(object?.text()).resolves.toBe('{"증빙":true}')
+    await expect(object?.text()).resolves.toBe(body)
   })
 
   it('keeps a 5xx failure pending and succeeds after the lease', async () => {
@@ -374,9 +399,55 @@ describe('Attachment scheduled download', () => {
     )
   })
 
-  it('does not guess the mapping for multiple MO attachments', async () => {
+  it('downloads every attachment from a multi-attachment MO', async () => {
     const { attachmentIds } = await seedAttachments('107', {
-      attachmentCount: 2,
+      attachmentCount: 3,
+    })
+    const requested: string[] = []
+    const fetcher: LguFetch = async (input) => {
+      requested.push(String(input))
+      return binaryResponse()
+    }
+
+    const summary = await runAttachmentDownloads(
+      env,
+      downloadOptions(fetcher),
+    )
+
+    expect(summary).toEqual({
+      claimed: 3,
+      completed: 3,
+      failed: 0,
+      deferred: 0,
+    })
+    expect(requested).toEqual([
+      `${CLOUDFRONT_ORIGIN}/attachment-107-0.jpg`,
+      `${CLOUDFRONT_ORIGIN}/attachment-107-1.jpg`,
+      `${CLOUDFRONT_ORIGIN}/attachment-107-2.jpg`,
+    ])
+    await expect(
+      Promise.all(attachmentIds.map(attachmentRow)),
+    ).resolves.toEqual([
+      expect.objectContaining({ download_status: '완료' }),
+      expect.objectContaining({ download_status: '완료' }),
+      expect.objectContaining({ download_status: '완료' }),
+    ])
+    for (const attachmentId of attachmentIds) {
+      const object = await env.ATTACHMENTS.head(
+        `attachments/${attachmentId}`,
+      )
+      expect(object?.size).toBe(DEFAULT_ATTACHMENT_SIZE)
+    }
+  })
+
+  it('rejects non-CloudFront and non-HTTPS attachment URLs', async () => {
+    const disallowed = await seedAttachments('109', {
+      contentUrls: ['https://example.com/customer-document.jpg'],
+    })
+    const insecure = await seedAttachments('110', {
+      contentUrls: [
+        'http://df25hb5tuwkue.cloudfront.net/customer-document.jpg',
+      ],
     })
     const fetcher = vi.fn<LguFetch>()
     const logger = quietLogger()
@@ -387,23 +458,41 @@ describe('Attachment scheduled download', () => {
     })
 
     expect(summary).toEqual({
-      claimed: 0,
+      claimed: 2,
       completed: 0,
-      failed: 0,
+      failed: 2,
       deferred: 0,
-      ambiguousMessages: 1,
     })
     expect(fetcher).not.toHaveBeenCalled()
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('복수 첨부'),
-      expect.any(Object),
-    )
+    expect(logger.warn).toHaveBeenCalledTimes(2)
     await expect(
-      Promise.all(attachmentIds.map(attachmentRow)),
+      Promise.all([
+        attachmentRow(disallowed.attachmentIds[0]),
+        attachmentRow(insecure.attachmentIds[0]),
+      ]),
     ).resolves.toEqual([
-      expect.objectContaining({ download_status: '대기' }),
-      expect.objectContaining({ download_status: '대기' }),
+      expect.objectContaining({ download_status: '실패' }),
+      expect.objectContaining({ download_status: '실패' }),
     ])
+  })
+
+  it('removes an object whose size differs from contentSize', async () => {
+    const { attachmentIds } = await seedAttachments('111', {
+      byteSize: DEFAULT_ATTACHMENT_SIZE + 1,
+    })
+
+    const summary = await runAttachmentDownloads(
+      env,
+      downloadOptions(async () => binaryResponse()),
+    )
+
+    expect(summary.deferred).toBe(1)
+    expect(
+      await env.ATTACHMENTS.head(`attachments/${attachmentIds[0]}`),
+    ).toBeNull()
+    expect((await attachmentRow(attachmentIds[0]))?.download_status).toBe(
+      '대기',
+    )
   })
 
   it('runs later scheduled tasks when one task fails', async () => {

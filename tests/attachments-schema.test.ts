@@ -170,7 +170,7 @@ describe('Attachment D1 schema', () => {
     ).run()
 
     const attachment = await env.DB.prepare(
-      `SELECT download_lease_until, content_index
+      `SELECT download_lease_until, content_index, content_url
        FROM message_attachments
        WHERE id = ?`,
     )
@@ -178,11 +178,13 @@ describe('Attachment D1 schema', () => {
       .first<{
         download_lease_until: number
         content_index: number
+        content_url: string | null
       }>()
 
     expect(attachment).toEqual({
       download_lease_until: 0,
       content_index: 0,
+      content_url: null,
     })
   })
 })
