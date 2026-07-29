@@ -1,6 +1,5 @@
 import {
   ROLES,
-  USER_STATUSES,
   type Role,
   type UserStatus,
 } from '../../shared/domain'
@@ -85,8 +84,9 @@ const EMAIL_LOCAL_MAX_LENGTH = 64
 const EMAIL_PATTERN =
   /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
 const ADMIN_ROLE = '관리자' satisfies Role
-const [INVITED_STATUS, ACTIVE_STATUS, INACTIVE_STATUS] =
-  USER_STATUSES
+const INVITED_STATUS = '초대' satisfies UserStatus
+const ACTIVE_STATUS = '활성' satisfies UserStatus
+const INACTIVE_STATUS = '비활성' satisfies UserStatus
 const SETTINGS_ENTITY = 'office_settings'
 const SETTINGS_UPDATED_EVENT = 'office.settings.updated'
 const MEMBER_ENTITY = 'user'

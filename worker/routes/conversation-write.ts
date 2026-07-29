@@ -1,6 +1,5 @@
 import {
   STATUSES,
-  USER_STATUSES,
   type JsonValue,
   type Status,
   type UserStatus,
@@ -33,7 +32,7 @@ const CONVERSATION_VERSION_PREDICATE = `id = ?
 const ASSIGNEE_PREDICATE = `conversation_id = ?
   AND office_id = ?
   AND user_id = ?`
-const ACTIVE_USER_STATUS = USER_STATUSES[1]
+const ACTIVE_USER_STATUS = '활성' satisfies UserStatus
 
 interface ConversationRow {
   id: string
