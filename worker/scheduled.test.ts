@@ -1,6 +1,8 @@
-import { env } from 'cloudflare:test'
+import { env, fetchMock } from 'cloudflare:test'
 import {
+  afterAll,
   afterEach,
+  beforeAll,
   describe,
   expect,
   it,
@@ -171,8 +173,18 @@ function downloadOptions(
   }
 }
 
+beforeAll(() => {
+  fetchMock.activate()
+  fetchMock.disableNetConnect()
+})
+
 afterEach(() => {
+  fetchMock.assertNoPendingInterceptors()
   vi.restoreAllMocks()
+})
+
+afterAll(() => {
+  fetchMock.deactivate()
 })
 
 describe('Attachment scheduled download', () => {
@@ -250,6 +262,60 @@ describe('Attachment scheduled download', () => {
       .bind(attachmentId)
       .first<{ count: number }>()
     expect(eventCount?.count).toBe(1)
+  })
+
+  it('calls the real workerd global fetch without an illegal invocation', async () => {
+    const { attachmentIds } = await seedAttachments('112')
+    fetchMock
+      .get(new URL(CLOUDFRONT_ORIGIN).origin)
+      .intercept({
+        method: 'GET',
+        path: '/mmsmo/2026/07/29/attachment-112-0.jpg',
+      })
+      .reply(200, DEFAULT_ATTACHMENT_BODY, {
+        headers: { 'content-type': 'image/jpeg' },
+      })
+
+    const summary = await runAttachmentDownloads(env, {
+      logger: quietLogger(),
+      now: () => NOW,
+    })
+
+    expect(summary).toEqual({
+      claimed: 1,
+      completed: 1,
+      failed: 0,
+      deferred: 0,
+    })
+    const object = await env.ATTACHMENTS.get(
+      `attachments/${attachmentIds[0]}`,
+    )
+    expect(object?.size).toBe(DEFAULT_ATTACHMENT_SIZE)
+    await expect(object?.text()).resolves.toBe(DEFAULT_ATTACHMENT_BODY)
+  })
+
+  it('calls an attachment fetcher without an object receiver', async () => {
+    const { attachmentIds } = await seedAttachments('113')
+    const fetcher: LguFetch = function (
+      this: unknown,
+      _input,
+      _init,
+    ): Promise<Response> {
+      if (this !== undefined) {
+        throw new TypeError('fetcher received an object receiver')
+      }
+      return Promise.resolve(binaryResponse())
+    }
+
+    const summary = await runAttachmentDownloads(
+      env,
+      downloadOptions(fetcher),
+    )
+
+    expect(summary.completed).toBe(1)
+    expect(
+      await env.ATTACHMENTS.head(`attachments/${attachmentIds[0]}`),
+    ).not.toBeNull()
   })
 
   it('claims an attachment once across concurrent runs', async () => {

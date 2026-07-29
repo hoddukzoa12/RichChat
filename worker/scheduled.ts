@@ -317,13 +317,13 @@ async function processAttachment(
     attachment: ClaimedAttachment
     leaseUntil: number
   },
-  options: Required<
-    Pick<AttachmentDownloadOptions, 'fetch' | 'logger' | 'now'>
-  >,
+  fetcher: LguFetch,
+  logger: AttachmentLogger,
+  now: () => number,
   ctx?: ExecutionContext,
 ): Promise<AttachmentOutcome> {
   const { attachment, leaseUntil } = claim
-  const currentTime = options.now()
+  const currentTime = now()
   if (
     attachment.created_at <=
     currentTime - LGU_ATTACHMENT_RECOVERY_WINDOW_MS
@@ -356,7 +356,7 @@ async function processAttachment(
           leaseUntil,
           existing,
           attachment.mime_type ?? 'application/octet-stream',
-          options.now(),
+          now(),
           ctx,
         )
         return completed ? 'completed' : 'deferred'
@@ -365,7 +365,7 @@ async function processAttachment(
 
     const url = validatedContentUrl(attachment.content_url)
     if (url === null) {
-      options.logger.warn('허용하지 않는 첨부 URL을 거부합니다.', {
+      logger.warn('허용하지 않는 첨부 URL을 거부합니다.', {
         attachmentId: attachment.id,
       })
       const failed = await finalizeFailure(
@@ -373,13 +373,13 @@ async function processAttachment(
         attachment,
         leaseUntil,
         'invalid_url',
-        options.now(),
+        now(),
         ctx,
       )
       return failed ? 'failed' : 'deferred'
     }
 
-    const response = await options.fetch(url, {
+    const response = await fetcher(url, {
       method: 'GET',
       redirect: 'manual',
     })
@@ -392,13 +392,13 @@ async function processAttachment(
           attachment,
           leaseUntil,
           'missing',
-          options.now(),
+          now(),
           ctx,
         )
         return failed ? 'failed' : 'deferred'
       }
 
-      options.logger.warn('첨부 다운로드를 나중에 재시도합니다.', {
+      logger.warn('첨부 다운로드를 나중에 재시도합니다.', {
         attachmentId: attachment.id,
         status: response.status,
       })
@@ -410,7 +410,7 @@ async function processAttachment(
       attachment.mime_type ??
       'application/octet-stream'
     if (response.body === null) {
-      options.logger.warn('첨부 다운로드 응답에 바이너리가 없습니다.', {
+      logger.warn('첨부 다운로드 응답에 바이너리가 없습니다.', {
         attachmentId: attachment.id,
       })
       return 'deferred'
@@ -424,7 +424,7 @@ async function processAttachment(
       object.size !== attachment.byte_size
     ) {
       await env.ATTACHMENTS.delete(r2Key)
-      options.logger.warn('첨부 크기가 웹훅 메타데이터와 일치하지 않습니다.', {
+      logger.warn('첨부 크기가 웹훅 메타데이터와 일치하지 않습니다.', {
         attachmentId: attachment.id,
         actualSize: object.size,
         expectedSize: attachment.byte_size,
@@ -437,12 +437,12 @@ async function processAttachment(
       leaseUntil,
       object,
       contentType,
-      options.now(),
+      now(),
       ctx,
     )
     return completed ? 'completed' : 'deferred'
   } catch (cause) {
-    options.logger.warn('첨부 다운로드를 나중에 재시도합니다.', {
+    logger.warn('첨부 다운로드를 나중에 재시도합니다.', {
       attachmentId: attachment.id,
       errorName: cause instanceof Error ? cause.name : 'UnknownError',
       errorMessage:
@@ -452,16 +452,23 @@ async function processAttachment(
   }
 }
 
+function fetchAttachment(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  // workerd의 전역 fetch는 this 검사를 한다. 객체 속성에 직접 담아
+  // options.fetch(...)로 호출하면 Illegal invocation이므로 맨 호출로 감싼다.
+  return fetch(input, init)
+}
+
 export async function runAttachmentDownloads(
   env: AttachmentDownloadEnv,
   options: AttachmentDownloadOptions = {},
   ctx?: ExecutionContext,
 ): Promise<AttachmentDownloadSummary> {
-  const resolvedOptions = {
-    fetch: options.fetch ?? fetch,
-    logger: options.logger ?? console,
-    now: options.now ?? Date.now,
-  }
+  const fetcher = options.fetch ?? fetchAttachment
+  const logger = options.logger ?? console
+  const now = options.now ?? (() => Date.now())
 
   const summary: AttachmentDownloadSummary = {
     claimed: 0,
@@ -477,7 +484,7 @@ export async function runAttachmentDownloads(
   ) {
     const claim = await claimNextAttachment(
       env.DB,
-      resolvedOptions.now(),
+      now(),
     )
     if (claim === null) {
       break
@@ -487,7 +494,9 @@ export async function runAttachmentDownloads(
     const outcome = await processAttachment(
       env,
       claim,
-      resolvedOptions,
+      fetcher,
+      logger,
+      now,
       ctx,
     )
     summary[OUTCOME_COUNTER[outcome]] += 1

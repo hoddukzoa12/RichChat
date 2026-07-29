@@ -45,7 +45,7 @@ interface TaskRouteDependencies {
 
 const DEFAULT_DEPENDENCIES: TaskRouteDependencies = {
   id: createId,
-  now: Date.now,
+  now: () => Date.now(),
 }
 
 const TASK_KIND_SET = new Set<string>(TASK_KINDS)
