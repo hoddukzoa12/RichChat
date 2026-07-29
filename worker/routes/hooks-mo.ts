@@ -160,12 +160,13 @@ function parseItem(value: unknown): MoItem {
     throw new PayloadValidationError('moType 값이 올바르지 않습니다.')
   }
 
-  if (!Array.isArray(value.contentInfoLst)) {
+  const rawContentInfoLst = value.contentInfoLst
+  if (rawContentInfoLst !== null && !Array.isArray(rawContentInfoLst)) {
     throw new PayloadValidationError('contentInfoLst 값이 올바르지 않습니다.')
   }
 
   const contentCnt = nonNegativeInteger(value.contentCnt, 'contentCnt')
-  const contentInfoLst = value.contentInfoLst.map(parseContent)
+  const contentInfoLst = rawContentInfoLst?.map(parseContent) ?? []
   if (contentCnt !== contentInfoLst.length) {
     throw new PayloadValidationError(
       'contentCnt와 contentInfoLst 길이가 다릅니다.',
@@ -199,12 +200,16 @@ function parseEnvelope(value: unknown): MoEnvelope {
 }
 
 /**
- * LGU+의 KST yyyyMMddHHmmss를 epoch 밀리초로 바꾼다.
+ * LGU+의 KST yyyyMMddHHmmss 또는 ISO 지역시각을 epoch 밀리초로 바꾼다.
  * 범위를 벗어난 날짜는 Date의 자동 보정을 허용하지 않고 거부한다.
  */
 export function parseMoRecvDt(value: string): number | null {
+  const compactValue = value.replace(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/,
+    '$1$2$3$4$5$6',
+  )
   const match =
-    /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(value)
+    /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(compactValue)
   if (!match) return null
 
   const [, yearText, monthText, dayText, hourText, minuteText, secondText] =

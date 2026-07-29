@@ -93,6 +93,38 @@ async function expectRetry(
 }
 
 describe('LGU+ MO webhook', () => {
+  it('accepts the real LGU+ payload with null attachments and an ISO KST timestamp', async () => {
+    await insertOffice('office-mo-real-payload')
+    const actualItem = JSON.parse(
+      `{"moKey":"3MYPXrFBsJ.6gLlQ8","moNumber":"18771239","moType":"SMSMO","moCallback":"01077955363","productCode":"SMSMO","moTitle":null,"moMsg":"ㅂ","telco":"KT","contentCnt":0,"contentInfoLst":null,"moRecvDt":"2026-07-29T10:26:38"}`,
+    )
+
+    await expectSuccess(await post(payload(actualItem)))
+
+    const message = await env.DB.prepare(
+      `SELECT body, occurred_at
+       FROM messages
+       WHERE mo_key = ?`,
+    )
+      .bind('3MYPXrFBsJ.6gLlQ8')
+      .first<{ body: string; occurred_at: number }>()
+    const attachmentCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM message_attachments
+       WHERE message_id = (
+         SELECT id FROM messages WHERE mo_key = ?
+       )`,
+    )
+      .bind('3MYPXrFBsJ.6gLlQ8')
+      .first<{ count: number }>()
+
+    expect(message).toEqual({
+      body: 'ㅂ',
+      occurred_at: Date.UTC(2026, 6, 29, 1, 26, 38),
+    })
+    expect(attachmentCount?.count).toBe(0)
+  })
+
   it('commits a new customer conversation and idempotent message before ack', async () => {
     await insertOffice('office-mo-idempotent')
     const body = payload(mo({ moKey: 'mo-idempotent' }))
@@ -332,6 +364,32 @@ describe('LGU+ MO webhook', () => {
     expect(message).toBeNull()
   })
 
+  it('quarantines the empty registration probe without storing a message', async () => {
+    const body =
+      `{"moCallback":"","productCode":"","moTitle":"","contentCnt":"","telco":"","moRecvDt":"","moType":"","moNumber":"","moMsg":"","moKey":""}`
+
+    await expectRetry(await post(body), 400)
+    await expectRetry(await post(body), 400)
+    await expectSuccess(await post(body))
+
+    const failure = await env.DB.prepare(
+      `SELECT attempts, raw_json
+       FROM mo_failures
+       WHERE raw_json = ?`,
+    )
+      .bind(body)
+      .first<{ attempts: number; raw_json: string }>()
+    const messageCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM messages',
+    ).first<{ count: number }>()
+
+    expect(failure).toEqual({
+      attempts: 3,
+      raw_json: body,
+    })
+    expect(messageCount?.count).toBe(0)
+  })
+
   it('never quarantines transient D1 failures and stores after recovery', async () => {
     await insertOffice('office-mo-transient')
     await env.DB.prepare(
@@ -441,10 +499,11 @@ describe('LGU+ MO webhook', () => {
   })
 
   it('parses the KST year boundary without relying on Date string parsing', () => {
-    expect(parseMoRecvDt('20260101000000')).toBe(
-      Date.UTC(2025, 11, 31, 15, 0, 0),
-    )
+    const boundary = Date.UTC(2025, 11, 31, 15, 0, 0)
+    expect(parseMoRecvDt('20260101000000')).toBe(boundary)
+    expect(parseMoRecvDt('2026-01-01T00:00:00')).toBe(boundary)
     expect(parseMoRecvDt('20260229000000')).toBeNull()
+    expect(parseMoRecvDt('2026-02-29T00:00:00')).toBeNull()
   })
 
   it('preserves an old valid timestamp without promoting a delayed message', async () => {
