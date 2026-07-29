@@ -1,6 +1,9 @@
 import type {
   OfficeInviteRequest,
   OfficeInviteResponse,
+  OfficeMemberPatch,
+  OfficeMemberResponse,
+  OfficeMemberStatusPatch,
   OfficeMembersResponse,
   OfficeSettingsPatch,
   OfficeSettingsResponse,
@@ -9,6 +12,7 @@ import { apiRequest } from '../client'
 import { jsonMutation } from './jsonMutation'
 
 export type {
+  MemberStatus,
   OfficeInviteRequest,
   OfficeInviteResponse,
   OfficeMember,
@@ -58,6 +62,32 @@ export function inviteOfficeMember(
     '/api/office/invites',
     'POST',
     { ...invite },
+    signal,
+  )
+}
+
+export function updateOfficeMember(
+  memberId: string,
+  patch: OfficeMemberPatch,
+  signal?: AbortSignal,
+): Promise<OfficeMemberResponse> {
+  return jsonMutation(
+    `/api/office/members/${encodeURIComponent(memberId)}`,
+    'PATCH',
+    { ...patch },
+    signal,
+  )
+}
+
+export function updateOfficeMemberStatus(
+  memberId: string,
+  patch: OfficeMemberStatusPatch,
+  signal?: AbortSignal,
+): Promise<OfficeMemberResponse> {
+  return jsonMutation(
+    `/api/office/members/${encodeURIComponent(memberId)}/status`,
+    'PATCH',
+    { ...patch },
     signal,
   )
 }

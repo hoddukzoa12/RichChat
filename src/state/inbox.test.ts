@@ -52,6 +52,8 @@ const EXPECTED_ACTION_TYPES = [
   'openInvite',
   'closeInvite',
   'setInviteEmail',
+  'setInviteName',
+  'setInviteTitle',
   'setInviteRole',
   'toastArrive',
   'openToast',

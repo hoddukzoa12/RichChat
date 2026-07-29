@@ -5,6 +5,8 @@ import { ApiRequestError } from '../client'
 import {
   getOfficeMembers,
   inviteOfficeMember,
+  updateOfficeMember,
+  updateOfficeMemberStatus,
   updateMe,
   updateMeSettings,
   updateOfficeSettings,
@@ -133,6 +135,82 @@ describe('Settings endpoints', () => {
       title: '상담원',
       role: '상담 담당',
     })
+  })
+
+  it('sends member edits to the encoded member route', async () => {
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(
+          Response.json({
+            member: {
+              id: 'member/1',
+              email: 'member@rich.kr',
+              name: '김세무',
+              title: '세무사',
+              role: '세무사',
+              status: '활성',
+            },
+          }),
+        ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await updateOfficeMember('member/1', {
+      name: '김세무',
+      title: '세무사',
+      role: '세무사',
+    })
+
+    expect(response.member).toMatchObject({
+      name: '김세무',
+      title: '세무사',
+      role: '세무사',
+      status: '활성',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/office/members/member%2F1',
+      expect.objectContaining({ method: 'PATCH' }),
+    )
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[0][1]?.body)),
+    ).toEqual({
+      name: '김세무',
+      title: '세무사',
+      role: '세무사',
+    })
+  })
+
+  it('surfaces a rejected member status transition', async () => {
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(
+          Response.json(
+            {
+              error: {
+                code: 'CONFLICT',
+                message: '마지막 활성 관리자는 비활성화할 수 없습니다.',
+              },
+            },
+            { status: 409 },
+          ),
+        ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      updateOfficeMemberStatus('admin-1', { status: '비활성' }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'CONFLICT',
+      message: '마지막 활성 관리자는 비활성화할 수 없습니다.',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/office/members/admin-1/status',
+      expect.objectContaining({ method: 'PATCH' }),
+    )
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[0][1]?.body)),
+    ).toEqual({ status: '비활성' })
   })
 
   it('passes invalid retention values to server validation', async () => {
