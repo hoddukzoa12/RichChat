@@ -1,6 +1,7 @@
 -- D1은 마이그레이션을 트랜잭션 안에서 실행해 foreign_keys를 끌 수 없다.
--- 대신 부모 테이블 교체 중의 위반만 커밋 직전까지 미루고, 같은 트랜잭션에서
--- users 이름과 모든 행을 복구한 뒤 검증을 다시 켠다.
+-- 부모 테이블 교체 중의 위반은 미루고, 교체 뒤 실제 데이터를 FK 가드로 검사한다.
+-- 마지막 defer_foreign_keys=OFF는 위반을 검사하지 않고 DROP이 남긴 낡은
+-- 지연 카운터만 비워 커밋을 가능하게 한다.
 PRAGMA defer_foreign_keys = ON;
 
 CREATE TABLE users_with_deputy_administrator (
@@ -53,5 +54,15 @@ CREATE UNIQUE INDEX ux_users_works_sub
   WHERE works_sub IS NOT NULL;
 CREATE UNIQUE INDEX ux_users_id_office
   ON users(id, office_id);
+
+-- 실제 FK 위반이 하나라도 있으면 CHECK가 실패해 마이그레이션 전체를 롤백한다.
+CREATE TABLE migration_0005_fk_guard (
+  violations INTEGER NOT NULL CHECK (violations = 0)
+) STRICT;
+
+INSERT INTO migration_0005_fk_guard (violations)
+SELECT COUNT(*) FROM pragma_foreign_key_check;
+
+DROP TABLE migration_0005_fk_guard;
 
 PRAGMA defer_foreign_keys = OFF;
