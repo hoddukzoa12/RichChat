@@ -168,8 +168,16 @@ export const STATUS_BADGE: Record<Status, string> = {
   `new TextEncoder().encode(s).length`는 **틀렸다** — 그건 UTF-8이라 한글이
   3 byte다. `shared/sms.ts:smsByteLength`가 유일한 구현이고, 코드포인트 단위로
   (`for…of`) 순회한다. `charCodeAt`을 쓰면 서로게이트 쌍이 두 번 세진다.
-- **`moRecvDt`는 KST `yyyyMMddHHmmss` 문자열이다.** `new Date(s)`는
-  `Invalid Date`를 반환한다. 필드를 직접 파싱하고 +09:00을 빼야 한다.
+- **`moRecvDt`는 KST인데 형식이 문서와 실제가 다르다.** 문서는
+  `yyyyMMddHHmmss`(`20260728140611`)라고 하는데 **운영에서 실제로 온 값은
+  ISO 8601 지역시각**(`2026-07-29T10:26:38`)이었다. 둘 다 받아야 한다.
+  타임존 표기가 없고 KST 기준이므로 `new Date(s)`로 파싱하면 UTC로 해석돼
+  **9시간 어긋난다.** 직접 파싱하고 +09:00을 빼야 한다.
+- **`contentInfoLst`는 첨부가 없을 때 `null`로 온다.** 문서 예시는 `[]`인데
+  실제는 `null`이었다. `moTitle`도 `null`이 온다. 배열을 강제하면
+  **모든 고객 문자가 거부된다** — 실제로 운영에서 그렇게 됐다.
+- **문서에 없는 필드가 온다** (`productCode` 등). 알 수 없는 필드를
+  오류로 다루지 마라.
 - **Cron Trigger 최소 주기는 1분이다.** 문서의 "최소 10초 간격" 폴링은 Workers에서
   구현 불가능하다 → 리포트는 웹훅 푸시가 주 경로, Cron은 보정용이다.
 - **카카오톡은 사전 승인된 템플릿만 발송 가능하다.** 상담원이 입력한 자유
