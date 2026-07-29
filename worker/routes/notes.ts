@@ -55,7 +55,7 @@ async function readBody(request: Request): Promise<string | Response> {
   const object = value as JsonObject
   if (
     Object.keys(object).length !== NOTE_BODY_KEYS.length ||
-    !Object.hasOwn(object, NOTE_BODY_KEYS[0]) ||
+    !NOTE_BODY_KEYS.every((key) => Object.hasOwn(object, key)) ||
     typeof object.body !== 'string'
   ) {
     return error('BAD_REQUEST', '메모 본문만 보낼 수 있습니다.')
