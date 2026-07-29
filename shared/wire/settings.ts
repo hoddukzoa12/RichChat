@@ -1,6 +1,7 @@
 import type { Role } from '../domain'
+import type { PermissionSet } from '../permissions'
 
-export const ME_PROFILE_FIELDS = ['name', 'title'] as const
+export const ME_PROFILE_FIELDS = ['name'] as const
 export const USER_SETTING_FIELDS = [
   'notifyNewChat',
   'notifyMineOnly',
@@ -50,5 +51,5 @@ export interface MeResponse {
   user: MeUser
   office: MeOffice
   settings: UserSettings
-  isAdmin: boolean
+  permissions: PermissionSet
 }

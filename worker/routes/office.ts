@@ -1,18 +1,27 @@
 import {
+  ROLES,
   USER_STATUSES,
   type Role,
   type UserStatus,
 } from '../../shared/domain'
 import { canonicalizeEmail } from '../../shared/email'
 import {
-  INVITE_ROLES,
+  hasPermission,
+  PERMISSIONS,
+  type Permission,
+} from '../../shared/permissions'
+import {
+  MEMBER_STATUS_VALUES,
   RETENTION_YEARS_MAX,
   RETENTION_YEARS_MIN,
-  type InviteRole,
+  type MemberStatus,
   type OfficeInviteRequest,
   type OfficeInviteResponse,
   type OfficeMember,
+  type OfficeMemberPatch,
+  type OfficeMemberResponse,
   type OfficeMembersResponse,
+  type OfficeMemberStatusPatch,
   type OfficeMemberWithStatus,
   type OfficeSettings,
   type OfficeSettingsPatch,
@@ -51,28 +60,90 @@ interface OfficeMemberRow {
   status: UserStatus
 }
 
+interface ListedOfficeMemberRow extends OfficeMemberRow {
+  can_manage: number
+}
+
+interface SqlGuard {
+  sql: string
+  bindings: readonly unknown[]
+}
+
 type JsonObject = Record<string, unknown>
 
 const SETTINGS_PATCH_KEYS = new Set([
   'exportLog',
   'retentionYears',
 ])
-const INVITE_KEYS = new Set(['email', 'role'])
-const INVITE_ROLE_SET = new Set<string>(INVITE_ROLES)
+const INVITE_KEYS = new Set(['email', 'name', 'title', 'role'])
+const MEMBER_PATCH_KEYS = new Set(['name', 'title', 'role'])
+const MEMBER_STATUS_KEYS = new Set(['status'])
+const ROLE_SET = new Set<string>(ROLES)
+const MEMBER_STATUS_SET = new Set<string>(MEMBER_STATUS_VALUES)
 const EMAIL_MAX_LENGTH = 254
 const EMAIL_LOCAL_MAX_LENGTH = 64
 const EMAIL_PATTERN =
   /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
 const ADMIN_ROLE = '관리자' satisfies Role
-const [INVITED_STATUS, ACTIVE_STATUS] = USER_STATUSES
-const ADMIN_EXISTS_SQL = `SELECT 1
-                          FROM users AS administrator
-                          WHERE administrator.id = ?
-                            AND administrator.role = ?`
+const [INVITED_STATUS, ACTIVE_STATUS, INACTIVE_STATUS] =
+  USER_STATUSES
 const SETTINGS_ENTITY = 'office_settings'
 const SETTINGS_UPDATED_EVENT = 'office.settings.updated'
 const MEMBER_ENTITY = 'user'
-const MEMBER_INVITED_EVENT = 'office.member.invited'
+const MEMBER_EVENT_TYPES = {
+  invited: 'office.member.invited',
+  updated: 'office.member.updated',
+  statusChanged: 'office.member.status-changed',
+} as const
+
+const PERMISSION_ROLES = PERMISSIONS.reduce<
+  Record<Permission, readonly Role[]>
+>(
+  (roles, permission) => {
+    roles[permission] = ROLES.filter((role) =>
+      hasPermission(role, permission),
+    )
+    return roles
+  },
+  {} as Record<Permission, readonly Role[]>,
+)
+
+function placeholders(values: readonly unknown[]): string {
+  return values.map(() => '?').join(', ')
+}
+
+function actorPermissionGuard(
+  userId: string,
+  permission: Permission,
+  alias: string,
+): SqlGuard {
+  const roles = PERMISSION_ROLES[permission]
+  return {
+    sql: `EXISTS (
+      SELECT 1
+      FROM users AS ${alias}
+      WHERE ${alias}.id = ?
+        AND ${alias}.status = ?
+        AND ${alias}.role IN (${placeholders(roles)})
+    )`,
+    bindings: [userId, ACTIVE_STATUS, ...roles],
+  }
+}
+
+function permissionAuthorizationProbe(
+  db: D1Database,
+  userId: string,
+  permission: Permission,
+): D1PreparedStatement {
+  const roles = PERMISSION_ROLES[permission]
+  return db.prepare(
+    `UPDATE users
+    SET role = role
+    WHERE id = ?
+      AND status = ?
+      AND role IN (${placeholders(roles)})`,
+  ).bind(userId, ACTIVE_STATUS, ...roles)
+}
 
 function isJsonObject(value: unknown): value is JsonObject {
   return (
@@ -98,17 +169,35 @@ async function readJsonObject(
     : error('BAD_REQUEST', 'JSON 객체가 필요합니다.')
 }
 
+function hasExactKeys(
+  value: JsonObject,
+  keys: ReadonlySet<string>,
+): boolean {
+  const received = Object.keys(value)
+  return (
+    received.length === keys.size &&
+    received.every((key) => keys.has(key))
+  )
+}
+
+function hasOnlyKeys(
+  value: JsonObject,
+  keys: ReadonlySet<string>,
+): boolean {
+  const received = Object.keys(value)
+  return (
+    received.length > 0 &&
+    received.every((key) => keys.has(key))
+  )
+}
+
 async function readSettingsPatch(
   request: Request,
 ): Promise<OfficeSettingsPatch | Response> {
   const value = await readJsonObject(request)
   if (value instanceof Response) return value
 
-  const keys = Object.keys(value)
-  if (
-    keys.length === 0 ||
-    keys.some((key) => !SETTINGS_PATCH_KEYS.has(key))
-  ) {
+  if (!hasOnlyKeys(value, SETTINGS_PATCH_KEYS)) {
     return error(
       'BAD_REQUEST',
       '변경할 사무소 설정만 보낼 수 있습니다.',
@@ -143,8 +232,19 @@ async function readSettingsPatch(
   return value as OfficeSettingsPatch
 }
 
-function isInviteRole(value: unknown): value is InviteRole {
-  return typeof value === 'string' && INVITE_ROLE_SET.has(value)
+function isRole(value: unknown): value is Role {
+  return typeof value === 'string' && ROLE_SET.has(value)
+}
+
+function isMemberStatus(value: unknown): value is MemberStatus {
+  return typeof value === 'string' && MEMBER_STATUS_SET.has(value)
+}
+
+function nonEmptyText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
 }
 
 function validEmail(value: string): boolean {
@@ -179,12 +279,12 @@ async function readInvite(
   const value = await readJsonObject(request)
   if (value instanceof Response) return value
 
-  const keys = Object.keys(value)
   if (
-    keys.length !== INVITE_KEYS.size ||
-    keys.some((key) => !INVITE_KEYS.has(key)) ||
+    !hasExactKeys(value, INVITE_KEYS) ||
     typeof value.email !== 'string' ||
-    !isInviteRole(value.role)
+    typeof value.name !== 'string' ||
+    typeof value.title !== 'string' ||
+    !isRole(value.role)
   ) {
     return error('BAD_REQUEST', '초대 정보가 올바르지 않습니다.')
   }
@@ -194,7 +294,70 @@ async function readInvite(
     return error('BAD_REQUEST', '올바른 이메일을 입력해 주세요.')
   }
 
-  return { email, role: value.role }
+  const title = nonEmptyText(value.title)
+  if (!title) {
+    return error('BAD_REQUEST', '직함을 입력해 주세요.')
+  }
+
+  const name =
+    value.name.trim() || email.slice(0, email.indexOf('@'))
+  return { email, name, title, role: value.role }
+}
+
+async function readMemberPatch(
+  request: Request,
+): Promise<OfficeMemberPatch | Response> {
+  const value = await readJsonObject(request)
+  if (value instanceof Response) return value
+
+  if (!hasOnlyKeys(value, MEMBER_PATCH_KEYS)) {
+    return error('BAD_REQUEST', '변경할 직원 정보가 필요합니다.')
+  }
+
+  const name = nonEmptyText(value.name)
+  const title = nonEmptyText(value.title)
+  if (
+    Object.hasOwn(value, 'name') &&
+    !name
+  ) {
+    return error('BAD_REQUEST', '이름을 입력해 주세요.')
+  }
+
+  if (
+    Object.hasOwn(value, 'title') &&
+    !title
+  ) {
+    return error('BAD_REQUEST', '직함을 입력해 주세요.')
+  }
+
+  if (
+    Object.hasOwn(value, 'role') &&
+    !isRole(value.role)
+  ) {
+    return error('BAD_REQUEST', '역할이 올바르지 않습니다.')
+  }
+
+  return {
+    ...(name ? { name } : {}),
+    ...(title ? { title } : {}),
+    ...(isRole(value.role) ? { role: value.role } : {}),
+  }
+}
+
+async function readMemberStatusPatch(
+  request: Request,
+): Promise<OfficeMemberStatusPatch | Response> {
+  const value = await readJsonObject(request)
+  if (value instanceof Response) return value
+
+  if (
+    !hasExactKeys(value, MEMBER_STATUS_KEYS) ||
+    !isMemberStatus(value.status)
+  ) {
+    return error('BAD_REQUEST', '직원 상태가 올바르지 않습니다.')
+  }
+
+  return { status: value.status }
 }
 
 function settingsFromRow(row: OfficeSettingsRow): OfficeSettings {
@@ -225,32 +388,15 @@ function memberWithStatusFromRow(
   }
 }
 
-const MEMBER_MAPPERS: Record<
-  Role,
-  (row: OfficeMemberRow) => OfficeMember | OfficeMemberWithStatus
-> = {
-  관리자: memberWithStatusFromRow,
-  부관리자: memberFromRow,
-  세무사: memberFromRow,
-  '상담 담당': memberFromRow,
-}
-
-function adminAuthorizationProbe(
-  db: D1Database,
-  userId: string,
-): D1PreparedStatement {
-  return db.prepare(
-    `UPDATE users
-    SET role = role
-    WHERE id = ?
-      AND role = ?`,
-  ).bind(userId, ADMIN_ROLE)
-}
-
-async function loadAdminSettings(
+async function loadSettings(
   env: Env,
   session: SessionContext,
 ): Promise<OfficeSettingsRow | null> {
+  const permission = actorPermissionGuard(
+    session.userId,
+    'office:manage',
+    'settings_actor',
+  )
   return env.DB.prepare(
     `SELECT
       settings.export_log,
@@ -259,10 +405,83 @@ async function loadAdminSettings(
       settings.updated_by
     FROM office_settings AS settings
     WHERE settings.office_id = ?
-      AND EXISTS (${ADMIN_EXISTS_SQL})`,
+      AND ${permission.sql}`,
   )
-    .bind(session.officeId, session.userId, ADMIN_ROLE)
+    .bind(session.officeId, ...permission.bindings)
     .first<OfficeSettingsRow>()
+}
+
+async function loadMember(
+  env: Env,
+  officeId: string,
+  memberId: string,
+): Promise<OfficeMemberRow | null> {
+  return env.DB.prepare(
+    `SELECT id, email, name, title, role, status
+    FROM users
+    WHERE id = ?
+      AND office_id = ?`,
+  )
+    .bind(memberId, officeId)
+    .first<OfficeMemberRow>()
+}
+
+async function loadActorRole(
+  env: Env,
+  actorId: string,
+): Promise<Role | null> {
+  const row = await env.DB.prepare(
+    `SELECT role
+    FROM users
+    WHERE id = ?
+      AND status = ?`,
+  )
+    .bind(actorId, ACTIVE_STATUS)
+    .first<{ role: Role }>()
+
+  return row?.role ?? null
+}
+
+async function memberMutationFailure(
+  env: Env,
+  session: SessionContext,
+  memberId: string,
+  desiredRole?: Role,
+  desiredStatus?: MemberStatus,
+): Promise<Response | null> {
+  const [actorRole, member] = await Promise.all([
+    loadActorRole(env, session.userId),
+    loadMember(env, session.officeId, memberId),
+  ])
+  if (
+    !actorRole ||
+    !hasPermission(actorRole, 'team:manage')
+  ) {
+    return error('FORBIDDEN', '직원을 관리할 수 없습니다.')
+  }
+  if (!member) {
+    return error('NOT_FOUND', '직원을 찾을 수 없습니다.')
+  }
+  if (
+    member.role === ADMIN_ROLE &&
+    !hasPermission(actorRole, 'team:manage-administrator')
+  ) {
+    return error('FORBIDDEN', '관리자를 변경할 수 없습니다.')
+  }
+  if (
+    desiredRole === ADMIN_ROLE &&
+    !hasPermission(actorRole, 'team:assign-administrator')
+  ) {
+    return error('FORBIDDEN', '관리자 역할을 지정할 수 없습니다.')
+  }
+  if (
+    memberId === session.userId &&
+    desiredStatus === INACTIVE_STATUS
+  ) {
+    return error('CONFLICT', '자기 자신을 비활성화할 수 없습니다.')
+  }
+
+  return null
 }
 
 export function createOfficeRoutes(
@@ -277,10 +496,19 @@ export function createOfficeRoutes(
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error(
+        'FORBIDDEN',
+        '사무소 설정을 볼 수 없습니다.',
+      )
+    }
 
-    const row = await loadAdminSettings(env, session)
+    const row = await loadSettings(env, session)
     if (!row) {
-      return error('FORBIDDEN', '사무소 설정을 볼 수 없습니다.')
+      return error(
+        'FORBIDDEN',
+        '사무소 설정을 볼 수 없습니다.',
+      )
     }
 
     return json({
@@ -296,6 +524,12 @@ export function createOfficeRoutes(
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error(
+        'FORBIDDEN',
+        '사무소 설정을 변경할 수 없습니다.',
+      )
+    }
 
     const patch = await readSettingsPatch(request)
     if (patch instanceof Response) return patch
@@ -311,6 +545,11 @@ export function createOfficeRoutes(
     if (patch.retentionYears !== undefined) {
       payload.retentionYears = patch.retentionYears
     }
+    const permission = actorPermissionGuard(
+      session.userId,
+      'office:manage',
+      'settings_actor',
+    )
 
     const publication = publish(
       env.DB,
@@ -325,7 +564,7 @@ export function createOfficeRoutes(
         createdAt: now,
       },
       {
-        // 직전 UPDATE가 실제로 바꾼 경우에만 이어지는 두 이벤트 문장이 실행된다.
+        // 직전 UPDATE가 실제로 바꾼 경우에만 이벤트를 기록한다.
         query: 'SELECT 1 WHERE changes() = 1',
       },
     )
@@ -342,7 +581,7 @@ export function createOfficeRoutes(
             (? IS NOT NULL AND export_log <> ?)
             OR (? IS NOT NULL AND retention_years <> ?)
           )
-          AND EXISTS (${ADMIN_EXISTS_SQL})`,
+          AND ${permission.sql}`,
       ).bind(
         exportLog,
         retentionYears,
@@ -353,11 +592,14 @@ export function createOfficeRoutes(
         exportLog,
         retentionYears,
         retentionYears,
-        session.userId,
-        ADMIN_ROLE,
+        ...permission.bindings,
       ),
       ...publication,
-      adminAuthorizationProbe(env.DB, session.userId),
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'office:manage',
+      ),
     ]
     const [updateResult, , , authorizationResult] =
       await executeBatchAndBroadcast(
@@ -378,7 +620,7 @@ export function createOfficeRoutes(
       )
     }
 
-    const row = await loadAdminSettings(env, session)
+    const row = await loadSettings(env, session)
     if (!row) {
       return error(
         'INTERNAL_ERROR',
@@ -397,27 +639,54 @@ export function createOfficeRoutes(
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'team:view')) {
+      return error('FORBIDDEN', '직원 목록을 볼 수 없습니다.')
+    }
 
+    const viewRoles = PERMISSION_ROLES['team:view']
+    const manageRoles = PERMISSION_ROLES['team:manage']
     const { results } = await env.DB.prepare(
-      `SELECT id, email, name, title, role, status
-      FROM users
-      WHERE office_id = ?
+      `SELECT
+        member.id,
+        member.email,
+        member.name,
+        member.title,
+        member.role,
+        member.status,
+        actor.role IN (${placeholders(manageRoles)}) AS can_manage
+      FROM users AS member
+      INNER JOIN users AS actor
+        ON actor.id = ?
+        AND actor.status = ?
+        AND actor.role IN (${placeholders(viewRoles)})
+      WHERE member.office_id = ?
         AND (
-          status = ?
-          OR EXISTS (${ADMIN_EXISTS_SQL})
+          member.status = ?
+          OR actor.role IN (${placeholders(manageRoles)})
         )
-      ORDER BY name, id`,
+      ORDER BY member.name, member.id`,
     )
       .bind(
+        ...manageRoles,
+        session.userId,
+        ACTIVE_STATUS,
+        ...viewRoles,
         session.officeId,
         ACTIVE_STATUS,
-        session.userId,
-        ADMIN_ROLE,
+        ...manageRoles,
       )
-      .all<OfficeMemberRow>()
+      .all<ListedOfficeMemberRow>()
+
+    if (results.length === 0) {
+      return error('FORBIDDEN', '직원 목록을 볼 수 없습니다.')
+    }
 
     return json({
-      members: results.map(MEMBER_MAPPERS[session.role]),
+      members: results.map((row) =>
+        row.can_manage === 1
+          ? memberWithStatusFromRow(row)
+          : memberFromRow(row),
+      ),
     } satisfies OfficeMembersResponse)
   }
 
@@ -429,36 +698,64 @@ export function createOfficeRoutes(
   ): Promise<Response> {
     const session = await requireSession(request, env)
     if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'team:manage')) {
+      return error('FORBIDDEN', '직원을 초대할 수 없습니다.')
+    }
 
     const invite = await readInvite(request)
     if (invite instanceof Response) return invite
+    if (
+      invite.role === ADMIN_ROLE &&
+      !hasPermission(
+        session.role,
+        'team:assign-administrator',
+      )
+    ) {
+      return error(
+        'FORBIDDEN',
+        '관리자 역할을 지정할 수 없습니다.',
+      )
+    }
 
     const memberId = idFactory()
     const now = clock()
+    const managePermission = actorPermissionGuard(
+      session.userId,
+      'team:manage',
+      'invite_actor',
+    )
+    const assignPermission = actorPermissionGuard(
+      session.userId,
+      'team:assign-administrator',
+      'invite_assigner',
+    )
     const publication = publish(
       env.DB,
       {
         officeId: session.officeId,
-        type: MEMBER_INVITED_EVENT,
+        type: MEMBER_EVENT_TYPES.invited,
         entity: MEMBER_ENTITY,
         entityId: memberId,
         actorKind: 'user',
         actorId: session.userId,
         payload: {
           email: invite.email,
+          name: invite.name,
+          title: invite.title,
           role: invite.role,
           status: INVITED_STATUS,
         },
         createdAt: now,
       },
       {
-        query: `SELECT 1
-                FROM users
-                WHERE id = ?
-                  AND office_id = ?`,
-        bindings: [memberId, session.officeId],
+        // 직전 INSERT가 새 초대 행을 만든 경우에만 이벤트를 기록한다.
+        query: 'SELECT 1 WHERE changes() = 1',
       },
     )
+    const authorizationPermission =
+      invite.role === ADMIN_ROLE
+        ? 'team:assign-administrator'
+        : 'team:manage'
     const statements = [
       env.DB.prepare(
         `INSERT INTO users (
@@ -473,23 +770,33 @@ export function createOfficeRoutes(
           updated_at
         )
         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE EXISTS (${ADMIN_EXISTS_SQL})
+        WHERE ${managePermission.sql}
+          AND (
+            ? <> ?
+            OR ${assignPermission.sql}
+          )
         ON CONFLICT(email) DO NOTHING`,
       ).bind(
         memberId,
         session.officeId,
         invite.email,
-        invite.email,
-        invite.role,
+        invite.name,
+        invite.title,
         invite.role,
         INVITED_STATUS,
         now,
         now,
-        session.userId,
+        ...managePermission.bindings,
+        invite.role,
         ADMIN_ROLE,
+        ...assignPermission.bindings,
       ),
       ...publication,
-      adminAuthorizationProbe(env.DB, session.userId),
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        authorizationPermission,
+      ),
     ]
     const [result, , , authorizationResult] =
       await executeBatchAndBroadcast(
@@ -529,6 +836,335 @@ export function createOfficeRoutes(
     )
   }
 
+  async function updateMember(
+    request: Request,
+    env: Env,
+    params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'team:manage')) {
+      return error('FORBIDDEN', '직원을 관리할 수 없습니다.')
+    }
+
+    const patch = await readMemberPatch(request)
+    if (patch instanceof Response) return patch
+
+    const memberId = params.memberId
+    const hasName = Number(patch.name !== undefined)
+    const hasTitle = Number(patch.title !== undefined)
+    const hasRole = Number(patch.role !== undefined)
+    const name = patch.name ?? ''
+    const title = patch.title ?? ''
+    const role = patch.role ?? ADMIN_ROLE
+    const now = clock()
+    const differencePredicate = `(
+      (? = 1 AND name <> ?)
+      OR (? = 1 AND title <> ?)
+      OR (? = 1 AND role <> ?)
+    )`
+    const differenceBindings = [
+      hasName,
+      name,
+      hasTitle,
+      title,
+      hasRole,
+      role,
+    ] as const
+    const managePermission = actorPermissionGuard(
+      session.userId,
+      'team:manage',
+      'member_manager',
+    )
+    const manageAdminPermission = actorPermissionGuard(
+      session.userId,
+      'team:manage-administrator',
+      'administrator_manager',
+    )
+    const assignAdminPermission = actorPermissionGuard(
+      session.userId,
+      'team:assign-administrator',
+      'administrator_assigner',
+    )
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: MEMBER_EVENT_TYPES.updated,
+        entity: MEMBER_ENTITY,
+        entityId: memberId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: {
+          ...(patch.name === undefined ? {} : { name: patch.name }),
+          ...(patch.title === undefined
+            ? {}
+            : { title: patch.title }),
+          ...(patch.role === undefined ? {} : { role: patch.role }),
+        },
+        createdAt: now,
+      },
+      {
+        // 직전 UPDATE가 실제 변경한 경우에만 이벤트를 기록한다.
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
+    const statements = [
+      env.DB.prepare(
+        `UPDATE users AS member
+        SET
+          name = CASE WHEN ? = 1 THEN ? ELSE name END,
+          title = CASE WHEN ? = 1 THEN ? ELSE title END,
+          role = CASE WHEN ? = 1 THEN ? ELSE role END,
+          updated_at = ?
+        WHERE id = ?
+          AND office_id = ?
+          AND ${differencePredicate}
+          AND ${managePermission.sql}
+          AND (
+            role <> ?
+            OR ${manageAdminPermission.sql}
+          )
+          AND (
+            ? = 0
+            OR ? <> ?
+            OR ${assignAdminPermission.sql}
+          )
+          AND (
+            role <> ?
+            OR status <> ?
+            OR ? = 0
+            OR ? = ?
+            OR EXISTS (
+              SELECT 1
+              FROM users AS other_administrator
+              WHERE other_administrator.id <> member.id
+                AND other_administrator.role = ?
+                AND other_administrator.status = ?
+            )
+          )`,
+      ).bind(
+        hasName,
+        name,
+        hasTitle,
+        title,
+        hasRole,
+        role,
+        now,
+        memberId,
+        session.officeId,
+        ...differenceBindings,
+        ...managePermission.bindings,
+        ADMIN_ROLE,
+        ...manageAdminPermission.bindings,
+        hasRole,
+        role,
+        ADMIN_ROLE,
+        ...assignAdminPermission.bindings,
+        ADMIN_ROLE,
+        ACTIVE_STATUS,
+        hasRole,
+        role,
+        ADMIN_ROLE,
+        ADMIN_ROLE,
+        ACTIVE_STATUS,
+      ),
+      ...publication,
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'team:manage',
+      ),
+    ]
+    const [updateResult] = await executeBatchAndBroadcast(
+      env.DB,
+      statements,
+      [publication],
+      ctx,
+      env,
+    )
+
+    if (changes(updateResult) === 0) {
+      const failure = await memberMutationFailure(
+        env,
+        session,
+        memberId,
+        patch.role,
+      )
+      if (failure) return failure
+
+      const unchanged = await loadMember(
+        env,
+        session.officeId,
+        memberId,
+      )
+      if (
+        !unchanged ||
+        (patch.name !== undefined &&
+          unchanged.name !== patch.name) ||
+        (patch.title !== undefined &&
+          unchanged.title !== patch.title) ||
+        (patch.role !== undefined &&
+          unchanged.role !== patch.role)
+      ) {
+        return error(
+          'CONFLICT',
+          '마지막 활성 관리자는 변경할 수 없습니다.',
+        )
+      }
+    }
+
+    const row = await loadMember(env, session.officeId, memberId)
+    if (!row) {
+      return error('NOT_FOUND', '직원을 찾을 수 없습니다.')
+    }
+
+    return json({
+      member: memberWithStatusFromRow(row),
+    } satisfies OfficeMemberResponse)
+  }
+
+  async function updateMemberStatus(
+    request: Request,
+    env: Env,
+    params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'team:manage')) {
+      return error('FORBIDDEN', '직원을 관리할 수 없습니다.')
+    }
+
+    const patch = await readMemberStatusPatch(request)
+    if (patch instanceof Response) return patch
+
+    const memberId = params.memberId
+    const now = clock()
+    const managePermission = actorPermissionGuard(
+      session.userId,
+      'team:manage',
+      'status_manager',
+    )
+    const manageAdminPermission = actorPermissionGuard(
+      session.userId,
+      'team:manage-administrator',
+      'status_administrator_manager',
+    )
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: MEMBER_EVENT_TYPES.statusChanged,
+        entity: MEMBER_ENTITY,
+        entityId: memberId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { status: patch.status },
+        createdAt: now,
+      },
+      {
+        // 직전 UPDATE가 실제 변경한 경우에만 이벤트를 기록한다.
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
+    const statements = [
+      env.DB.prepare(
+        `UPDATE users AS member
+        SET status = ?,
+          updated_at = ?
+        WHERE id = ?
+          AND office_id = ?
+          AND status <> ?
+          AND ${managePermission.sql}
+          AND (
+            role <> ?
+            OR ${manageAdminPermission.sql}
+          )
+          AND NOT (
+            id = ?
+            AND ? = ?
+          )
+          AND (
+            role <> ?
+            OR status <> ?
+            OR ? <> ?
+            OR EXISTS (
+              SELECT 1
+              FROM users AS other_administrator
+              WHERE other_administrator.id <> member.id
+                AND other_administrator.role = ?
+                AND other_administrator.status = ?
+            )
+          )`,
+      ).bind(
+        patch.status,
+        now,
+        memberId,
+        session.officeId,
+        patch.status,
+        ...managePermission.bindings,
+        ADMIN_ROLE,
+        ...manageAdminPermission.bindings,
+        session.userId,
+        patch.status,
+        INACTIVE_STATUS,
+        ADMIN_ROLE,
+        ACTIVE_STATUS,
+        patch.status,
+        INACTIVE_STATUS,
+        ADMIN_ROLE,
+        ACTIVE_STATUS,
+      ),
+      ...publication,
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'team:manage',
+      ),
+    ]
+    const [updateResult] = await executeBatchAndBroadcast(
+      env.DB,
+      statements,
+      [publication],
+      ctx,
+      env,
+    )
+
+    if (changes(updateResult) === 0) {
+      const failure = await memberMutationFailure(
+        env,
+        session,
+        memberId,
+        undefined,
+        patch.status,
+      )
+      if (failure) return failure
+
+      const unchanged = await loadMember(
+        env,
+        session.officeId,
+        memberId,
+      )
+      if (!unchanged || unchanged.status !== patch.status) {
+        return error(
+          'CONFLICT',
+          '마지막 활성 관리자는 비활성화할 수 없습니다.',
+        )
+      }
+    }
+
+    const row = await loadMember(env, session.officeId, memberId)
+    if (!row) {
+      return error('NOT_FOUND', '직원을 찾을 수 없습니다.')
+    }
+
+    return json({
+      member: memberWithStatusFromRow(row),
+    } satisfies OfficeMemberResponse)
+  }
+
   return [
     {
       method: 'GET',
@@ -549,6 +1185,16 @@ export function createOfficeRoutes(
       method: 'POST',
       path: '/api/office/invites',
       handler: inviteMember,
+    },
+    {
+      method: 'PATCH',
+      path: '/api/office/members/:memberId',
+      handler: updateMember,
+    },
+    {
+      method: 'PATCH',
+      path: '/api/office/members/:memberId/status',
+      handler: updateMemberStatus,
     },
   ]
 }

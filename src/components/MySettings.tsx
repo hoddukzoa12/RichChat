@@ -28,7 +28,7 @@ const PROFILE_FIELDS: Array<{
   readOnly: boolean
 }> = [
   { key: 'name', label: '이름', readOnly: false },
-  { key: 'title', label: '직함', readOnly: false },
+  { key: 'title', label: '직함', readOnly: true },
   { key: 'email', label: '이메일', readOnly: true },
 ]
 
@@ -88,7 +88,6 @@ export function MySettings() {
     try {
       const response = await updateMe({
         name: optimistic.name,
-        title: optimistic.title,
       })
       applyMeResponse(response)
       setProfileDraft(profileDraftFrom(response))

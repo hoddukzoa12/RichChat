@@ -418,14 +418,20 @@ describe('Current user routes', () => {
     },
   )
 
-  it('derives administrator access from the current database role', async () => {
+  it('derives permissions from the current database role', async () => {
     const session = await seedSession('활성', '부관리자')
     const before = await getMe(session.token)
 
     expect(before.status).toBe(200)
     await expect(before.json()).resolves.toMatchObject({
       user: { id: session.userId, role: '부관리자' },
-      isAdmin: false,
+      permissions: {
+        'team:view': true,
+        'team:manage': true,
+        'team:manage-administrator': false,
+        'team:assign-administrator': false,
+        'office:manage': false,
+      },
     })
 
     await env.DB.prepare(
@@ -438,22 +444,27 @@ describe('Current user routes', () => {
     expect(after.status).toBe(200)
     await expect(after.json()).resolves.toMatchObject({
       user: { id: session.userId, role: '관리자' },
-      isAdmin: true,
+      permissions: {
+        'team:view': true,
+        'team:manage': true,
+        'team:manage-administrator': true,
+        'team:assign-administrator': true,
+        'office:manage': true,
+      },
     })
   })
 
-  it('updates only editable profile fields', async () => {
+  it('updates only the editable name field', async () => {
     const session = await seedSession('활성', '세무사')
     const updated = await patch('/api/me', session.token, {
       name: '김세무',
-      title: '대표 세무사',
     })
 
     expect(updated.status).toBe(200)
     await expect(updated.json()).resolves.toMatchObject({
       user: {
         name: '김세무',
-        title: '대표 세무사',
+        title: '상담 담당',
         email: session.email,
         role: '세무사',
       },
@@ -474,7 +485,7 @@ describe('Current user routes', () => {
     await expect(reflected.json()).resolves.toMatchObject({
       user: {
         name: '이세무',
-        title: '대표 세무사',
+        title: '상담 담당',
       },
     })
     expect(
@@ -510,7 +521,7 @@ describe('Current user routes', () => {
       office_id: session.officeId,
       role: '세무사',
       status: '활성',
-      title: '대표 세무사',
+      title: '상담 담당',
       works_sub: null,
     })
     expect(
@@ -519,6 +530,25 @@ describe('Current user routes', () => {
         USER_EVENT_TYPES.profileUpdated,
       ),
     ).toBe(2)
+  })
+
+  it('rejects a title patch without changing the stored title', async () => {
+    const session = await seedSession('활성', '세무사')
+
+    const response = await patch('/api/me', session.token, {
+      title: '대표 세무사',
+    })
+
+    expect(response.status).toBe(400)
+    expect((await storedUser(session.userId))?.title).toBe(
+      '상담 담당',
+    )
+    expect(
+      await userEventCount(
+        session.userId,
+        USER_EVENT_TYPES.profileUpdated,
+      ),
+    ).toBe(0)
   })
 
   it('updates notification settings independently', async () => {

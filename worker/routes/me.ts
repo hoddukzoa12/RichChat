@@ -1,4 +1,5 @@
 import type { Role } from '../../shared/domain'
+import { permissionsForRole } from '../../shared/permissions'
 import {
   DEFAULT_USER_SETTINGS,
   ME_PROFILE_FIELDS,
@@ -67,10 +68,7 @@ interface MeRow {
 type JsonObject = Record<string, unknown>
 
 interface ProfilePatch {
-  hasName: boolean
-  hasTitle: boolean
   name: string
-  title: string
 }
 
 interface SettingsPatch {
@@ -117,28 +115,18 @@ function parseProfilePatch(
     !hasOnlyKeys(body, ME_PROFILE_FIELDS) ||
     !ME_PROFILE_FIELDS.some((key) => Object.hasOwn(body, key))
   ) {
-    return error(
-      'BAD_REQUEST',
-      '이름과 직함만 변경할 수 있습니다.',
-    )
+    return error('BAD_REQUEST', '이름만 변경할 수 있습니다.')
   }
 
-  const hasName = Object.hasOwn(body, 'name')
-  const hasTitle = Object.hasOwn(body, 'title')
   if (
-    (hasName &&
-      (typeof body.name !== 'string' || body.name.trim() === '')) ||
-    (hasTitle &&
-      (typeof body.title !== 'string' || body.title.trim() === ''))
+    typeof body.name !== 'string' ||
+    body.name.trim() === ''
   ) {
-    return error('BAD_REQUEST', '이름과 직함은 빈 문자열일 수 없습니다.')
+    return error('BAD_REQUEST', '이름은 빈 문자열일 수 없습니다.')
   }
 
   return {
-    hasName,
-    hasTitle,
-    name: typeof body.name === 'string' ? body.name.trim() : '',
-    title: typeof body.title === 'string' ? body.title.trim() : '',
+    name: body.name.trim(),
   }
 }
 
@@ -234,7 +222,7 @@ async function meResponse(
         DEFAULT_USER_SETTINGS.notifySound,
       ),
     },
-    isAdmin: row.role === '관리자',
+    permissions: permissionsForRole(row.role),
   } satisfies MeResponse)
 }
 
@@ -260,19 +248,9 @@ async function patchMe(
   const patch = parseProfilePatch(body)
   if (patch instanceof Response) return patch
 
-  const hasName = Number(patch.hasName)
-  const hasTitle = Number(patch.hasTitle)
   const now = clock()
-  const differencePredicate = `(
-    (? = 1 AND name <> ?)
-    OR (? = 1 AND title <> ?)
-  )`
-  const differenceBindings = [
-    hasName,
-    patch.name,
-    hasTitle,
-    patch.title,
-  ] as const
+  const differencePredicate = 'name <> ?'
+  const differenceBindings = [patch.name] as const
 
   const publication = publish(
     env.DB,
@@ -284,8 +262,7 @@ async function patchMe(
       actorKind: 'user',
       actorId: session.userId,
       payload: {
-        ...(patch.hasName ? { name: patch.name } : {}),
-        ...(patch.hasTitle ? { title: patch.title } : {}),
+        name: patch.name,
       },
       createdAt: now,
     },
@@ -306,18 +283,13 @@ async function patchMe(
     ...publication,
     env.DB.prepare(
       `UPDATE users
-      SET
-        name = CASE WHEN ? = 1 THEN ? ELSE name END,
-        title = CASE WHEN ? = 1 THEN ? ELSE title END,
+      SET name = ?,
         updated_at = ?
       WHERE id = ?
         AND office_id = ?
         AND ${differencePredicate}`,
     ).bind(
-      hasName,
       patch.name,
-      hasTitle,
-      patch.title,
       now,
       session.userId,
       session.officeId,

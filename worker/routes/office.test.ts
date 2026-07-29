@@ -1,7 +1,13 @@
 import { env, SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
+import {
+  ROLES,
+  type Role,
+  type UserStatus,
+} from '../../shared/domain'
 import type {
   OfficeInviteResponse,
+  OfficeMemberResponse,
   OfficeMembersResponse,
   OfficeSettingsResponse,
 } from '../../shared/wire/office'
@@ -37,8 +43,10 @@ interface StoredSettings {
 
 interface StoredUser {
   email: string
+  name?: string
   role: string
   status: string
+  title?: string
   updated_at: number
   works_sub: string | null
 }
@@ -107,6 +115,71 @@ async function seedFixture(): Promise<Fixture> {
     officeId,
     suffix,
   }
+}
+
+async function seedUser(
+  fixture: Fixture,
+  role: Role,
+  status: UserStatus = '활성',
+  label: string = role,
+): Promise<TestUser> {
+  const id = `${label}-${fixture.suffix}`
+  const now = Date.now()
+  await env.DB.prepare(
+    `INSERT INTO users (
+      id, office_id, email, name, title, role, status, created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      fixture.officeId,
+      `${id}@rich.example`,
+      label,
+      `${label} 직함`,
+      role,
+      status,
+      now,
+      now,
+    )
+    .run()
+  const session = await createSession(
+    env.DB,
+    { userId: id, officeId: fixture.officeId },
+    now,
+  )
+
+  return { id, token: session.token }
+}
+
+function inviteBody(
+  email: string,
+  role: Role = '상담 담당',
+): {
+  email: string
+  name: string
+  title: string
+  role: Role
+} {
+  return {
+    email,
+    name: '초대 직원',
+    title: '상담원',
+    role,
+  }
+}
+
+async function storedUserById(
+  userId: string,
+): Promise<StoredUser | null> {
+  return env.DB.prepare(
+    `SELECT
+      email, name, role, status, title, updated_at, works_sub
+    FROM users
+    WHERE id = ?`,
+  )
+    .bind(userId)
+    .first<StoredUser>()
 }
 
 async function request(
@@ -195,8 +268,20 @@ describe('Office administration', () => {
       path: '/api/office/invites',
       body: {
         email: 'invitee@rich.example',
+        name: '초대 직원',
+        title: '상담원',
         role: '상담 담당',
       },
+    },
+    {
+      method: 'PATCH' as const,
+      path: '/api/office/members/member-1',
+      body: { name: '변경 이름' },
+    },
+    {
+      method: 'PATCH' as const,
+      path: '/api/office/members/member-1/status',
+      body: { status: '비활성' },
     },
   ])(
     'rejects an unauthenticated $method $path request',
@@ -351,7 +436,7 @@ describe('Office administration', () => {
         'POST',
         '/api/office/invites',
         fixture.admin.token,
-        { email, role: '상담 담당' },
+        inviteBody(email),
       )
 
       expect(response.status).toBe(400)
@@ -370,6 +455,8 @@ describe('Office administration', () => {
       fixture.admin.token,
       {
         email: `  INVITEE-${fixture.suffix}@RICH.EXAMPLE  `,
+        name: '  김초대  ',
+        title: '  선임 세무사  ',
         role: '세무사',
       },
     )
@@ -378,13 +465,14 @@ describe('Office administration', () => {
     const payload = await response.json<OfficeInviteResponse>()
     expect(payload.member).toMatchObject({
       email,
-      name: email,
-      title: '세무사',
+      name: '김초대',
+      title: '선임 세무사',
       role: '세무사',
       status: '초대',
     })
     const stored = await env.DB.prepare(
-      `SELECT email, role, status, updated_at, works_sub
+      `SELECT
+        email, name, role, status, title, updated_at, works_sub
       FROM users
       WHERE email = ?`,
     )
@@ -392,8 +480,10 @@ describe('Office administration', () => {
       .first<StoredUser>()
     expect(stored).toMatchObject({
       email,
+      name: '김초대',
       role: '세무사',
       status: '초대',
+      title: '선임 세무사',
       works_sub: null,
     })
     expect(
@@ -404,6 +494,31 @@ describe('Office administration', () => {
     ).toBe(1)
   })
 
+  it('uses the email local part when an invite name is blank', async () => {
+    const fixture = await seedFixture()
+    const email = `fallback-${fixture.suffix}@rich.example`
+
+    const response = await request(
+      'POST',
+      '/api/office/invites',
+      fixture.admin.token,
+      {
+        ...inviteBody(email),
+        name: ' \n ',
+      },
+    )
+
+    expect(response.status).toBe(201)
+    await expect(response.json<OfficeInviteResponse>()).resolves
+      .toMatchObject({
+        member: {
+          email,
+          name: `fallback-${fixture.suffix}`,
+          title: '상담원',
+        },
+      })
+  })
+
   it('creates one user and one event for repeated invitations', async () => {
     const fixture = await seedFixture()
     const email = `duplicate-${fixture.suffix}@rich.example`
@@ -412,15 +527,14 @@ describe('Office administration', () => {
       'POST',
       '/api/office/invites',
       fixture.admin.token,
-      { email, role: '상담 담당' },
+      inviteBody(email),
     )
     const second = await request(
       'POST',
       '/api/office/invites',
       fixture.admin.token,
       {
-        email: ` ${email.toUpperCase()} `,
-        role: '세무사',
+        ...inviteBody(` ${email.toUpperCase()} `, '세무사'),
       },
     )
 
@@ -467,7 +581,7 @@ describe('Office administration', () => {
       'POST',
       '/api/office/invites',
       fixture.admin.token,
-      { email, role: '상담 담당' },
+      inviteBody(email),
     )
 
     expect(response.status).toBe(200)
@@ -496,8 +610,9 @@ describe('Office administration', () => {
       '/api/office/invites',
       fixture.member.token,
       {
-        email: `blocked-${fixture.suffix}@rich.example`,
-        role: '상담 담당',
+        ...inviteBody(
+          `blocked-${fixture.suffix}@rich.example`,
+        ),
       },
     )
 
@@ -506,7 +621,7 @@ describe('Office administration', () => {
     expect(await eventCount(fixture.officeId)).toBe(0)
   })
 
-  it('does not allow an invitation to grant administrator role', async () => {
+  it('allows an administrator invitation by an administrator', async () => {
     const fixture = await seedFixture()
 
     const response = await request(
@@ -514,13 +629,87 @@ describe('Office administration', () => {
       '/api/office/invites',
       fixture.admin.token,
       {
-        email: `admin-${fixture.suffix}@rich.example`,
-        role: '관리자',
+        ...inviteBody(
+          `new-admin-${fixture.suffix}@rich.example`,
+          '관리자',
+        ),
       },
     )
 
-    expect(response.status).toBe(400)
-    expect(await officeUserCount(fixture.officeId)).toBe(2)
+    expect(response.status).toBe(201)
+    await expect(response.json<OfficeInviteResponse>()).resolves
+      .toMatchObject({
+        member: { role: '관리자', status: '초대' },
+      })
+    expect(await officeUserCount(fixture.officeId)).toBe(3)
+  })
+
+  it('allows invitations for every role', async () => {
+    const fixture = await seedFixture()
+
+    for (const role of ROLES) {
+      const response = await request(
+        'POST',
+        '/api/office/invites',
+        fixture.admin.token,
+        inviteBody(
+          `${ROLES.indexOf(role)}-${fixture.suffix}@rich.example`,
+          role,
+        ),
+      )
+      expect(response.status).toBe(201)
+      await expect(response.json<OfficeInviteResponse>()).resolves
+        .toMatchObject({
+          member: { role, status: '초대' },
+        })
+    }
+  })
+
+  it('allows a deputy administrator to invite a non-administrator', async () => {
+    const fixture = await seedFixture()
+    const deputy = await seedUser(fixture, '부관리자')
+    const email = `deputy-invite-${fixture.suffix}@rich.example`
+
+    const response = await request(
+      'POST',
+      '/api/office/invites',
+      deputy.token,
+      {
+        email,
+        name: '박세무',
+        title: '선임 세무사',
+        role: '세무사',
+      },
+    )
+
+    expect(response.status).toBe(201)
+    const payload = await response.json<OfficeInviteResponse>()
+    expect(payload.member).toEqual({
+      id: expect.any(String),
+      email,
+      name: '박세무',
+      title: '선임 세무사',
+      role: '세무사',
+      status: '초대',
+    })
+  })
+
+  it('rejects an administrator invitation by a deputy administrator', async () => {
+    const fixture = await seedFixture()
+    const deputy = await seedUser(fixture, '부관리자')
+
+    const response = await request(
+      'POST',
+      '/api/office/invites',
+      deputy.token,
+      inviteBody(
+        `blocked-admin-${fixture.suffix}@rich.example`,
+        '관리자',
+      ),
+    )
+
+    expect(response.status).toBe(403)
+    expect(await officeUserCount(fixture.officeId)).toBe(3)
   })
 
   it('allows a non-administrator to list only active public members', async () => {
@@ -577,5 +766,374 @@ describe('Office administration', () => {
         status: '초대',
       }),
     )
+  })
+
+  it('gives a deputy administrator every member status', async () => {
+    const fixture = await seedFixture()
+    const deputy = await seedUser(fixture, '부관리자')
+    const invited = await seedUser(
+      fixture,
+      '상담 담당',
+      '초대',
+      '초대 대기',
+    )
+    const inactive = await seedUser(
+      fixture,
+      '세무사',
+      '비활성',
+      '퇴사 직원',
+    )
+
+    const response = await request(
+      'GET',
+      '/api/office/members',
+      deputy.token,
+    )
+
+    expect(response.status).toBe(200)
+    const payload = await response.json<OfficeMembersResponse>()
+    expect(payload.members).toContainEqual(
+      expect.objectContaining({
+        id: invited.id,
+        status: '초대',
+      }),
+    )
+    expect(payload.members).toContainEqual(
+      expect.objectContaining({
+        id: inactive.id,
+        status: '비활성',
+      }),
+    )
+    expect(
+      payload.members.every((member) =>
+        Object.hasOwn(member, 'status'),
+      ),
+    ).toBe(true)
+  })
+
+  it('updates a member name, title, and role', async () => {
+    const fixture = await seedFixture()
+
+    const response = await request(
+      'PATCH',
+      `/api/office/members/${fixture.member.id}`,
+      fixture.admin.token,
+      {
+        name: '김세무',
+        title: '선임 세무사',
+        role: '세무사',
+      },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json<OfficeMemberResponse>()).resolves
+      .toEqual({
+        member: {
+          id: fixture.member.id,
+          email: `${fixture.member.id}@rich.example`,
+          name: '김세무',
+          title: '선임 세무사',
+          role: '세무사',
+          status: '활성',
+        },
+      })
+    expect(await storedUserById(fixture.member.id)).toMatchObject({
+      name: '김세무',
+      title: '선임 세무사',
+      role: '세무사',
+      status: '활성',
+    })
+    expect(
+      await eventCount(
+        fixture.officeId,
+        'office.member.updated',
+      ),
+    ).toBe(1)
+  })
+
+  it('keeps an administrator unchanged when a deputy administrator edits or deactivates them', async () => {
+    const fixture = await seedFixture()
+    const deputy = await seedUser(fixture, '부관리자')
+    const before = await storedUserById(fixture.admin.id)
+
+    const edit = await request(
+      'PATCH',
+      `/api/office/members/${fixture.admin.id}`,
+      deputy.token,
+      { name: '권한 없는 변경' },
+    )
+    const deactivate = await request(
+      'PATCH',
+      `/api/office/members/${fixture.admin.id}/status`,
+      deputy.token,
+      { status: '비활성' },
+    )
+
+    expect(edit.status).toBe(403)
+    expect(deactivate.status).toBe(403)
+    expect(await storedUserById(fixture.admin.id)).toEqual(before)
+    expect(await eventCount(fixture.officeId)).toBe(0)
+  })
+
+  it('keeps a member unchanged when a deputy administrator assigns the administrator role', async () => {
+    const fixture = await seedFixture()
+    const deputy = await seedUser(fixture, '부관리자')
+    const before = await storedUserById(fixture.member.id)
+
+    const response = await request(
+      'PATCH',
+      `/api/office/members/${fixture.member.id}`,
+      deputy.token,
+      { role: '관리자' },
+    )
+
+    expect(response.status).toBe(403)
+    expect(await storedUserById(fixture.member.id)).toEqual(before)
+    expect(await eventCount(fixture.officeId)).toBe(0)
+  })
+
+  it.each([
+    { label: 'counselor', role: '상담 담당' as const },
+    { label: 'tax accountant', role: '세무사' as const },
+  ])(
+    'rejects member management by a $label',
+    async ({ role }) => {
+      const fixture = await seedFixture()
+      const actor =
+        role === '상담 담당'
+          ? fixture.member
+          : await seedUser(fixture, role)
+      const before = await storedUserById(fixture.member.id)
+
+      const invite = await request(
+        'POST',
+        '/api/office/invites',
+        actor.token,
+        inviteBody(
+          `forbidden-${role}-${fixture.suffix}@rich.example`,
+        ),
+      )
+      const update = await request(
+        'PATCH',
+        `/api/office/members/${fixture.member.id}`,
+        actor.token,
+        { name: '권한 없는 이름' },
+      )
+
+      expect(invite.status).toBe(403)
+      expect(update.status).toBe(403)
+      expect(await storedUserById(fixture.member.id)).toEqual(before)
+    },
+  )
+
+  it('keeps the last active administrator from being demoted or deactivated', async () => {
+    const fixture = await seedFixture()
+
+    const demote = await request(
+      'PATCH',
+      `/api/office/members/${fixture.admin.id}`,
+      fixture.admin.token,
+      { role: '부관리자' },
+    )
+    const deactivate = await request(
+      'PATCH',
+      `/api/office/members/${fixture.admin.id}/status`,
+      fixture.admin.token,
+      { status: '비활성' },
+    )
+
+    expect(demote.status).toBe(409)
+    expect(deactivate.status).toBe(409)
+    expect(await storedUserById(fixture.admin.id)).toMatchObject({
+      role: '관리자',
+      status: '활성',
+    })
+    expect(await eventCount(fixture.officeId)).toBe(0)
+  })
+
+  it('serializes concurrent administrator demotions without losing the last administrator', async () => {
+    const fixture = await seedFixture()
+    const secondAdmin = await seedUser(
+      fixture,
+      '관리자',
+      '활성',
+      '동시 변경 관리자',
+    )
+
+    const responses = await Promise.all([
+      request(
+        'PATCH',
+        `/api/office/members/${fixture.admin.id}`,
+        fixture.admin.token,
+        { role: '부관리자' },
+      ),
+      request(
+        'PATCH',
+        `/api/office/members/${secondAdmin.id}`,
+        secondAdmin.token,
+        { role: '부관리자' },
+      ),
+    ])
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([
+      200,
+      409,
+    ])
+    const remaining = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+      FROM users
+      WHERE office_id = ?
+        AND role = '관리자'
+        AND status = '활성'`,
+    )
+      .bind(fixture.officeId)
+      .first<{ count: number }>()
+    expect(remaining?.count).toBe(1)
+  })
+
+  it('rejects self-deactivation even when another administrator exists', async () => {
+    const fixture = await seedFixture()
+    const deputy = await seedUser(fixture, '부관리자')
+    await seedUser(fixture, '관리자', '활성', '두 번째 관리자')
+
+    const response = await request(
+      'PATCH',
+      `/api/office/members/${deputy.id}/status`,
+      deputy.token,
+      { status: '비활성' },
+    )
+
+    expect(response.status).toBe(409)
+    expect(await storedUserById(deputy.id)).toMatchObject({
+      status: '활성',
+    })
+  })
+
+  it('deactivates without deleting authored history and rejects the old session', async () => {
+    const fixture = await seedFixture()
+    const customerId = `customer-${fixture.suffix}`
+    const conversationId = `conversation-${fixture.suffix}`
+    const messageId = `message-${fixture.suffix}`
+    const noteId = `note-${fixture.suffix}`
+    const now = Date.now()
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO customers (
+          id, office_id, phone_e164, name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        customerId,
+        fixture.officeId,
+        `+8210${String(fixtureSequence).padStart(8, '0')}`,
+        '이력 고객',
+        now,
+        now,
+      ),
+      env.DB.prepare(
+        `INSERT INTO conversations (
+          id, office_id, customer_id, status, created_at, updated_at
+        ) VALUES (?, ?, ?, '미처리', ?, ?)`,
+      ).bind(
+        conversationId,
+        fixture.officeId,
+        customerId,
+        now,
+        now,
+      ),
+      env.DB.prepare(
+        `INSERT INTO messages (
+          id, office_id, conversation_id, direction, channel, body,
+          sender_user_id, occurred_at, created_at, client_key,
+          delivery_status
+        ) VALUES (?, ?, ?, 'out', 'SMS', ?, ?, ?, ?, ?, '대기')`,
+      ).bind(
+        messageId,
+        fixture.officeId,
+        conversationId,
+        '작성 메시지',
+        fixture.member.id,
+        now,
+        now,
+        `client-${fixture.suffix}`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO notes (
+          id, office_id, conversation_id, author_id, body, created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        noteId,
+        fixture.officeId,
+        conversationId,
+        fixture.member.id,
+        '작성 메모',
+        now,
+        now,
+      ),
+    ])
+
+    const response = await request(
+      'PATCH',
+      `/api/office/members/${fixture.member.id}/status`,
+      fixture.admin.token,
+      { status: '비활성' },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await storedUserById(fixture.member.id)).toMatchObject({
+      status: '비활성',
+    })
+    const history = await env.DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM messages WHERE id = ?) AS messages,
+        (SELECT COUNT(*) FROM notes WHERE id = ?) AS notes`,
+    )
+      .bind(messageId, noteId)
+      .first<{ messages: number; notes: number }>()
+    expect(history).toEqual({ messages: 1, notes: 1 })
+    expect(
+      (
+        await request(
+          'GET',
+          '/api/me',
+          fixture.member.token,
+        )
+      ).status,
+    ).toBe(401)
+  })
+
+  it('reactivates a member and restores their existing session', async () => {
+    const fixture = await seedFixture()
+    const deactivate = await request(
+      'PATCH',
+      `/api/office/members/${fixture.member.id}/status`,
+      fixture.admin.token,
+      { status: '비활성' },
+    )
+    const reactivate = await request(
+      'PATCH',
+      `/api/office/members/${fixture.member.id}/status`,
+      fixture.admin.token,
+      { status: '활성' },
+    )
+
+    expect(deactivate.status).toBe(200)
+    expect(reactivate.status).toBe(200)
+    await expect(reactivate.json<OfficeMemberResponse>()).resolves
+      .toMatchObject({
+        member: {
+          id: fixture.member.id,
+          status: '활성',
+        },
+      })
+    expect(
+      (
+        await request(
+          'GET',
+          '/api/me',
+          fixture.member.token,
+        )
+      ).status,
+    ).toBe(200)
   })
 })

@@ -1,9 +1,9 @@
 import type {
-  InviteRole,
   OfficeMember,
   OfficeMemberWithStatus,
 } from '../api/endpoints'
 import type { ActionHandlers, InboxState } from './inbox'
+import type { Role } from '../types'
 
 export interface AiSettings {
   summary: boolean
@@ -24,7 +24,7 @@ export interface SettingsState {
   teamError: string | null
   inviteOpen: boolean
   inviteEmail: string
-  inviteRole: InviteRole
+  inviteRole: Role
 }
 
 export const initialSettingsState: SettingsState = {
@@ -53,7 +53,7 @@ export type SettingsAction =
   | { type: 'openInvite' }
   | { type: 'closeInvite' }
   | { type: 'setInviteEmail'; value: string }
-  | { type: 'setInviteRole'; value: InviteRole }
+  | { type: 'setInviteRole'; value: Role }
 
 export const settingsHandlers = {
   toggleAi: (state, action) => ({

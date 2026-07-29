@@ -9,10 +9,12 @@ import { apiRequest } from '../client'
 import { jsonMutation } from './jsonMutation'
 
 export type {
-  InviteRole,
   OfficeInviteRequest,
   OfficeInviteResponse,
   OfficeMember,
+  OfficeMemberPatch,
+  OfficeMemberResponse,
+  OfficeMemberStatusPatch,
   OfficeMembersResponse,
   OfficeMemberWithStatus,
   OfficeSettings,
@@ -20,7 +22,6 @@ export type {
   OfficeSettingsResponse,
 } from '../../../shared/wire/office'
 export {
-  INVITE_ROLES,
   RETENTION_YEARS_MAX,
   RETENTION_YEARS_MIN,
 } from '../../../shared/wire/office'

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { permissionsForRole } from '../../../shared/permissions'
 import type { MeResponse } from '../../../shared/wire/settings'
 import { ApiRequestError } from '../client'
 import {
@@ -27,7 +28,7 @@ const ME_RESPONSE: MeResponse = {
     notifyMineOnly: false,
     notifySound: true,
   },
-  isAdmin: true,
+  permissions: permissionsForRole('관리자'),
 }
 
 afterEach(() => {
@@ -42,7 +43,7 @@ describe('Settings endpoints', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await updateMe({ name: '이세무', title: '대표 세무사' })
+    await updateMe({ name: '이세무' })
     await updateMeSettings({ notifySound: false })
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -61,10 +62,7 @@ describe('Settings endpoints', () => {
     const settingsBody = JSON.parse(
       String(fetchMock.mock.calls[1][1]?.body),
     ) as Record<string, unknown>
-    expect(profileBody).toEqual({
-      name: '이세무',
-      title: '대표 세무사',
-    })
+    expect(profileBody).toEqual({ name: '이세무' })
     expect(settingsBody).toEqual({ notifySound: false })
     expect(profileBody).not.toHaveProperty('clientKey')
     expect(settingsBody).not.toHaveProperty('clientKey')
@@ -116,6 +114,8 @@ describe('Settings endpoints', () => {
     await expect(
       inviteOfficeMember({
         email: '@x.com',
+        name: '초대 직원',
+        title: '상담원',
         role: '상담 담당',
       }),
     ).rejects.toMatchObject({
@@ -129,6 +129,8 @@ describe('Settings endpoints', () => {
     ) as Record<string, unknown>
     expect(body).toEqual({
       email: '@x.com',
+      name: '초대 직원',
+      title: '상담원',
       role: '상담 담당',
     })
   })
