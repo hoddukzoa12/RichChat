@@ -16,6 +16,21 @@ npm run build    # tsc -b && vite build
 npm run check    # tsc -b && vitest run  ← 완료 판정은 이것
 ```
 
+**배포는 반드시 `npm run build` 뒤에 한다.**
+
+```sh
+npm run build && npx wrangler deploy
+```
+
+`wrangler deploy`는 `wrangler.jsonc`를 읽지 않는다. Vite 플러그인이 빌드 때 만든
+`dist/richchat/wrangler.json`으로 **리다이렉트된다.** 빌드 없이 배포하면
+**지난 빌드의 코드와 설정이 그대로 다시 올라간다** — 명령은 성공하고 새 버전 ID까지
+나오므로 눈으로는 구별되지 않는다.
+
+실제로 이것 때문에 운영 호스트 설정을 두 번 배포하고도 QA 값이 살아 있었다.
+출력 첫 줄에 `Using redirected Wrangler configuration`과 실제로 쓰인 파일이
+찍히니 **배포할 때마다 그 줄과 `env.*` 값을 확인해라.**
+
 **완료 판정은 `npm run check` 통과다.** `npm run build`만으로는 부족하다 —
 워커 코드를 타입체크하지 않고(`tsconfig.app.json`이 `include: ["src"]`),
 SQL 제약을 검증하지 못하며, 마이그레이션 적용 여부를 모른다. "유니크 인덱스가
