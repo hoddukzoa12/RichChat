@@ -3,17 +3,17 @@ import { useAuth } from '../api/AuthGate'
 import {
   getOfficeSettings,
   inviteOfficeMember,
-  INVITE_ROLES,
   RETENTION_YEARS_MAX,
   RETENTION_YEARS_MIN,
   updateOfficeSettings,
-  type InviteRole,
   type OfficeMember,
   type OfficeMemberWithStatus,
   type OfficeSettings as SavedOfficeSettings,
 } from '../api/endpoints'
+import { ROLES } from '../../shared/domain'
 import { useInbox } from '../state/InboxContext'
 import type { OfficeSettings as OfficeFlags } from '../state/inbox'
+import type { Role } from '../types'
 import { Avatar, Card, ToggleRow } from './ui'
 
 const CONNECTIONS = [
@@ -50,7 +50,8 @@ const OFFICE_TOGGLES: Array<{
   },
 ]
 
-const ROLE_DESCRIPTION: Record<InviteRole, string> = {
+const ROLE_DESCRIPTION: Record<Role, string> = {
+  관리자: '모든 사무소 설정과 직원 권한을 관리합니다',
   부관리자: '관리자 기능을 함께 쓰되 관리자 지정은 할 수 없습니다',
   '상담 담당': '대화 응대와 고객 정보 편집',
   세무사: '담당 고객 대화 확인과 응대',
@@ -94,6 +95,8 @@ function InviteModal() {
     try {
       const { member } = await inviteOfficeMember({
         email: state.inviteEmail,
+        name: '',
+        title: '직원',
         role: state.inviteRole,
       })
       dispatch({ type: 'upsertTeamMember', member })
@@ -156,7 +159,7 @@ function InviteModal() {
           권한
         </div>
         <div className="flex flex-col gap-2">
-          {INVITE_ROLES.map((role) => {
+          {ROLES.map((role) => {
             const on = state.inviteRole === role
             return (
               <button
@@ -244,12 +247,13 @@ export function OfficeSettings() {
   const [settings, setSettings] =
     useState<SavedOfficeSettings | null>(null)
   const [retentionDraft, setRetentionDraft] = useState('')
-  const [loading, setLoading] = useState(me.isAdmin)
+  const canManageOffice = me.permissions['office:manage']
+  const [loading, setLoading] = useState(canManageOffice)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!me.isAdmin) return
+    if (!canManageOffice) return
     const controller = new AbortController()
     setLoading(true)
     setError(null)
@@ -271,9 +275,9 @@ export function OfficeSettings() {
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [me.isAdmin])
+  }, [canManageOffice])
 
-  if (!me.isAdmin) return <ForbiddenOfficeSettings />
+  if (!canManageOffice) return <ForbiddenOfficeSettings />
 
   const savePatch = async (
     optimistic: SavedOfficeSettings,

@@ -9,10 +9,11 @@ export const PERMISSIONS = [
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]
+export type PermissionSet = Record<Permission, boolean>
 
 const ROLE_PERMISSIONS: Record<
   Role,
-  Record<Permission, boolean>
+  PermissionSet
 > = {
   관리자: {
     'team:view': true,
@@ -49,4 +50,8 @@ export function hasPermission(
   permission: Permission,
 ): boolean {
   return ROLE_PERMISSIONS[role][permission]
+}
+
+export function permissionsForRole(role: Role): PermissionSet {
+  return { ...ROLE_PERMISSIONS[role] }
 }

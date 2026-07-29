@@ -59,7 +59,9 @@ export function Rail() {
       />
 
       <div className="mt-auto flex flex-col items-center gap-2.5">
-        {me.isAdmin && <RailButton page="office" emoji="🏢" label="사무소" />}
+        {me.permissions['office:manage'] && (
+          <RailButton page="office" emoji="🏢" label="사무소" />
+        )}
         <RailButton page="settings" emoji="⚙️" label="설정" />
         <div className="w-8 h-8 rounded-full bg-ink-700 text-white flex items-center justify-center text-xs font-semibold border-2 border-ink shadow-[0_0_0_2px_#12B76A]">
           {me.user.name[0]}
