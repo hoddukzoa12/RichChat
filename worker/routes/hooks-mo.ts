@@ -7,6 +7,7 @@ import { json } from '../http/respond'
 import type { Route, RouteHandler } from '../http/router'
 import { createId, type Clock } from '../lib/ids'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
+import { runAttachmentDownloads } from '../scheduled'
 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1_000
 const QUARANTINE_ATTEMPTS = 3
@@ -21,6 +22,7 @@ interface MoContent {
   contentName: string | null
   contentSize: number | null
   contentExt: string | null
+  contentUrl: string | null
 }
 
 interface MoItem {
@@ -144,6 +146,7 @@ function parseContent(value: unknown): MoContent {
     contentName: nullableString(value, 'contentName'),
     contentSize: nullableNonNegativeInteger(value.contentSize),
     contentExt: nullableString(value, 'contentExt'),
+    contentUrl: nullableString(value, 'contentUrl'),
   }
 }
 
@@ -538,18 +541,24 @@ async function processItem(
   ]
   const messageInsertIndex = statements.length - 1
 
-  // 일회성 contentUrl은 보관하지 않는다. 대기 행은 7일 보관 API로 복구한다.
   for (const [contentIndex, content] of item.contentInfoLst.entries()) {
     statements.push(
       db
         .prepare(
           `INSERT INTO message_attachments (
              id, office_id, message_id, original_filename, byte_size,
-             mime_type, r2_key, download_status, created_at, content_index
+             mime_type, r2_key, download_status, created_at, content_index,
+             content_url
            )
-           SELECT ?, ?, id, ?, ?, ?, NULL, '대기', ?, ?
+           SELECT ?, ?, messages.id, ?, ?, ?, NULL, '대기', ?, ?, ?
            FROM messages
-           WHERE id = ? AND mo_key = ?`,
+           WHERE messages.mo_key = ?
+             AND NOT EXISTS (
+               SELECT 1
+               FROM message_attachments
+               WHERE message_id = messages.id
+                 AND content_index = ?
+             )`,
         )
         .bind(
           createId(),
@@ -559,9 +568,23 @@ async function processItem(
           mimeType(content),
           receivedAt,
           contentIndex,
-          messageId,
+          content.contentUrl,
           item.moKey,
+          contentIndex,
         ),
+    )
+    statements.push(
+      db
+        .prepare(
+          `UPDATE message_attachments
+           SET content_url = ?
+           WHERE message_id = (
+             SELECT id FROM messages WHERE mo_key = ?
+           )
+             AND content_index = ?
+             AND download_status = '대기'`,
+        )
+        .bind(content.contentUrl, item.moKey, contentIndex),
     )
   }
 
@@ -656,7 +679,19 @@ async function processItem(
   }
 }
 
-export function createMoWebhookHandler(clock: Clock = Date.now): RouteHandler {
+type AttachmentDownloadStarter = (
+  env: Env,
+  ctx?: ExecutionContext,
+) => Promise<unknown>
+
+const startAttachmentDownloads: AttachmentDownloadStarter = (env, ctx) =>
+  runAttachmentDownloads(env, {}, ctx)
+
+export function createMoWebhookHandler(
+  clock: Clock = Date.now,
+  downloadAttachments: AttachmentDownloadStarter =
+    startAttachmentDownloads,
+): RouteHandler {
   return async (request, env, params, ctx) => {
     const expectedSecret = env.LGU_MO_WEBHOOK_SECRET
     const candidateSecret = params.secret ?? ''
@@ -770,6 +805,28 @@ export function createMoWebhookHandler(clock: Clock = Date.now): RouteHandler {
           error: failureText(cause),
         })
         return retryResponse()
+      }
+    }
+
+    if (
+      ctx !== undefined &&
+      prepared.some(({ item }) => item.contentInfoLst.length > 0)
+    ) {
+      try {
+        ctx.waitUntil(
+          Promise.resolve()
+            .then(() => downloadAttachments(env, ctx))
+            .catch((cause) => {
+              console.error('MO 첨부 즉시 다운로드에 실패했습니다.', {
+                error: failureText(cause),
+              })
+            }),
+        )
+      } catch (cause) {
+        // 다운로드 시작 실패는 이미 커밋된 MO의 성공 응답을 막지 않는다.
+        console.error('MO 첨부 다운로드 예약에 실패했습니다.', {
+          error: failureText(cause),
+        })
       }
     }
 

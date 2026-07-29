@@ -489,7 +489,6 @@ npm run build     # 타입체크 + 빌드
 
 | 항목 | 남긴 슬라이스 |
 |---|---|
-| 복수 첨부의 `GET /mo/v1/file/{moKey}` 매핑 계약 (지금은 건너뛴다) | X4 |
 | 네이버웍스 실제 테넌트의 discovery `issuer`·JWKS | B5 |
 | LGU+ QA 발송·리포트 실연동 | B17·B19 |
 | 사무소 기본 발신번호(`office_channels`) 실제 값 | B14 |

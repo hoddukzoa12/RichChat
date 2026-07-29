@@ -1,31 +1,27 @@
 import { changes } from './db/d1'
 import { applyDeliveryReports } from './db/delivery'
 import { publish } from './db/events'
-import { fetchLgu } from './lgu/access'
 import type { LguFetch } from './lgu/protocol'
 import {
   queryLguDeliveryReports,
   type PendingReportQuery,
 } from './lgu/report'
-import {
-  getLguAccessToken,
-  type LguTokenEnv,
-  type LguTokenProvider,
-} from './lgu/token'
+import type { LguTokenProvider } from './lgu/token'
 import { executeBatchAndBroadcast } from './realtime/broadcast'
 
 export const LGU_ATTACHMENT_RECOVERY_WINDOW_MS =
-  7 * 24 * 60 * 60 * 1_000
+  24 * 60 * 60 * 1_000
 export const ATTACHMENT_DOWNLOAD_LEASE_MS = 10 * 60 * 1_000
 export const REPORT_RECONCILIATION_AGE_MS = 2 * 60 * 1_000
 
 const MAX_ATTACHMENTS_PER_RUN = 100
 const DEFINITIVE_MISSING_STATUSES = new Set([404, 410])
 const MAX_REPORTS_PER_REQUEST = 10
+const CLOUDFRONT_HOST_PATTERN = /^[a-z0-9]+\.cloudfront\.net$/u
 
-interface AttachmentDownloadEnv extends LguTokenEnv {
+interface AttachmentDownloadEnv {
+  DB: D1Database
   ATTACHMENTS: R2Bucket
-  LGU_CONTENT_HOST: string
   OFFICE_HUB: Env['OFFICE_HUB']
 }
 
@@ -34,16 +30,12 @@ interface ClaimedAttachment {
   office_id: string
   message_id: string
   conversation_id: string
-  mo_key: string
   original_filename: string | null
+  byte_size: number | null
   mime_type: string | null
   created_at: number
   content_index: number
-}
-
-interface AmbiguousMessage {
-  message_id: string
-  attachment_count: number
+  content_url: string
 }
 
 interface PendingReportRow {
@@ -68,7 +60,6 @@ interface AttachmentDownloadOptions {
   fetch?: LguFetch
   logger?: AttachmentLogger
   now?: () => number
-  tokenProvider?: LguTokenProvider
 }
 
 export interface AttachmentDownloadSummary {
@@ -76,7 +67,6 @@ export interface AttachmentDownloadSummary {
   completed: number
   failed: number
   deferred: number
-  ambiguousMessages: number
 }
 
 export interface DeliveryReportReconciliationSummary {
@@ -129,7 +119,6 @@ async function claimNextAttachment(
   leaseUntil: number
 } | null> {
   const leaseUntil = now + ATTACHMENT_DOWNLOAD_LEASE_MS
-  const expiresBefore = now - LGU_ATTACHMENT_RECOVERY_WINDOW_MS
   const result = await db
     .prepare(
       `UPDATE message_attachments
@@ -141,14 +130,7 @@ async function claimNextAttachment(
          WHERE candidate.download_status = '대기'
            AND candidate.download_lease_until <= ?
            AND messages.mo_key IS NOT NULL
-           AND (
-             candidate.created_at <= ?
-             OR (
-               SELECT COUNT(*)
-               FROM message_attachments AS sibling
-               WHERE sibling.message_id = candidate.message_id
-             ) = 1
-           )
+           AND candidate.content_url IS NOT NULL
          ORDER BY candidate.created_at, candidate.id
          LIMIT 1
        )
@@ -163,17 +145,14 @@ async function claimNextAttachment(
            FROM messages
            WHERE messages.id = message_attachments.message_id
          ) AS conversation_id,
-         (
-           SELECT mo_key
-           FROM messages
-           WHERE messages.id = message_attachments.message_id
-         ) AS mo_key,
          original_filename,
+         byte_size,
          mime_type,
          created_at,
-         content_index`,
+         content_index,
+         content_url`,
     )
-    .bind(leaseUntil, now, expiresBefore, now)
+    .bind(leaseUntil, now, now)
     .run<ClaimedAttachment>()
 
   if (changes(result) !== 1) {
@@ -188,38 +167,11 @@ async function claimNextAttachment(
   return { attachment, leaseUntil }
 }
 
-async function findAmbiguousMessages(
-  db: D1Database,
-  now: number,
-): Promise<AmbiguousMessage[]> {
-  const expiresBefore = now - LGU_ATTACHMENT_RECOVERY_WINDOW_MS
-  const result = await db
-    .prepare(
-      `SELECT
-         pending.message_id,
-         (
-           SELECT COUNT(*)
-           FROM message_attachments AS sibling
-           WHERE sibling.message_id = pending.message_id
-         ) AS attachment_count
-       FROM message_attachments AS pending
-       WHERE pending.download_status = '대기'
-         AND pending.created_at > ?
-       GROUP BY pending.message_id
-       HAVING attachment_count > 1
-       ORDER BY pending.message_id`,
-    )
-    .bind(expiresBefore)
-    .all<AmbiguousMessage>()
-
-  return result.results
-}
-
 async function finalizeFailure(
   env: AttachmentDownloadEnv,
   attachment: ClaimedAttachment,
   leaseUntil: number,
-  reason: 'expired' | 'missing',
+  reason: 'expired' | 'invalid_url' | 'missing',
   now: number,
   ctx?: ExecutionContext,
 ): Promise<boolean> {
@@ -338,13 +290,25 @@ async function finalizeSuccess(
   return changes(results[results.length - 1]) === 1
 }
 
-function requiredContentHost(env: AttachmentDownloadEnv): string {
-  const host = env.LGU_CONTENT_HOST
-  if (typeof host !== 'string' || host.trim() === '') {
-    throw new Error('LGU_CONTENT_HOST가 설정되지 않았습니다.')
+function validatedContentUrl(value: string): URL | null {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
   }
 
-  return host
+  if (
+    url.protocol !== 'https:' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.port !== '' ||
+    !CLOUDFRONT_HOST_PATTERN.test(url.hostname)
+  ) {
+    return null
+  }
+
+  return url
 }
 
 async function processAttachment(
@@ -354,7 +318,7 @@ async function processAttachment(
     leaseUntil: number
   },
   options: Required<
-    Pick<AttachmentDownloadOptions, 'fetch' | 'logger' | 'now' | 'tokenProvider'>
+    Pick<AttachmentDownloadOptions, 'fetch' | 'logger' | 'now'>
   >,
   ctx?: ExecutionContext,
 ): Promise<AttachmentOutcome> {
@@ -380,28 +344,44 @@ async function processAttachment(
   try {
     const existing = await env.ATTACHMENTS.head(r2Key)
     if (existing !== null) {
-      const completed = await finalizeSuccess(
+      if (
+        attachment.byte_size !== null &&
+        existing.size !== attachment.byte_size
+      ) {
+        await env.ATTACHMENTS.delete(r2Key)
+      } else {
+        const completed = await finalizeSuccess(
+          env,
+          attachment,
+          leaseUntil,
+          existing,
+          attachment.mime_type ?? 'application/octet-stream',
+          options.now(),
+          ctx,
+        )
+        return completed ? 'completed' : 'deferred'
+      }
+    }
+
+    const url = validatedContentUrl(attachment.content_url)
+    if (url === null) {
+      options.logger.warn('허용하지 않는 첨부 URL을 거부합니다.', {
+        attachmentId: attachment.id,
+      })
+      const failed = await finalizeFailure(
         env,
         attachment,
         leaseUntil,
-        existing,
-        attachment.mime_type ?? 'application/octet-stream',
+        'invalid_url',
         options.now(),
         ctx,
       )
-      return completed ? 'completed' : 'deferred'
+      return failed ? 'failed' : 'deferred'
     }
 
-    const token = await options.tokenProvider(env, attachment.office_id)
-    const url = new URL(
-      `/mo/v1/file/${encodeURIComponent(attachment.mo_key)}`,
-      `https://${requiredContentHost(env)}`,
-    )
-    const response = await fetchLgu(env, options.fetch, url, {
+    const response = await options.fetch(url, {
       method: 'GET',
-      headers: {
-        authorization: `Bearer ${token}`,
-      },
+      redirect: 'manual',
     })
 
     if (!response.ok) {
@@ -439,6 +419,18 @@ async function processAttachment(
     const object = await env.ATTACHMENTS.put(r2Key, response.body, {
       httpMetadata: { contentType },
     })
+    if (
+      attachment.byte_size !== null &&
+      object.size !== attachment.byte_size
+    ) {
+      await env.ATTACHMENTS.delete(r2Key)
+      options.logger.warn('첨부 크기가 웹훅 메타데이터와 일치하지 않습니다.', {
+        attachmentId: attachment.id,
+        actualSize: object.size,
+        expectedSize: attachment.byte_size,
+      })
+      return 'deferred'
+    }
     const completed = await finalizeSuccess(
       env,
       attachment,
@@ -469,21 +461,6 @@ export async function runAttachmentDownloads(
     fetch: options.fetch ?? fetch,
     logger: options.logger ?? console,
     now: options.now ?? Date.now,
-    tokenProvider: options.tokenProvider ?? getLguAccessToken,
-  }
-  const currentTime = resolvedOptions.now()
-  const ambiguousMessages = await findAmbiguousMessages(
-    env.DB,
-    currentTime,
-  )
-  for (const message of ambiguousMessages) {
-    resolvedOptions.logger.warn(
-      '복수 첨부 MO는 재조회 응답과의 매핑을 확정할 수 없어 건너뜁니다.',
-      {
-        messageId: message.message_id,
-        attachmentCount: message.attachment_count,
-      },
-    )
   }
 
   const summary: AttachmentDownloadSummary = {
@@ -491,7 +468,6 @@ export async function runAttachmentDownloads(
     completed: 0,
     failed: 0,
     deferred: 0,
-    ambiguousMessages: ambiguousMessages.length,
   }
 
   for (
