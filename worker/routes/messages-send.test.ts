@@ -20,7 +20,7 @@ declare module 'cloudflare:test' {
 }
 
 const ORIGIN = 'https://example.com'
-const LGU_SEND_ORIGIN = 'https://api-send.msghub-qa.uplus.co.kr'
+const LGU_SEND_ORIGIN = `https://${env.LGU_SEND_HOST}`
 const DEFAULT_CALLBACK = '0255550000'
 
 interface Fixture {

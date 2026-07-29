@@ -22,6 +22,9 @@ export default defineWorkersConfig(async () => {
             bindings: {
               DEV_LOGIN_ENABLED: 'true',
               LGU_ENV: 'local',
+              LGU_AUTH_HOST: 'lgu-auth.test.invalid',
+              LGU_SEND_HOST: 'lgu-send.test.invalid',
+              LGU_CONTENT_HOST: 'lgu-content.test.invalid',
               LGU_MO_WEBHOOK_SECRET: 'test-mo-webhook-secret',
               LGU_REPORT_WEBHOOK_SECRET: 'test-report-webhook-secret',
               WORKS_CLIENT_ID: 'test-works-client-id',

@@ -19,10 +19,10 @@
   },
   "vars": {
     "DEV_LOGIN_ENABLED": "false",
-    "LGU_ENV": "qa",
-    "LGU_AUTH_HOST": "api.msghub-qa.uplus.co.kr",
-    "LGU_SEND_HOST": "api-send.msghub-qa.uplus.co.kr",
-    "LGU_CONTENT_HOST": "mnt-api.msghub-qa.uplus.co.kr",
+    "LGU_ENV": "production",
+    "LGU_AUTH_HOST": "api.msghub.uplus.co.kr",
+    "LGU_SEND_HOST": "api-send.msghub.uplus.co.kr",
+    "LGU_CONTENT_HOST": "mnt-api.msghub.uplus.co.kr",
     "WORKS_CLIENT_ID": "V6MgQwNfZoK8fnESzNZy",
     "WORKS_ISSUER": "https://auth.worksmobile.com",
     "WORKS_TENANT_ID": "300285491"
