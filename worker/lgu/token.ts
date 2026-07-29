@@ -135,6 +135,10 @@ export interface LguTokenEnv extends LguAccessEnv {
   LGU_API_PASSWORD: string
 }
 
+// 운영 실측 응답은 { code, message, data: { token, refreshToken } }이며
+// 문서의 최상위 accessToken과 다르므로 data.token을 읽는다.
+// refreshToken은 발급 IP에 묶이지만 Workers는 고정 egress IP가 없어 다른
+// colo에서 간헐적으로 실패할 수 있으므로 저장하거나 사용하지 않는다.
 interface AuthResponse {
   code: string
   data?: unknown
