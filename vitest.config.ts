@@ -29,6 +29,8 @@ export default defineWorkersConfig(async () => {
               LGU_CONTENT_HOST: 'lgu-content.test.invalid',
               LGU_MO_WEBHOOK_SECRET: 'test-mo-webhook-secret',
               LGU_REPORT_WEBHOOK_SECRET: 'test-report-webhook-secret',
+              SMS_GATEWAY_SIGNING_KEY:
+                'test-sms-gateway-signing-key',
               WORKS_CLIENT_ID: 'test-works-client-id',
               WORKS_CLIENT_SECRET: 'test-works-client-secret',
               WORKS_TENANT_ID: 'test-works-tenant-id',

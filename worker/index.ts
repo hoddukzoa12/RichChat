@@ -11,6 +11,7 @@ import { routes as eventsRoutes } from './routes/events'
 import { routes as healthRoutes } from './routes/health'
 import { routes as hooksMoRoutes } from './routes/hooks-mo'
 import { routes as hooksReportRoutes } from './routes/hooks-report'
+import { routes as hooksSmsGatewayRoutes } from './routes/hooks-sms-gateway'
 import { routes as meRoutes } from './routes/me'
 import { routes as messageAttachmentUploadRoutes } from './routes/message-attachments-upload'
 import { routes as messagesSendRoutes } from './routes/messages-send'
@@ -41,6 +42,7 @@ const routes: Route[] = [
   ...messagesSendRoutes,
   ...hooksMoRoutes,
   ...hooksReportRoutes,
+  ...hooksSmsGatewayRoutes,
   ...eventsRoutes,
   ...realtimeRoutes,
 ]

@@ -77,6 +77,11 @@ LGU_MO_WEBHOOK_SECRET=
 # 미설정 시: LGU+ 발송 결과 웹훅을 인증해 수신할 수 없어 메시지 도달 상태를 갱신할 수 없다.
 LGU_REPORT_WEBHOOK_SECRET=
 
+# 발급: Android SMS Gateway 앱이 처음 웹훅을 보낼 때 생성한다.
+# 확인: 업무폰 앱의 Settings > Webhooks > Signing Key에서 확인한다.
+# 미설정 시: `sms:received` 웹훅의 HMAC 서명을 검증할 수 없어 업무폰 문자 수신이 동작하지 않는다.
+SMS_GATEWAY_SIGNING_KEY=
+
 # 발급: 네이버웍스가 앱을 등록할 때 발급한다.
 # 확인: 네이버웍스 Developer Console > 앱 목록 > 대상 앱의 Client Secret에서 확인한다.
 # 미설정 시: OIDC 인가 코드를 토큰으로 교환할 수 없어 네이버웍스 로그인이 완료되지 않는다.

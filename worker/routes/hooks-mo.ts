@@ -1,12 +1,14 @@
 import type { SendChannel } from '../../shared/domain'
 import { SMS_MAX_BYTES, smsByteLength } from '../../shared/sms'
-import { changes } from '../db/d1'
-import { publish } from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route, RouteHandler } from '../http/router'
-import { createId, type Clock } from '../lib/ids'
-import { executeBatchAndBroadcast } from '../realtime/broadcast'
+import {
+  storeInboundMessage,
+  type InboundAttachment,
+} from '../inbound-message'
+import type { Clock } from '../lib/ids'
+import { normalizeKoreanPhoneValue } from '../lib/phone'
 import { runAttachmentDownloads } from '../scheduled'
 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1_000
@@ -230,13 +232,9 @@ export function parseMoRecvDt(value: string): number | null {
 }
 
 export function normalizeKoreanPhone(value: string): string {
-  const digits = value.replace(/[^\d]/g, '')
-  if (/^0\d{8,10}$/.test(digits)) {
-    return `+82${digits.slice(1)}`
-  }
-  if (/^82\d{8,10}$/.test(digits)) {
-    return `+${digits}`
-  }
+  const normalized = normalizeKoreanPhoneValue(value)
+  if (normalized !== null) return normalized
+
   throw new PayloadValidationError(
     '국내 전화번호 형식이 올바르지 않습니다.',
   )
@@ -438,18 +436,14 @@ async function quarantineDeterministicFailure(
   return attempts >= QUARANTINE_ATTEMPTS
 }
 
-async function processItem(
+async function storePreparedItem(
   env: Env,
   prepared: PreparedMo,
   receivedAt: number,
   ctx?: ExecutionContext,
 ): Promise<void> {
   const { item, occurredAt, channel, phoneE164 } = prepared
-  const db = env.DB
-  const office = await findOffice(db)
-  const customerId = createId()
-  const conversationId = createId()
-  const messageId = createId()
+  const office = await findOffice(env.DB)
 
   console.info('LGU+ MO 수신 채널을 저장 채널로 매핑합니다.', {
     moKey: item.moKey,
@@ -464,219 +458,33 @@ async function processItem(
     })
   }
 
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `INSERT INTO customers (
-           id, office_id, phone_e164, name, created_at, updated_at
-         )
-         SELECT ?, ?, ?, ?, ?, ?
-         WHERE NOT EXISTS (
-           SELECT 1 FROM messages WHERE mo_key = ?
-         )
-         ON CONFLICT(office_id, phone_e164) DO NOTHING`,
-      )
-      .bind(
-        customerId,
-        office.id,
-        phoneE164,
-        phoneE164,
-        receivedAt,
-        receivedAt,
-        item.moKey,
-      ),
-    db
-      .prepare(
-        `INSERT INTO conversations (
-           id, office_id, customer_id, status, last_message_id,
-           last_message_at, created_at, updated_at
-         )
-         SELECT ?, ?, id, '미처리', NULL, NULL, ?, ?
-         FROM customers
-         WHERE office_id = ?
-           AND phone_e164 = ?
-           AND NOT EXISTS (
-             SELECT 1 FROM messages WHERE mo_key = ?
-           )
-         ON CONFLICT(office_id, customer_id) DO NOTHING`,
-      )
-      .bind(
-        conversationId,
-        office.id,
-        receivedAt,
-        receivedAt,
-        office.id,
-        phoneE164,
-        item.moKey,
-      ),
-    db
-      .prepare(
-        `INSERT INTO messages (
-           id, office_id, conversation_id, direction, channel, title, body,
-           sender_user_id, occurred_at, created_at, mo_key, client_key,
-           msg_key, delivery_status
-         )
-         SELECT
-           ?, ?, id, 'in', ?, NULL, ?, NULL, ?, ?, ?, NULL, NULL, '수신'
-         FROM conversations
-         WHERE office_id = ?
-           AND customer_id = (
-             SELECT id FROM customers
-             WHERE office_id = ? AND phone_e164 = ?
-           )
-         ON CONFLICT(mo_key) WHERE mo_key IS NOT NULL DO NOTHING`,
-      )
-      .bind(
-        messageId,
-        office.id,
-        channel,
-        item.moMsg,
-        occurredAt,
-        receivedAt,
-        item.moKey,
-        office.id,
-        office.id,
-        phoneE164,
-      ),
-  ]
-  const messageInsertIndex = statements.length - 1
-
-  for (const [contentIndex, content] of item.contentInfoLst.entries()) {
-    statements.push(
-      db
-        .prepare(
-          `INSERT INTO message_attachments (
-             id, office_id, message_id, original_filename, byte_size,
-             mime_type, r2_key, download_status, created_at, content_index,
-             content_url
-           )
-           SELECT ?, ?, messages.id, ?, ?, ?, NULL, '대기', ?, ?, ?
-           FROM messages
-           WHERE messages.mo_key = ?
-             AND NOT EXISTS (
-               SELECT 1
-               FROM message_attachments
-               WHERE message_id = messages.id
-                 AND content_index = ?
-             )`,
-        )
-        .bind(
-          createId(),
-          office.id,
-          originalFilename(content),
-          content.contentSize,
-          mimeType(content),
-          receivedAt,
-          contentIndex,
-          content.contentUrl,
-          item.moKey,
-          contentIndex,
-        ),
-    )
-    statements.push(
-      db
-        .prepare(
-          `UPDATE message_attachments
-           SET content_url = ?
-           WHERE message_id = (
-             SELECT id FROM messages WHERE mo_key = ?
-           )
-             AND content_index = ?
-             AND download_status = '대기'`,
-        )
-        .bind(content.contentUrl, item.moKey, contentIndex),
-    )
-  }
-
-  const publication = publish(
-    db,
+  const attachments: InboundAttachment[] = item.contentInfoLst.map(
+    (content) => ({
+      originalFilename: originalFilename(content),
+      byteSize: content.contentSize,
+      mimeType: mimeType(content),
+      contentUrl: content.contentUrl,
+    }),
+  )
+  await storeInboundMessage(
+    env,
     {
       officeId: office.id,
-      type: 'message.created',
-      entity: 'message',
-      entityId: messageId,
-      actorKind: 'customer',
-      payload: {
-        direction: 'in',
-        channel,
+      customerPhoneE164: phoneE164,
+      channel,
+      title: null,
+      body: item.moMsg,
+      occurredAt,
+      receivedAt,
+      idempotencyKey: item.moKey,
+      attachments,
+      eventMetadata: {
         moType: item.moType,
         moNumber: item.moNumber,
       },
-      createdAt: receivedAt,
     },
-    {
-      query: 'SELECT 1 FROM messages WHERE id = ? AND mo_key = ?',
-      bindings: [messageId, item.moKey],
-    },
-  )
-  statements.push(
-    db
-      .prepare(
-        `WITH incoming AS (
-           SELECT id, conversation_id, occurred_at
-           FROM messages
-           WHERE id = ? AND mo_key = ?
-         ),
-         projection AS (
-           SELECT
-             incoming.id,
-             incoming.conversation_id,
-             incoming.occurred_at,
-             CASE
-               WHEN conversations.last_message_at IS NULL
-                 OR incoming.occurred_at > conversations.last_message_at
-                 OR (
-                   incoming.occurred_at = conversations.last_message_at
-                   AND incoming.id > conversations.last_message_id
-                 )
-               THEN 1
-               ELSE 0
-             END AS is_latest
-           FROM incoming
-           JOIN conversations
-             ON conversations.id = incoming.conversation_id
-         )
-         UPDATE conversations
-         SET
-           last_message_id = CASE
-             WHEN (SELECT is_latest FROM projection) = 1
-             THEN (SELECT id FROM projection)
-             ELSE last_message_id
-           END,
-           last_message_at = CASE
-             WHEN (SELECT is_latest FROM projection) = 1
-             THEN (SELECT occurred_at FROM projection)
-             ELSE last_message_at
-           END,
-           inbound_count = inbound_count + 1,
-           status = CASE WHEN status = '완료' THEN '미처리' ELSE status END,
-           version = version + 1,
-           updated_at = ?
-         WHERE id = (SELECT conversation_id FROM projection)`,
-      )
-      .bind(messageId, item.moKey, receivedAt),
-    ...publication,
-    db
-      .prepare('DELETE FROM mo_failures WHERE mo_key = ?')
-      .bind(item.moKey),
-  )
-
-  const results = await executeBatchAndBroadcast(
-    db,
-    statements,
-    [publication],
     ctx,
-    env,
   )
-  if (changes(results[messageInsertIndex]) === 1) return
-
-  const duplicate = await db
-    .prepare('SELECT id FROM messages WHERE mo_key = ?')
-    .bind(item.moKey)
-    .first<{ id: string }>()
-  if (!duplicate) {
-    throw new Error('MO 메시지가 커밋되지 않았습니다.')
-  }
 }
 
 type AttachmentDownloadStarter = (
@@ -797,7 +605,7 @@ export function createMoWebhookHandler(
 
     for (const item of prepared) {
       try {
-        await processItem(env, item, receivedAt, ctx)
+        await storePreparedItem(env, item, receivedAt, ctx)
       } catch (cause) {
         // 검증 뒤의 예외는 모두 일시적이다. LGU+ 재전송을 멈추면 안 된다.
         console.error('LGU+ MO D1 커밋에 실패했습니다.', {
