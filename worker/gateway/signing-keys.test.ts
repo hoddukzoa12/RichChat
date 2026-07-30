@@ -4,6 +4,7 @@ import { createSmsGatewayWebhookHandler } from '../routes/hooks-sms-gateway'
 import {
   legacySigningKeysForWebhook,
   parseSigningKeys,
+  signingKeyDeployTarget,
   signingKeyForDevice,
 } from './signing-keys'
 
@@ -114,6 +115,59 @@ describe('SMS Gateway signing key configuration', () => {
     expect(
       await authenticatedEvent(raw, 'device-2', 'shared-key'),
     ).toHaveProperty('status', 204)
+  })
+
+  it('treats a bare default as the shared key', () => {
+    // `overrides`를 생략한 형식이 레거시 맵으로 새면 실제 기기의 키가
+    // 사라져 수신이 전부 401이 된다. 운영에서 실제로 그렇게 끊겼다.
+    const raw = JSON.stringify({ default: 'shared-key' })
+    const parsed = parseSigningKeys(raw)
+
+    expect(parsed?.kind).toBe('shared')
+    expect(
+      parsed && signingKeyForDevice(parsed, 'device-1'),
+    ).toBe('shared-key')
+    expect(legacySigningKeysForWebhook(raw, 'device-1')).toBe(
+      JSON.stringify({ 'device-1': 'shared-key' }),
+    )
+  })
+
+  it('authenticates a device that no key names', async () => {
+    expect(
+      await authenticatedEvent(
+        JSON.stringify({ default: 'shared-key' }),
+        'device-never-listed',
+        'shared-key',
+      ),
+    ).toHaveProperty('status', 204)
+  })
+
+  it('separates an unset key from an unreadable one', () => {
+    expect(signingKeyDeployTarget('')).toEqual({
+      deployable: false,
+      block: '미설정',
+    })
+    expect(signingKeyDeployTarget(undefined)).toEqual({
+      deployable: false,
+      block: '미설정',
+    })
+    expect(signingKeyDeployTarget('{"default":')).toEqual({
+      deployable: false,
+      block: '형식 오류',
+    })
+    expect(
+      signingKeyDeployTarget(
+        JSON.stringify({ default: 'shared-key', overrides: 'nope' }),
+      ),
+    ).toEqual({ deployable: false, block: '형식 오류' })
+    expect(
+      signingKeyDeployTarget(
+        JSON.stringify({ 'device-1': 'legacy-key' }),
+      ),
+    ).toEqual({ deployable: false, block: '기기별 형식' })
+    expect(
+      signingKeyDeployTarget(JSON.stringify({ default: 'shared-key' })),
+    ).toEqual({ deployable: true, defaultKey: 'shared-key' })
   })
 
   it('authenticates an overridden device only with its override', async () => {

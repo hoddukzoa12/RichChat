@@ -41,8 +41,29 @@ function signingKeyEntries(
   return new Map(entries as Array<[string, string]>)
 }
 
+function hasSigningKeysValue(raw: unknown): raw is string {
+  return typeof raw === 'string' && raw.trim() !== ''
+}
+
+/**
+ * 공통 키 형식인가. `overrides`는 **생략할 수 있다** — 기기별 예외가 없는
+ * 사무소가 흔하고, 요구하면 `{"default":"<키>"}`가 기기 이름이 `default`인
+ * 레거시 맵으로 조용히 해석된다.
+ *
+ * 그래서 판별을 `overrides`의 유무가 아니라 **허용 키 집합**으로 한다.
+ * `default` 말고 다른 이름이 하나라도 있으면 레거시 맵이다.
+ */
+function isSharedShape(
+  parsed: Record<string, unknown>,
+): parsed is Record<string, unknown> & { default: string } {
+  return (
+    typeof parsed.default === 'string' &&
+    Object.keys(parsed).every((key) => SHARED_KEYS.has(key))
+  )
+}
+
 export function parseSigningKeys(raw: unknown): SigningKeys | null {
-  if (typeof raw !== 'string' || raw.trim() === '') return null
+  if (!hasSigningKeysValue(raw)) return null
 
   let parsed: unknown
   try {
@@ -52,21 +73,12 @@ export function parseSigningKeys(raw: unknown): SigningKeys | null {
   }
   if (!isRecord(parsed)) return null
 
-  if (
-    typeof parsed.default !== 'string' ||
-    !isRecord(parsed.overrides)
-  ) {
+  if (!isSharedShape(parsed)) {
     const deviceKeys = signingKeyEntries(parsed)
     return deviceKeys ? { kind: 'legacy', deviceKeys } : null
   }
   const defaultKey = parsed.default
-
-  if (
-    Object.keys(parsed).some((key) => !SHARED_KEYS.has(key)) ||
-    defaultKey.length === 0
-  ) {
-    return null
-  }
+  if (defaultKey.length === 0) return null
 
   const overrides = signingKeyEntries(parsed.overrides ?? {})
   return overrides
@@ -76,6 +88,36 @@ export function parseSigningKeys(raw: unknown): SigningKeys | null {
         overrides,
       }
     : null
+}
+
+export type SigningKeyDeployBlock =
+  | '미설정'
+  | '형식 오류'
+  | '기기별 형식'
+
+export type SigningKeyDeployTarget =
+  | { deployable: true; defaultKey: string }
+  | { deployable: false; block: SigningKeyDeployBlock }
+
+/**
+ * 공통 키를 배포할 수 있는지와, 막혔다면 그 이유. 이유를 하나로 뭉개면
+ * **값이 들어 있는데도 "설정되지 않았습니다"가 떠서** 진단이 엉뚱한 곳으로 간다.
+ */
+export function signingKeyDeployTarget(
+  raw: unknown,
+): SigningKeyDeployTarget {
+  if (!hasSigningKeysValue(raw)) {
+    return { deployable: false, block: '미설정' }
+  }
+
+  const configuration = parseSigningKeys(raw)
+  if (!configuration) {
+    return { deployable: false, block: '형식 오류' }
+  }
+  if (configuration.kind === 'legacy') {
+    return { deployable: false, block: '기기별 형식' }
+  }
+  return { deployable: true, defaultKey: configuration.defaultKey }
 }
 
 export function signingKeyForDevice(

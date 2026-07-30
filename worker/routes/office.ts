@@ -46,7 +46,10 @@ import {
   gatewayAdminClient,
   type GatewayAdminClient,
 } from '../gateway/admin'
-import { parseSigningKeys } from '../gateway/signing-keys'
+import {
+  signingKeyDeployTarget,
+  type SigningKeyDeployBlock,
+} from '../gateway/signing-keys'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route } from '../http/router'
@@ -163,6 +166,16 @@ const ENROLLMENT_CODE_LIMIT = 3
 const ENROLLMENT_CODE_WINDOW_MS = 5 * 60 * 1_000
 const SIGNING_KEY_DEPLOYED_MESSAGE =
   '계정 설정을 갱신했습니다. 업무폰 앱의 주기 동기화가 끝난 뒤 반영되며 즉시 확인할 수 없습니다.'
+const SIGNING_KEY_FORMAT_HINT =
+  '`{"default":"<64자리 hex>"}` 형식으로 SMS_GATEWAY_SIGNING_KEYS를 설정하세요.'
+const SIGNING_KEY_DEPLOY_BLOCKED_MESSAGE: Record<
+  SigningKeyDeployBlock,
+  string
+> = {
+  미설정: `공통 SMS Gateway 서명키가 설정되지 않았습니다. ${SIGNING_KEY_FORMAT_HINT}`,
+  '형식 오류': `SMS Gateway 서명키를 해석할 수 없습니다. ${SIGNING_KEY_FORMAT_HINT}`,
+  '기기별 형식': `SMS Gateway 서명키가 기기별 키 목록이라 공통 키를 배포할 수 없습니다. ${SIGNING_KEY_FORMAT_HINT}`,
+}
 
 const PERMISSION_ROLES = PERMISSIONS.reduce<
   Record<Permission, readonly Role[]>
@@ -1137,21 +1150,18 @@ export function createOfficeRoutes(
       return error('FORBIDDEN', '업무폰 서명키를 배포할 수 없습니다.')
     }
 
-    const signingKeys = parseSigningKeys(
+    const target = signingKeyDeployTarget(
       env.SMS_GATEWAY_SIGNING_KEYS,
     )
-    if (!signingKeys || signingKeys.kind !== 'shared') {
+    if (!target.deployable) {
       return error(
         'CONFLICT',
-        '공통 SMS Gateway 서명키가 설정되지 않았습니다.',
+        SIGNING_KEY_DEPLOY_BLOCKED_MESSAGE[target.block],
       )
     }
 
     try {
-      await gatewayAdmin.deploySigningKey(
-        env,
-        signingKeys.defaultKey,
-      )
+      await gatewayAdmin.deploySigningKey(env, target.defaultKey)
       return json({
         message: SIGNING_KEY_DEPLOYED_MESSAGE,
       } satisfies OfficePhoneSigningKeyDeployResponse)
