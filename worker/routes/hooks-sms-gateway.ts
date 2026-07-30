@@ -119,6 +119,11 @@ interface StoredMmsAttachmentRow {
   r2_key: string | null
 }
 
+interface MmsGenerationInspection {
+  expectedFingerprint: string | null
+  sameGeneration: boolean
+}
+
 type PutMmsAttachment = (
   bucket: R2Bucket,
   key: string,
@@ -335,7 +340,8 @@ function normalizedBase64(value: string): string | null {
 }
 
 function decodedBase64Size(value: string | null): number | null {
-  if (value === null || value === '') return 0
+  if (value === null) return null
+  if (value === '') return 0
   const normalized = normalizedBase64(value)
   if (normalized === null) return null
   const padding = normalized.endsWith('==')
@@ -347,7 +353,8 @@ function decodedBase64Size(value: string | null): number | null {
 }
 
 function decodeBase64(value: string | null): Uint8Array | null {
-  if (value === null || value === '') return new Uint8Array()
+  if (value === null) return null
+  if (value === '') return new Uint8Array()
   const normalized = normalizedBase64(value)
   if (normalized === null) return null
 
@@ -393,10 +400,7 @@ function parseMmsAttachments(
       continue
     }
 
-    const bytes =
-      rawData === null && (declaredSize ?? 0) > 0
-        ? null
-        : decodeBase64(rawData)
+    const bytes = decodeBase64(rawData)
     const contentType =
       optionalString(rawAttachment.contentType) ??
       'application/octet-stream'
@@ -678,12 +682,14 @@ async function quarantineOversizedMms(
   idempotencyKey: string,
   contentIndexes: readonly number[],
   rawBody: string,
+  digest: string | undefined,
   now: number,
 ): Promise<void> {
   if (contentIndexes.length === 0) return
 
-  const digest = await rawBodyDigest(rawBody)
-  const r2Key = `quarantine/sms-gateway-mms/${digest}.json`
+  const quarantineDigest = digest ?? (await rawBodyDigest(rawBody))
+  const r2Key =
+    `quarantine/sms-gateway-mms/${quarantineDigest}.json`
   await env.ATTACHMENTS.put(r2Key, rawBody, {
     httpMetadata: { contentType: 'application/json' },
   })
@@ -694,7 +700,7 @@ async function quarantineOversizedMms(
     failureKey:
       `sms-gateway-mms-oversize/${encodeURIComponent(idempotencyKey)}`,
     now,
-    rawBody: JSON.stringify({ r2Key, sha256: digest }),
+    rawBody: JSON.stringify({ r2Key, sha256: quarantineDigest }),
   })
 }
 
@@ -703,25 +709,36 @@ function equalBytes(first: Uint8Array, second: Uint8Array): boolean {
   return first.every((byte, index) => byte === second[index])
 }
 
-async function isSameCompletedMmsGeneration(
+async function inspectMmsGeneration(
   env: Pick<Env, 'ATTACHMENTS' | 'DB'>,
   idempotencyKey: string,
+  contentFingerprint: string,
   body: string,
   attachments: readonly MmsAttachmentPayload[],
-): Promise<boolean> {
+): Promise<MmsGenerationInspection> {
   const message = await env.DB.prepare(
-    `SELECT id, body, channel
+    `SELECT id, body, channel, inbound_fingerprint
      FROM messages
      WHERE mo_key = ?`,
   )
     .bind(idempotencyKey)
-    .first<{ body: string; channel: string; id: string }>()
+    .first<{
+      body: string
+      channel: string
+      id: string
+      inbound_fingerprint: string | null
+    }>()
+  if (message === null) {
+    return { expectedFingerprint: null, sameGeneration: false }
+  }
+
+  const expectedFingerprint = message.inbound_fingerprint
   if (
-    message === null ||
+    expectedFingerprint !== contentFingerprint ||
     message.channel !== 'MMS' ||
     (body !== '' && message.body !== body)
   ) {
-    return false
+    return { expectedFingerprint, sameGeneration: false }
   }
 
   const rows = (
@@ -740,7 +757,9 @@ async function isSameCompletedMmsGeneration(
       .bind(message.id)
       .all<StoredMmsAttachmentRow>()
   ).results
-  if (rows.length !== attachments.length) return false
+  if (rows.length !== attachments.length) {
+    return { expectedFingerprint, sameGeneration: false }
+  }
 
   for (const attachment of attachments) {
     const row = rows.find(
@@ -753,16 +772,16 @@ async function isSameCompletedMmsGeneration(
       row.byte_size !== attachment.byteSize ||
       row.mime_type !== attachment.mimeType
     ) {
-      return false
+      return { expectedFingerprint, sameGeneration: false }
     }
     if (attachment.bytes === null) {
       if (row.download_status !== '실패' || row.r2_key !== null) {
-        return false
+        return { expectedFingerprint, sameGeneration: false }
       }
       continue
     }
     if (row.download_status !== '완료' || row.r2_key === null) {
-      return false
+      return { expectedFingerprint, sameGeneration: false }
     }
 
     const object = await env.ATTACHMENTS.get(row.r2_key)
@@ -773,11 +792,11 @@ async function isSameCompletedMmsGeneration(
         attachment.bytes,
       )
     ) {
-      return false
+      return { expectedFingerprint, sameGeneration: false }
     }
   }
 
-  return true
+  return { expectedFingerprint, sameGeneration: true }
 }
 
 async function finalizeMmsAttachments(
@@ -1135,15 +1154,23 @@ async function handleMmsInbound(
   )
   try {
     const downloaded = MMS_INBOUND_EVENT[event].downloaded
+    const contentFingerprint = downloaded
+      ? await rawBodyDigest(rawBody)
+      : undefined
+    const generation =
+      downloaded && contentFingerprint !== undefined
+        ? await inspectMmsGeneration(
+            env,
+            idempotencyKey,
+            contentFingerprint,
+            received.payload.body,
+            received.payload.attachments,
+          )
+        : null
     const sameGeneration =
       downloaded &&
       received.oversizedContentIndexes.length === 0 &&
-      (await isSameCompletedMmsGeneration(
-        env,
-        idempotencyKey,
-        received.payload.body,
-        received.payload.attachments,
-      ))
+      generation?.sameGeneration === true
     const attachments = sameGeneration
       ? []
       : received.payload.attachments
@@ -1157,9 +1184,14 @@ async function handleMmsInbound(
         title: received.payload.subject,
         body: received.payload.body,
         occurredAt: received.payload.occurredAt,
+        occurredAtCanonical:
+          received.payload.occurredAtCanonical,
         receivedAt,
         idempotencyKey,
         attachments,
+        contentFingerprint,
+        expectedContentFingerprint:
+          generation?.expectedFingerprint,
         mergeExistingBody: downloaded,
         mergeExistingOccurredAt:
           received.payload.occurredAtCanonical,
@@ -1193,13 +1225,14 @@ async function handleMmsInbound(
       idempotencyKey,
       received.oversizedContentIndexes,
       rawBody,
+      contentFingerprint,
       receivedAt,
     )
     await finalizeMmsAttachments(
       env,
       officeChannel.office_id,
       stored,
-      attachments,
+      stored.attachmentsUpdated ? attachments : [],
       writeAttachment,
       receivedAt,
       ctx,
@@ -1438,6 +1471,7 @@ export function createSmsGatewayWebhookHandler(
           title: null,
           body: received.payload.message,
           occurredAt: received.payload.receivedAt,
+          occurredAtCanonical: true,
           receivedAt,
           idempotencyKey: smsGatewayIdempotencyKey(
             received.deviceId,

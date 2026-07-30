@@ -49,6 +49,7 @@ async function store(
     title: null,
     body: idempotencyKey,
     occurredAt,
+    occurredAtCanonical: true,
     receivedAt: occurredAt,
     idempotencyKey,
   })

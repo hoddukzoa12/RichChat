@@ -472,7 +472,7 @@ describe('Android SMS Gateway webhook', () => {
           contentType: 'application/octet-stream',
           name: 'empty.bin',
           size: 0,
-          data: null,
+          data: '',
           undocumentedPartField: true,
         },
       ],

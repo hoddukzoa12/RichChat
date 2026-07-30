@@ -20,9 +20,12 @@ export interface InboundMessageInput {
   title: string | null
   body: string
   occurredAt: number
+  occurredAtCanonical: boolean
   receivedAt: number
   idempotencyKey: string
   attachments?: readonly InboundAttachment[]
+  contentFingerprint?: string
+  expectedContentFingerprint?: string | null
   mergeExistingBody?: boolean
   mergeExistingOccurredAt?: boolean
   mergeExistingTitle?: boolean
@@ -60,6 +63,11 @@ export async function storeInboundMessage(
   const conversationId = createId()
   const messageId = createId()
   const attachments = input.attachments ?? []
+  const hasContentFingerprint =
+    input.contentFingerprint === undefined ? 0 : 1
+  const contentFingerprint = input.contentFingerprint ?? null
+  const expectedContentFingerprint =
+    input.expectedContentFingerprint ?? null
 
   const statements: D1PreparedStatement[] = [
     db
@@ -142,10 +150,12 @@ export async function storeInboundMessage(
         `INSERT INTO messages (
            id, office_id, conversation_id, direction, channel, title, body,
            sender_user_id, occurred_at, created_at, mo_key, client_key,
-           msg_key, delivery_status
+           msg_key, delivery_status, occurred_at_canonical,
+           inbound_fingerprint
          )
          SELECT
-           ?, ?, id, 'in', ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, '수신'
+           ?, ?, id, 'in', ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, '수신',
+           ?, ?
          FROM conversations
          WHERE office_id = ?
            AND customer_id = (
@@ -164,6 +174,8 @@ export async function storeInboundMessage(
         input.occurredAt,
         input.receivedAt,
         input.idempotencyKey,
+        input.occurredAtCanonical ? 1 : 0,
+        contentFingerprint,
         input.officeId,
         input.officeId,
         input.customerPhoneE164,
@@ -183,16 +195,28 @@ export async function storeInboundMessage(
            END,
            body = CASE WHEN ? = 1 AND ? <> '' THEN ? ELSE body END,
            occurred_at = CASE
-             WHEN ? = 1 THEN MIN(occurred_at, ?)
+             WHEN ? = 1 AND ? = 1 AND occurred_at_canonical = 0
+             THEN ?
              ELSE occurred_at
+           END,
+           occurred_at_canonical = CASE
+             WHEN ? = 1 AND ? = 1 AND occurred_at_canonical = 0
+             THEN 1
+             ELSE occurred_at_canonical
+           END,
+           inbound_fingerprint = CASE
+             WHEN ? = 1 THEN ?
+             ELSE inbound_fingerprint
            END
          WHERE mo_key = ?
            AND direction = 'in'
+           AND (? = 0 OR inbound_fingerprint IS ?)
            AND (
              (? = 1 AND title IS NULL AND ? IS NOT NULL)
              OR (? = 1 AND channel <> ?)
              OR (? = 1 AND ? <> '' AND body <> ?)
-             OR (? = 1 AND occurred_at > ?)
+             OR (? = 1 AND ? = 1 AND occurred_at_canonical = 0)
+             OR (? = 1 AND inbound_fingerprint IS NOT ?)
            )`,
       )
       .bind(
@@ -204,8 +228,15 @@ export async function storeInboundMessage(
         input.body,
         input.body,
         input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
         input.occurredAt,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
+        hasContentFingerprint,
+        contentFingerprint,
         input.idempotencyKey,
+        hasContentFingerprint,
+        expectedContentFingerprint,
         input.mergeExistingTitle ? 1 : 0,
         input.title,
         input.mergeExistingBody ? 1 : 0,
@@ -214,7 +245,9 @@ export async function storeInboundMessage(
         input.body,
         input.body,
         input.mergeExistingOccurredAt ? 1 : 0,
-        input.occurredAt,
+        input.occurredAtCanonical ? 1 : 0,
+        hasContentFingerprint,
+        contentFingerprint,
       ),
   )
   const contentUpdateIndex = statements.length - 1
@@ -224,7 +257,13 @@ export async function storeInboundMessage(
         `WITH target AS (
            SELECT conversation_id
            FROM messages
-           WHERE mo_key = ? AND id <> ?
+           WHERE mo_key = ?
+             AND id <> ?
+             AND ? = 1
+             AND ? = 1
+             AND occurred_at_canonical = 1
+             AND occurred_at = ?
+             AND (? = 0 OR inbound_fingerprint IS ?)
          ),
          latest AS (
            SELECT id, occurred_at
@@ -240,7 +279,6 @@ export async function storeInboundMessage(
            version = version + 1,
            updated_at = ?
          WHERE id = (SELECT conversation_id FROM target)
-           AND ? = 1
            AND (
              last_message_id IS NOT (SELECT id FROM latest)
              OR last_message_at IS NOT (SELECT occurred_at FROM latest)
@@ -249,8 +287,12 @@ export async function storeInboundMessage(
       .bind(
         input.idempotencyKey,
         messageId,
-        input.receivedAt,
         input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
+        input.occurredAt,
+        hasContentFingerprint,
+        contentFingerprint,
+        input.receivedAt,
       ),
   )
 
@@ -261,11 +303,18 @@ export async function storeInboundMessage(
         .prepare(
           `DELETE FROM message_attachments
            WHERE message_id = (
-             SELECT id FROM messages WHERE mo_key = ?
+             SELECT id
+             FROM messages
+             WHERE mo_key = ?
+               AND (? = 0 OR inbound_fingerprint IS ?)
            )
            RETURNING id, r2_key`,
         )
-        .bind(input.idempotencyKey),
+        .bind(
+          input.idempotencyKey,
+          hasContentFingerprint,
+          contentFingerprint,
+        ),
     )
     replacedAttachmentIndex = statements.length - 1
   }
@@ -288,6 +337,7 @@ export async function storeInboundMessage(
            SELECT ?, ?, messages.id, ?, ?, ?, NULL, '대기', ?, ?, ?
            FROM messages
            WHERE messages.mo_key = ?
+             AND (? = 0 OR messages.inbound_fingerprint IS ?)
              AND NOT EXISTS (
                SELECT 1
                FROM message_attachments
@@ -305,6 +355,8 @@ export async function storeInboundMessage(
           contentIndex,
           attachment.contentUrl,
           input.idempotencyKey,
+          hasContentFingerprint,
+          contentFingerprint,
           contentIndex,
         ),
     )
@@ -315,7 +367,10 @@ export async function storeInboundMessage(
           `UPDATE message_attachments
            SET content_url = ?
            WHERE message_id = (
-             SELECT id FROM messages WHERE mo_key = ?
+             SELECT id
+             FROM messages
+             WHERE mo_key = ?
+               AND (? = 0 OR inbound_fingerprint IS ?)
            )
              AND content_index = ?
              AND download_status = '대기'`,
@@ -323,6 +378,8 @@ export async function storeInboundMessage(
         .bind(
           attachment.contentUrl,
           input.idempotencyKey,
+          hasContentFingerprint,
+          contentFingerprint,
           contentIndex,
         ),
     )

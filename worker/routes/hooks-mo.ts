@@ -490,6 +490,7 @@ async function storePreparedItem(
       title: null,
       body: item.moMsg,
       occurredAt,
+      occurredAtCanonical: true,
       receivedAt,
       idempotencyKey: item.moKey,
       attachments,
