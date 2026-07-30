@@ -13,6 +13,7 @@ export interface InboundAttachment {
 
 export interface InboundMessageInput {
   officeId: string
+  officeChannelId: string | null
   customerPhoneE164: string
   channel: SendChannel
   title: string | null
@@ -20,7 +21,6 @@ export interface InboundMessageInput {
   occurredAt: number
   receivedAt: number
   idempotencyKey: string
-  receptionChannelId?: string | null
   attachments?: readonly InboundAttachment[]
   eventMetadata?: Readonly<Record<string, JsonValue>>
 }
@@ -61,24 +61,55 @@ export async function storeInboundMessage(
         input.receivedAt,
         input.idempotencyKey,
       ),
+    // 마이그레이션 전 복구 데이터의 미지정 대화는 첫 실제 수신 채널에 귀속한다.
+    // 운영 마이그레이션은 모든 기존 행을 이미 기본 채널로 채운다.
+    db
+      .prepare(
+        `UPDATE conversations
+         SET office_channel_id = ?
+         WHERE ? IS NOT NULL
+           AND office_id = ?
+           AND customer_id = (
+             SELECT id FROM customers
+             WHERE office_id = ? AND phone_e164 = ?
+           )
+           AND office_channel_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM conversations AS assigned_conversation
+             WHERE assigned_conversation.office_id = ?
+               AND assigned_conversation.customer_id = conversations.customer_id
+               AND assigned_conversation.office_channel_id = ?
+           )`,
+      )
+      .bind(
+        input.officeChannelId,
+        input.officeChannelId,
+        input.officeId,
+        input.officeId,
+        input.customerPhoneE164,
+        input.officeId,
+        input.officeChannelId,
+      ),
     db
       .prepare(
         `INSERT INTO conversations (
-           id, office_id, customer_id, status, last_message_id,
+           id, office_id, customer_id, office_channel_id, status, last_message_id,
            last_message_at, created_at, updated_at
          )
-         SELECT ?, ?, id, '미처리', NULL, NULL, ?, ?
+         SELECT ?, ?, id, ?, '미처리', NULL, NULL, ?, ?
          FROM customers
          WHERE office_id = ?
            AND phone_e164 = ?
            AND NOT EXISTS (
              SELECT 1 FROM messages WHERE mo_key = ?
            )
-         ON CONFLICT(office_id, customer_id) DO NOTHING`,
+         ON CONFLICT DO NOTHING`,
       )
       .bind(
         conversationId,
         input.officeId,
+        input.officeChannelId,
         input.receivedAt,
         input.receivedAt,
         input.officeId,
@@ -100,6 +131,7 @@ export async function storeInboundMessage(
              SELECT id FROM customers
              WHERE office_id = ? AND phone_e164 = ?
            )
+           AND office_channel_id IS ?
          ON CONFLICT(mo_key) WHERE mo_key IS NOT NULL DO NOTHING`,
       )
       .bind(
@@ -114,6 +146,7 @@ export async function storeInboundMessage(
         input.officeId,
         input.officeId,
         input.customerPhoneE164,
+        input.officeChannelId,
       ),
   ]
   const messageInsertIndex = statements.length - 1
@@ -173,9 +206,7 @@ export async function storeInboundMessage(
     direction: 'in',
     channel: input.channel,
   }
-  if (input.receptionChannelId !== undefined) {
-    eventPayload.receptionChannelId = input.receptionChannelId
-  }
+  eventPayload.receptionChannelId = input.officeChannelId
   Object.assign(eventPayload, input.eventMetadata)
 
   const publication = publish(

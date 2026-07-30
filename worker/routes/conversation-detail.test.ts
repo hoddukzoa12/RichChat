@@ -56,6 +56,7 @@ async function seedConversation(): Promise<SeededConversation> {
   const senderId = `sender-${suffix}`
   const customerId = `customer-${suffix}`
   const conversationId = `conversation-${suffix}`
+  const officeChannelId = `office-channel-${suffix}`
   const senderName = `김세무-${suffix}`
 
   await env.DB.batch([
@@ -132,21 +133,34 @@ async function seedConversation(): Promise<SeededConversation> {
       NOW,
     ),
     env.DB.prepare(
+      `INSERT INTO office_channels (
+        id, office_id, value, label, is_default, active, created_at
+      ) VALUES (?, ?, ?, ?, 1, 1, ?)`,
+    ).bind(
+      officeChannelId,
+      officeId,
+      `0105555${String(seedSequence).padStart(4, '0')}`,
+      '업무폰 1',
+      NOW,
+    ),
+    env.DB.prepare(
       `INSERT INTO conversations (
         id,
         office_id,
         customer_id,
+        office_channel_id,
         status,
         label,
         archived_at,
         version,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       conversationId,
       officeId,
       customerId,
+      officeChannelId,
       '처리중',
       '신고',
       NOW,
@@ -412,6 +426,10 @@ describe('Conversation detail routes', () => {
     expect(body).toMatchObject({
       conversation: {
         id: seed.conversationId,
+        officeChannel: {
+          id: `office-channel-b7-${seedSequence}`,
+          label: '업무폰 1',
+        },
         status: '처리중',
         label: '신고',
         archived: true,

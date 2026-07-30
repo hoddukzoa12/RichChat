@@ -273,8 +273,11 @@ function Header({
             {cur.customer.company}
           </span>
         </div>
-        <div className="text-[12.5px] text-ink-400">
-          {cur.customer.phoneE164}
+        <div className="flex items-center gap-1.5 text-[12.5px] text-ink-400">
+          <span className="rounded bg-fill px-1.5 py-0.5 font-semibold text-ink-600">
+            {cur.officeChannel.label}
+          </span>
+          <span>{cur.customer.phoneE164}</span>
         </div>
       </div>
 

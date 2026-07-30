@@ -49,6 +49,10 @@ class FakeSocket {
 
 const conversation: ConversationListItem = {
   id: 'conversation-1',
+  officeChannel: {
+    id: 'office-channel-1',
+    label: '업무폰 1',
+  },
   customer: {
     id: 'customer-1',
     name: '김리치',
@@ -77,6 +81,7 @@ const listResponse: ConversationListResponse = {
 
 const detail: ConversationDetail = {
   id: conversation.id,
+  officeChannel: conversation.officeChannel,
   status: conversation.status,
   label: '',
   archived: false,

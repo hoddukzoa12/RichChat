@@ -57,6 +57,7 @@ interface DeterministicFailure {
 
 interface OfficeRow {
   id: string
+  office_channel_id: string | null
 }
 
 interface FailureRow {
@@ -359,7 +360,17 @@ function prepareItem(raw: unknown, inputIndex: number): PreparedMo {
 
 async function findOffice(db: D1Database): Promise<OfficeRow> {
   const office = await db
-    .prepare('SELECT id FROM offices ORDER BY created_at, id LIMIT 1')
+    .prepare(
+      `SELECT
+         offices.id,
+         office_channels.id AS office_channel_id
+       FROM offices
+       LEFT JOIN office_channels
+         ON office_channels.office_id = offices.id
+         AND office_channels.is_default = 1
+       ORDER BY offices.created_at, offices.id
+       LIMIT 1`,
+    )
     .first<OfficeRow>()
 
   if (!office) {
@@ -444,6 +455,14 @@ async function storePreparedItem(
 ): Promise<void> {
   const { item, occurredAt, channel, phoneE164 } = prepared
   const office = await findOffice(env.DB)
+  if (office.office_channel_id === null) {
+    // 운영 마이그레이션은 기본 채널이 없는 사무소를 거부한다. 이 분기는
+    // 마이그레이션 전 복구 데이터의 수신만 보존한다.
+    console.warn('LGU+ MO를 귀속할 기본 업무폰이 없습니다.', {
+      officeId: office.id,
+      moKey: item.moKey,
+    })
+  }
 
   console.info('LGU+ MO 수신 채널을 저장 채널로 매핑합니다.', {
     moKey: item.moKey,
@@ -470,6 +489,7 @@ async function storePreparedItem(
     env,
     {
       officeId: office.id,
+      officeChannelId: office.office_channel_id,
       customerPhoneE164: phoneE164,
       channel,
       title: null,

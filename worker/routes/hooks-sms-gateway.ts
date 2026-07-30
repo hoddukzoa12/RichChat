@@ -417,7 +417,7 @@ export function createSmsGatewayWebhookHandler(
         .prepare(
           `SELECT id, office_id
            FROM office_channels
-           WHERE device_id = ? AND active = 1`,
+           WHERE device_id = ?`,
         )
         .bind(received.deviceId)
         .first<OfficeChannelRow>()
@@ -443,6 +443,7 @@ export function createSmsGatewayWebhookHandler(
         env,
         {
           officeId: officeChannel.office_id,
+          officeChannelId: officeChannel.id,
           customerPhoneE164,
           channel: 'SMS',
           title: null,
@@ -453,7 +454,6 @@ export function createSmsGatewayWebhookHandler(
             received.deviceId,
             received.payload.messageId,
           ),
-          receptionChannelId: officeChannel.id,
           eventMetadata: {
             deviceId: received.deviceId,
             recipient: received.payload.recipient,

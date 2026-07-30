@@ -69,6 +69,10 @@ function responseFor(path: string, init?: RequestInit): Response {
   return Response.json({
     conversation: {
       id: 'conversation-1',
+      officeChannel: {
+        id: 'office-channel-1',
+        label: '업무폰 1',
+      },
       status: '미처리',
       label: '',
       archived: false,
