@@ -8,6 +8,7 @@ import {
   getOfficeMembers,
   getOfficePhones,
   issueOfficePhoneEnrollmentCode,
+  issueOfficePhoneSigningKey,
   inviteOfficeMember,
   updateOfficePhone,
   updateOfficePhoneStatus,
@@ -118,6 +119,11 @@ describe('Settings endpoints', () => {
           Response.json(
             String(input).endsWith('/phones')
               ? { phones: [phone] }
+              : String(input).endsWith('/signing-key')
+                ? {
+                    phone,
+                    signingKey: 'issued-once-signing-key',
+                  }
               : { phone },
           ),
         ),
@@ -134,6 +140,7 @@ describe('Settings endpoints', () => {
     })
     await updateOfficePhone(phone.id, { label: '상담실' })
     await updateOfficePhoneStatus(phone.id, { active: false })
+    await issueOfficePhoneSigningKey(phone.id)
 
     expect(fetchMock.mock.calls.map(([input]) => input)).toEqual([
       '/api/office/phones',
@@ -142,6 +149,7 @@ describe('Settings endpoints', () => {
       '/api/office/phones',
       '/api/office/phones/phone%2F1',
       '/api/office/phones/phone%2F1/status',
+      '/api/office/phones/phone%2F1/signing-key',
     ])
     expect(
       JSON.parse(String(fetchMock.mock.calls[3][1]?.body)),

@@ -69,7 +69,6 @@ export const OFFICE_PHONE_DEVICE_ID_MAX_LENGTH = 200
 export const OFFICE_PHONE_SIGNING_KEY_STATUSES = [
   '설정됨',
   '미설정',
-  '확인 불가',
   '해당 없음',
 ] as const
 export type OfficePhoneSigningKeyStatus =
@@ -91,6 +90,11 @@ export interface OfficePhonesResponse {
 
 export interface OfficePhoneResponse {
   phone: OfficePhone
+}
+
+export interface OfficePhoneSigningKeyResponse {
+  phone: OfficePhone
+  signingKey: string
 }
 
 export interface OfficePhoneCreate {

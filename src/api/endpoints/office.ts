@@ -10,6 +10,7 @@ import type {
   OfficePhoneEnrollmentCodeResponse,
   OfficePhonePatch,
   OfficePhoneResponse,
+  OfficePhoneSigningKeyResponse,
   OfficePhonesResponse,
   OfficePhoneStatusPatch,
   OfficeSettingsPatch,
@@ -36,6 +37,7 @@ export type {
   OfficePhoneEnrollmentCodeResponse,
   OfficePhonePatch,
   OfficePhoneResponse,
+  OfficePhoneSigningKeyResponse,
   OfficePhonesResponse,
   OfficePhoneSigningKeyStatus,
   OfficePhoneStatusPatch,
@@ -128,6 +130,19 @@ export function updateOfficePhoneStatus(
     'PATCH',
     { ...patch },
     signal,
+  )
+}
+
+export function issueOfficePhoneSigningKey(
+  phoneId: string,
+  signal?: AbortSignal,
+): Promise<OfficePhoneSigningKeyResponse> {
+  return apiRequest(
+    `/api/office/phones/${encodeURIComponent(phoneId)}/signing-key`,
+    {
+      method: 'POST',
+      signal,
+    },
   )
 }
 

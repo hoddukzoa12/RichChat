@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   TEST_SMS_GATEWAY_PRIMARY_DEVICE_ID,
   TEST_SMS_GATEWAY_SECONDARY_DEVICE_ID,
-  TEST_SMS_GATEWAY_SIGNING_KEYS,
+  TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE,
+  testSmsGatewaySignature,
 } from '../../tests/sms-gateway-fixtures'
 import {
-  createSmsGatewayWebhookHandler,
   smsGatewayIdempotencyKey,
   WEBHOOK_TIMESTAMP_WINDOW_MS,
 } from './hooks-sms-gateway'
@@ -63,31 +63,14 @@ async function signature(
 ): Promise<string> {
   const { deviceId } = JSON.parse(body) as { deviceId: string }
   const signingKey =
-    TEST_SMS_GATEWAY_SIGNING_KEYS[
-      deviceId as keyof typeof TEST_SMS_GATEWAY_SIGNING_KEYS
+    TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE[
+      deviceId as keyof typeof TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE
     ]
   if (signingKey === undefined) {
     throw new Error('테스트 기기의 서명키를 찾지 못했습니다.')
   }
 
-  const encoder = new TextEncoder()
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(signingKey),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  )
-  const bytes = new Uint8Array(
-    await crypto.subtle.sign(
-      'HMAC',
-      key,
-      encoder.encode(`${body}${timestamp}`),
-    ),
-  )
-  return [...bytes]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
+  return testSmsGatewaySignature(body, timestamp, signingKey)
 }
 
 async function post(
@@ -123,9 +106,9 @@ async function insertOfficeChannels(
       env.DB
         .prepare(
           `INSERT INTO office_channels (
-             id, office_id, value, label, is_default, active, created_at,
-             device_id
-           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+           id, office_id, value, label, is_default, active, created_at,
+             device_id, signing_key
+           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .bind(
           `channel-sms-gateway-${index + 1}`,
@@ -135,6 +118,9 @@ async function insertOfficeChannels(
           index === 0 ? 1 : 0,
           now,
           deviceId,
+          TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE[
+            deviceId as keyof typeof TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE
+          ],
         ),
     ),
   ])
@@ -187,28 +173,12 @@ describe('Android SMS Gateway webhook', () => {
   it('rejects an invalid signature and accepts a valid signature', async () => {
     await insertOfficeChannels()
     const body = webhookBody()
-    const noDatabaseEnv = {
-      SMS_GATEWAY_SIGNING_KEYS: env.SMS_GATEWAY_SIGNING_KEYS,
-      get DB(): never {
-        throw new Error('인증 전에 D1에 접근했습니다.')
-      },
-    } as unknown as Env
-    const handler = createSmsGatewayWebhookHandler()
     const timestamp = String(Math.floor(Date.now() / 1_000))
 
-    const rejected = await handler(
-      new Request(HOOK_URL, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-signature': '0'.repeat(64),
-          'x-timestamp': timestamp,
-        },
-        body,
-      }),
-      noDatabaseEnv,
-      {},
-    )
+    const rejected = await post(body, {
+      timestamp,
+      signature: '0'.repeat(64),
+    })
     expect(rejected.status).toBe(401)
 
     await expectSuccess(await post(body))
@@ -394,6 +364,7 @@ describe('Android SMS Gateway webhook', () => {
   })
 
   it('acknowledges unsupported events without storing them', async () => {
+    await insertOfficeChannels()
     const body = JSON.stringify({
       deviceId: DEVICE_ID,
       event: 'system:ping',
@@ -451,18 +422,33 @@ describe('Android SMS Gateway webhook', () => {
     })
   })
 
-  it('returns a retryable response for an unknown device', async () => {
-    const failure = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {})
+  it('rejects an unknown device', async () => {
     const response = await post(webhookBody())
 
-    expect(response.status).toBe(503)
+    expect(response.status).toBe(401)
     const messageCount = await env.DB.prepare(
       'SELECT COUNT(*) AS count FROM messages',
     ).first<{ count: number }>()
     expect(messageCount?.count).toBe(0)
-    failure.mockRestore()
+  })
+
+  it('rejects a registered device without an issued key', async () => {
+    await insertOfficeChannels()
+    await env.DB.prepare(
+      `UPDATE office_channels
+       SET signing_key = NULL
+       WHERE device_id = ?`,
+    )
+      .bind(DEVICE_ID)
+      .run()
+
+    const response = await post(webhookBody())
+
+    expect(response.status).toBe(401)
+    const messageCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM messages',
+    ).first<{ count: number }>()
+    expect(messageCount?.count).toBe(0)
   })
 
   it('does not acknowledge before the D1 commit succeeds', async () => {

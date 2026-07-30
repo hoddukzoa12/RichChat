@@ -76,10 +76,6 @@ export const OFFICE_PHONE_SIGNING_KEY_VIEW: Record<
     label: '서명키 미설정',
     badgeClass: 'text-open-fg bg-open-bg',
   },
-  '확인 불가': {
-    label: '서명키 확인 불가',
-    badgeClass: 'text-doing-fg bg-doing-bg',
-  },
   '해당 없음': {
     label: '서명키 해당 없음',
     badgeClass: 'text-ink-500 bg-fill',

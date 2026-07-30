@@ -3,17 +3,17 @@ import { describe, expect, it } from 'vitest'
 import type { Role } from '../../shared/domain'
 import type {
   OfficePhoneResponse,
+  OfficePhoneSigningKeyResponse,
   OfficePhonesResponse,
 } from '../../shared/wire/office'
 import {
   TEST_SMS_GATEWAY_PRIMARY_DEVICE_ID,
-  TEST_SMS_GATEWAY_SIGNING_KEYS,
+  TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE,
 } from '../../tests/sms-gateway-fixtures'
 import {
   createSession,
   SESSION_COOKIE_NAME,
 } from '../http/session'
-import { createOfficeRoutes } from './office'
 
 declare module 'cloudflare:test' {
   interface ProvidedEnv extends Env {}
@@ -38,6 +38,7 @@ interface StoredPhone {
   device_id: string | null
   is_default: number
   active: number
+  signing_key: string | null
 }
 
 let fixtureSequence = 0
@@ -106,6 +107,7 @@ async function seedPhone(
     deviceId?: string | null
     isDefault?: boolean
     active?: boolean
+    signingKey?: string | null
   } = {},
 ): Promise<string> {
   const id = options.id ?? `phone-${fixture.suffix}`
@@ -115,8 +117,8 @@ async function seedPhone(
   await env.DB.prepare(
     `INSERT INTO office_channels (
       id, office_id, value, label, device_id, is_default, active,
-      created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      created_at, signing_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -127,6 +129,7 @@ async function seedPhone(
       Number(options.isDefault ?? false),
       Number(options.active ?? true),
       Date.now(),
+      options.signingKey ?? null,
     )
     .run()
   return id
@@ -150,40 +153,10 @@ async function request(
   })
 }
 
-async function listWithSigningKeys(
-  token: string,
-  rawSigningKeys: unknown,
-): Promise<Response> {
-  const route = createOfficeRoutes().find(
-    ({ method, path }) =>
-      method === 'GET' && path === '/api/office/phones',
-  )
-  if (!route) throw new Error('업무폰 목록 라우트가 필요합니다.')
-
-  const overriddenEnv = new Proxy(env, {
-    get(target, property, receiver) {
-      if (property === 'SMS_GATEWAY_SIGNING_KEYS') {
-        return rawSigningKeys
-      }
-      return Reflect.get(target, property, receiver)
-    },
-  }) as Env
-  return route.handler(
-    new Request(`${ORIGIN}/api/office/phones`, {
-      headers: {
-        origin: ORIGIN,
-        cookie: cookie(token),
-      },
-    }),
-    overriddenEnv,
-    {},
-  )
-}
-
 async function storedPhone(phoneId: string): Promise<StoredPhone | null> {
   return env.DB.prepare(
     `SELECT
-      value, label, device_id, is_default, active
+      value, label, device_id, is_default, active, signing_key
     FROM office_channels
     WHERE id = ?`,
   )
@@ -217,6 +190,11 @@ describe('Office phone administration', () => {
       path: '/api/office/phones/phone-1/status',
       body: { active: false },
     },
+    {
+      method: 'POST' as const,
+      path: '/api/office/phones/phone-1/signing-key',
+      body: undefined,
+    },
   ])(
     'rejects an unauthenticated $method $path request',
     async ({ method, path, body }) => {
@@ -242,6 +220,10 @@ describe('Office phone administration', () => {
     await seedPhone(fixture, {
       id: `configured-${fixture.suffix}`,
       deviceId: TEST_SMS_GATEWAY_PRIMARY_DEVICE_ID,
+      signingKey:
+        TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE[
+          TEST_SMS_GATEWAY_PRIMARY_DEVICE_ID
+        ],
     })
     await seedPhone(fixture, {
       id: `missing-${fixture.suffix}`,
@@ -258,7 +240,9 @@ describe('Office phone administration', () => {
 
     expect(response.status).toBe(200)
     const text = await response.text()
-    for (const key of Object.values(TEST_SMS_GATEWAY_SIGNING_KEYS)) {
+    for (const key of Object.values(
+      TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE,
+    )) {
       expect(text).not.toContain(key)
     }
     const payload = JSON.parse(text) as OfficePhonesResponse
@@ -281,43 +265,6 @@ describe('Office phone administration', () => {
       }),
     ])
   })
-
-  it.each([
-    { label: 'missing secret', rawSigningKeys: undefined },
-    { label: 'malformed secret', rawSigningKeys: '{' },
-    { label: 'non-object secret', rawSigningKeys: '[]' },
-  ])(
-    'keeps the list available with $label',
-    async ({ rawSigningKeys }) => {
-      const fixture = await seedFixture()
-      await seedPhone(fixture, {
-        id: `default-${fixture.suffix}`,
-        value: '18771239',
-        label: '대표번호',
-        deviceId: null,
-        isDefault: true,
-      })
-      await seedPhone(fixture)
-
-      const response = await listWithSigningKeys(
-        fixture.admin.token,
-        rawSigningKeys,
-      )
-
-      expect(response.status).toBe(200)
-      const payload = await response.json<OfficePhonesResponse>()
-      expect(payload.phones).toEqual([
-        expect.objectContaining({
-          label: '대표번호',
-          signingKeyStatus: '해당 없음',
-        }),
-        expect.objectContaining({
-          label: '업무폰 1',
-          signingKeyStatus: '확인 불가',
-        }),
-      ])
-    },
-  )
 
   it('creates a durable phone and reports a duplicate Device ID', async () => {
     const fixture = await seedFixture()
@@ -379,6 +326,54 @@ describe('Office phone administration', () => {
     expect(
       payload.phones.filter((phone) => phone.deviceId === deviceId),
     ).toHaveLength(1)
+  })
+
+  it('issues a key once without exposing it through phones or events', async () => {
+    const fixture = await seedFixture()
+    const phoneId = await seedPhone(fixture)
+
+    const issued = await request(
+      'POST',
+      `/api/office/phones/${phoneId}/signing-key`,
+      fixture.admin.token,
+    )
+
+    expect(issued.status).toBe(200)
+    expect(issued.headers.get('cache-control')).toBe('no-store')
+    const text = await issued.text()
+    const payload = JSON.parse(text) as OfficePhoneSigningKeyResponse
+    expect(payload.signingKey).toMatch(/^[\da-f]{64}$/)
+    expect(payload.phone.signingKeyStatus).toBe('설정됨')
+    expect((await storedPhone(phoneId))?.signing_key).toBe(
+      payload.signingKey,
+    )
+
+    const list = await request(
+      'GET',
+      '/api/office/phones',
+      fixture.admin.token,
+    )
+    const updated = await request(
+      'PATCH',
+      `/api/office/phones/${phoneId}`,
+      fixture.admin.token,
+      { label: '키 발급 완료 업무폰' },
+    )
+    expect(await list.text()).not.toContain(payload.signingKey)
+    expect(await updated.text()).not.toContain(payload.signingKey)
+
+    const { results: events } = await env.DB.prepare(
+      `SELECT payload
+       FROM events
+       WHERE office_id = ?
+         AND entity_id = ?`,
+    )
+      .bind(fixture.officeId, phoneId)
+      .all<{ payload: string }>()
+    expect(events).toContainEqual({
+      payload: JSON.stringify({ signingKeyStatus: '설정됨' }),
+    })
+    expect(JSON.stringify(events)).not.toContain(payload.signingKey)
   })
 
   it.each([
@@ -511,13 +506,19 @@ describe('Office phone administration', () => {
         actor.token,
         { active: false },
       )
+      const signingKey = await request(
+        'POST',
+        `/api/office/phones/${phoneId}/signing-key`,
+        actor.token,
+      )
 
       expect([
         list.status,
         create.status,
         update.status,
         status.status,
-      ]).toEqual([403, 403, 403, 403])
+        signingKey.status,
+      ]).toEqual([403, 403, 403, 403, 403])
       expect(await storedPhone(phoneId)).toEqual(before)
       const blocked = await env.DB.prepare(
         'SELECT COUNT(*) AS count FROM office_channels WHERE device_id = ?',
@@ -545,8 +546,14 @@ describe('Office phone administration', () => {
       fixture.admin.token,
       { active: false },
     )
+    const signingKey = await request(
+      'POST',
+      `/api/office/phones/${defaultId}/signing-key`,
+      fixture.admin.token,
+    )
 
     expect(response.status).toBe(409)
+    expect(signingKey.status).toBe(409)
     await expect(response.json()).resolves.toMatchObject({
       error: {
         message: '기본 발신번호는 비활성화할 수 없습니다.',
@@ -562,5 +569,6 @@ describe('Office phone administration', () => {
       .bind(fixture.officeId)
       .first<{ count: number }>()
     expect(defaults?.count).toBe(1)
+    expect((await storedPhone(defaultId))?.signing_key).toBeNull()
   })
 })
