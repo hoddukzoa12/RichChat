@@ -97,16 +97,6 @@ SMS_GATEWAY_USERNAME=
 # 미설정 시: 업무폰에 묶인 대화의 문자 발송이 실패로 기록되고, 등록 코드 발급·기기 자동 감지가 동작하지 않는다.
 SMS_GATEWAY_PASSWORD=
 
-# 발급: 업무폰마다 256비트(32바이트) 난수를 64자리 hex로 만든다. macOS/Linux: `openssl rand -hex 32`; Windows PowerShell: `$bytes = [byte[]]::new(32); $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($bytes); $rng.Dispose(); [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()`
-# 기본 형식: `{"<deviceId-1>":"<기기별 키-1>","<deviceId-2>":"<기기별 키-2>"}`처럼 Device ID별 키를 저장한다.
-# 앱 설정: 각 업무폰의 설정 → Webhooks → Signing Key에 해당 기기의 키를 직접 입력하고, Worker 시크릿의 같은 Device ID 항목에도 같은 값을 넣는다.
-# 서버 배포 불가: client-go v1.14.2가 `signing_key`에 빈 값만 허용해 관리 API의 settings 쓰기가 400을 반환한다.
-# 이전 공통 형식: 전환 중인 `{"default":"<공통 키>","overrides":{"<deviceId>":"<기기별 예외 키>"}}`와 `{"default":"<공통 키>"}`도 계속 검증한다.
-# 위험: 공통 키를 쓰면 업무폰 한 대가 탈취됐을 때 전체 업무폰의 수신 웹훅을 위조할 수 있다.
-# 회전: 문의가 적은 시간에 폰마다 새 키를 앱과 Worker 시크릿의 같은 Device ID 항목에 차례로 입력한다. 자동 배포가 없으므로 업무폰 대수만큼 직접 작업하고, 각 폰의 두 값이 일치하는지 수신 로그로 확인한다.
-# 미설정 또는 해석할 키가 없을 때: `sms:received` 웹훅의 HMAC 서명을 검증할 수 없어 문자 수신이 동작하지 않는다.
-SMS_GATEWAY_SIGNING_KEYS=
-
 # 발급: 네이버웍스가 앱을 등록할 때 발급한다.
 # 확인: 네이버웍스 Developer Console > 앱 목록 > 대상 앱의 Client Secret에서 확인한다.
 # 미설정 시: OIDC 인가 코드를 토큰으로 교환할 수 없어 네이버웍스 로그인이 완료되지 않는다.

@@ -2,7 +2,6 @@ import {
   defineWorkersConfig,
   readD1Migrations,
 } from '@cloudflare/vitest-pool-workers/config'
-import { TEST_SMS_GATEWAY_SIGNING_KEYS } from './tests/sms-gateway-fixtures'
 
 // 호환 풀의 내장 workerd가 설정 날짜보다 오래되어 테스트에서 날짜 fallback 경고가 발생한다.
 export default defineWorkersConfig(async () => {
@@ -34,9 +33,6 @@ export default defineWorkersConfig(async () => {
                 'https://sms-gateway.test.invalid/api/3rdparty/v1',
               SMS_GATEWAY_USERNAME: 'test-gateway-user',
               SMS_GATEWAY_PASSWORD: 'test-gateway-password',
-              SMS_GATEWAY_SIGNING_KEYS: JSON.stringify(
-                TEST_SMS_GATEWAY_SIGNING_KEYS,
-              ),
               WORKS_CLIENT_ID: 'test-works-client-id',
               WORKS_CLIENT_SECRET: 'test-works-client-secret',
               WORKS_TENANT_ID: 'test-works-tenant-id',

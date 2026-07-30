@@ -1,5 +1,4 @@
 import { error } from '../http/error'
-import { json } from '../http/respond'
 import type { Route, RouteHandler } from '../http/router'
 import { storeInboundMessage } from '../inbound-message'
 import type { Clock } from '../lib/ids'
@@ -29,13 +28,7 @@ interface SmsReceivedEnvelope {
 interface OfficeChannelRow {
   id: string
   office_id: string
-}
-
-class GatewayConfigurationError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options)
-    this.name = 'GatewayConfigurationError'
-  }
+  signing_key: string | null
 }
 
 class GatewayPayloadError extends Error {
@@ -189,37 +182,6 @@ function parseSmsReceivedEnvelope(
   }
 }
 
-function signingKeyForDevice(
-  rawSigningKeys: string,
-  deviceId: string,
-): string | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(rawSigningKeys)
-  } catch (cause) {
-    throw new GatewayConfigurationError(
-      'SMS Gateway 서명키 설정이 JSON 형식이 아닙니다.',
-      { cause },
-    )
-  }
-  if (!isRecord(parsed)) {
-    throw new GatewayConfigurationError(
-      'SMS Gateway 서명키 설정은 기기 ID별 객체여야 합니다.',
-    )
-  }
-
-  for (const signingKey of Object.values(parsed)) {
-    if (typeof signingKey !== 'string' || signingKey.length === 0) {
-      throw new GatewayConfigurationError(
-        'SMS Gateway 서명키 설정에 빈 키가 있습니다.',
-      )
-    }
-  }
-
-  if (!Object.hasOwn(parsed, deviceId)) return null
-  return parsed[deviceId] as string
-}
-
 /**
  * 앱의 32비트 messageId는 기기 간 또는 다른 사업자의 키와 겹칠 수 있다.
  * 사업자와 deviceId를 함께 넣어 전역 mo_key 인덱스에서 네임스페이스를 분리한다.
@@ -319,18 +281,6 @@ function successResponse(): Response {
   return new Response(null, { status: 204 })
 }
 
-function unavailableResponse(message: string): Response {
-  return json(
-    {
-      error: {
-        code: 'SERVICE_UNAVAILABLE',
-        message,
-      },
-    },
-    { status: 503 },
-  )
-}
-
 export function createSmsGatewayWebhookHandler(
   clock: Clock = Date.now,
 ): RouteHandler {
@@ -363,21 +313,31 @@ export function createSmsGatewayWebhookHandler(
       return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
     }
 
-    let signingKey: string | null
+    let officeChannel: OfficeChannelRow | null
     try {
-      signingKey = signingKeyForDevice(
-        env.SMS_GATEWAY_SIGNING_KEYS,
-        deviceId,
-      )
+      officeChannel = await env.DB
+        .prepare(
+          `SELECT id, office_id, signing_key
+           FROM office_channels
+           WHERE device_id = ?`,
+        )
+        .bind(deviceId)
+        .first<OfficeChannelRow>()
     } catch (cause) {
-      console.error('SMS Gateway 서명키 설정을 읽지 못했습니다.', {
+      console.error('SMS Gateway 기기 채널 조회에 실패했습니다.', {
+        deviceId,
         error: cause instanceof Error ? cause.message : String(cause),
       })
       return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
     }
     if (
-      signingKey === null ||
-      !(await authenticate(request, signingKey, rawBody, receivedAt))
+      officeChannel?.signing_key == null ||
+      !(await authenticate(
+        request,
+        officeChannel.signing_key,
+        rawBody,
+        receivedAt,
+      ))
     ) {
       return error('UNAUTHORIZED', '웹훅 서명이 올바르지 않습니다.')
     }
@@ -409,33 +369,6 @@ export function createSmsGatewayWebhookHandler(
         error: cause instanceof Error ? cause.message : String(cause),
       })
       return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
-    }
-
-    let officeChannel: OfficeChannelRow | null
-    try {
-      officeChannel = await env.DB
-        .prepare(
-          `SELECT id, office_id
-           FROM office_channels
-           WHERE device_id = ?`,
-        )
-        .bind(received.deviceId)
-        .first<OfficeChannelRow>()
-    } catch (cause) {
-      console.error('SMS Gateway 기기 채널 조회에 실패했습니다.', {
-        deviceId: received.deviceId,
-        error: cause instanceof Error ? cause.message : String(cause),
-      })
-      return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
-    }
-    if (!officeChannel) {
-      console.error('등록되지 않은 SMS Gateway 기기의 수신을 거부합니다.', {
-        deviceId: received.deviceId,
-      })
-      // 2xx를 주면 재전송이 멈춘다. 채널 등록 뒤 복구할 수 있게 재시도를 요청한다.
-      return unavailableResponse(
-        '등록되지 않은 SMS Gateway 기기입니다.',
-      )
     }
 
     try {

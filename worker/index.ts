@@ -1,6 +1,5 @@
 import { error } from './http/error'
 import { dispatch, type Route } from './http/router'
-import { legacySigningKeysForWebhook } from './gateway/signing-keys'
 import { routes as attachmentsRoutes } from './routes/attachments'
 import { routes as authRoutes } from './routes/auth'
 import { routes as conversationDetailRoutes } from './routes/conversation-detail'
@@ -52,54 +51,6 @@ function isApiPath(pathname: string): boolean {
   return pathname === '/api' || pathname.startsWith('/api/')
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value)
-  )
-}
-
-export async function smsGatewayWebhookEnv(
-  request: Request,
-  env: Env,
-): Promise<Env> {
-  const pathname = new URL(request.url).pathname
-  if (
-    request.method !== 'POST' ||
-    pathname !== '/api/hooks/sms-gateway'
-  ) {
-    return env
-  }
-
-  let envelope: unknown
-  try {
-    envelope = await request.clone().json()
-  } catch {
-    return env
-  }
-  if (
-    !isRecord(envelope) ||
-    typeof envelope.deviceId !== 'string' ||
-    envelope.deviceId.length === 0
-  ) {
-    return env
-  }
-
-  const normalized = legacySigningKeysForWebhook(
-    env.SMS_GATEWAY_SIGNING_KEYS,
-    envelope.deviceId,
-  )
-  if (normalized === env.SMS_GATEWAY_SIGNING_KEYS) return env
-
-  return new Proxy(env, {
-    get(target, property, receiver) {
-      if (property === 'SMS_GATEWAY_SIGNING_KEYS') return normalized
-      return Reflect.get(target, property, receiver)
-    },
-  })
-}
-
 export default {
   async fetch(
     request: Request,
@@ -112,9 +63,8 @@ export default {
       return env.ASSETS.fetch(request)
     }
 
-    const routeEnv = await smsGatewayWebhookEnv(request, env)
     return (
-      (await dispatch(request, routeEnv, routes, ctx)) ??
+      (await dispatch(request, env, routes, ctx)) ??
       error('NOT_FOUND', '요청한 API를 찾을 수 없습니다.')
     )
   },

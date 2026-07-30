@@ -32,6 +32,7 @@ import {
   type OfficePhoneEnrollmentCodeResponse,
   type OfficePhonePatch,
   type OfficePhoneResponse,
+  type OfficePhoneSigningKeyResponse,
   type OfficePhonesResponse,
   type OfficePhoneStatusPatch,
   type OfficeSettings,
@@ -54,10 +55,6 @@ import {
 } from '../http/session'
 import { createId, type Clock } from '../lib/ids'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
-import {
-  readSigningKeyConfiguration,
-  signingKeyStatus,
-} from '../sms-gateway-signing-key-status'
 
 interface OfficeDependencies {
   clock?: Clock
@@ -92,6 +89,7 @@ interface OfficePhoneRow {
   device_id: string | null
   is_default: number
   active: number
+  has_signing_key: number
 }
 
 interface ListedOfficePhoneRow {
@@ -101,6 +99,7 @@ interface ListedOfficePhoneRow {
   device_id: string | null
   is_default: number | null
   active: number | null
+  has_signing_key: number | null
 }
 
 interface SqlGuard {
@@ -150,6 +149,7 @@ const OFFICE_PHONE_EVENT_TYPES = {
   created: 'office.phone.created',
   updated: 'office.phone.updated',
   statusChanged: 'office.phone.status-changed',
+  signingKeyIssued: 'office.phone.signing-key-issued',
 } as const
 const ENROLLMENT_AUDIT_EVENT_TYPES = {
   requested: 'office.phone.enrollment-code.requested',
@@ -159,6 +159,7 @@ const ENROLLMENT_AUDIT_EVENT_TYPES = {
 const ENROLLMENT_AUDIT_ENTITY = 'office_phone_enrollment'
 const ENROLLMENT_CODE_LIMIT = 3
 const ENROLLMENT_CODE_WINDOW_MS = 5 * 60 * 1_000
+const SIGNING_KEY_BYTE_LENGTH = 32
 
 const PERMISSION_ROLES = PERMISSIONS.reduce<
   Record<Permission, readonly Role[]>
@@ -553,7 +554,6 @@ function memberWithStatusFromRow(
 
 function officePhoneFromRow(
   row: OfficePhoneRow,
-  signingKeys: ReturnType<typeof readSigningKeyConfiguration>,
 ): OfficePhone {
   return {
     id: row.id,
@@ -562,10 +562,12 @@ function officePhoneFromRow(
     deviceId: row.device_id,
     isDefault: row.is_default === 1,
     active: row.active === 1,
-    signingKeyStatus: signingKeyStatus(
-      signingKeys,
-      row.device_id,
-    ),
+    signingKeyStatus:
+      row.device_id === null
+        ? '해당 없음'
+        : row.has_signing_key === 1
+          ? '설정됨'
+          : '미설정',
   }
 }
 
@@ -577,7 +579,8 @@ function officePhoneRowFromList(
     row.value === null ||
     row.label === null ||
     row.is_default === null ||
-    row.active === null
+    row.active === null ||
+    row.has_signing_key === null
   ) {
     return null
   }
@@ -589,7 +592,17 @@ function officePhoneRowFromList(
     device_id: row.device_id,
     is_default: row.is_default,
     active: row.active,
+    has_signing_key: row.has_signing_key,
   }
+}
+
+function createSigningKey(): string {
+  const bytes = crypto.getRandomValues(
+    new Uint8Array(SIGNING_KEY_BYTE_LENGTH),
+  )
+  return [...bytes]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 async function loadSettings(
@@ -647,7 +660,8 @@ async function loadOfficePhone(
       phone.label,
       phone.device_id,
       phone.is_default,
-      phone.active
+      phone.active,
+      phone.signing_key IS NOT NULL AS has_signing_key
     FROM office_channels AS phone
     WHERE phone.id = ?
       AND phone.office_id = ?
@@ -664,7 +678,13 @@ async function loadStoredOfficePhone(
 ): Promise<OfficePhoneRow | null> {
   return env.DB.prepare(
     `SELECT
-      id, value, label, device_id, is_default, active
+      id,
+      value,
+      label,
+      device_id,
+      is_default,
+      active,
+      signing_key IS NOT NULL AS has_signing_key
     FROM office_channels
     WHERE id = ?
       AND office_id = ?`,
@@ -1005,7 +1025,8 @@ export function createOfficeRoutes(
         phone.label,
         phone.device_id,
         phone.is_default,
-        phone.active
+        phone.active,
+        phone.signing_key IS NOT NULL AS has_signing_key
       FROM users AS actor
       LEFT JOIN office_channels AS phone
         ON phone.office_id = ?
@@ -1030,15 +1051,108 @@ export function createOfficeRoutes(
       return error('FORBIDDEN', '업무폰 목록을 볼 수 없습니다.')
     }
 
-    const signingKeys = readSigningKeyConfiguration(
-      env.SMS_GATEWAY_SIGNING_KEYS,
-    )
     const phones = results.flatMap((listed) => {
       const row = officePhoneRowFromList(listed)
-      return row ? [officePhoneFromRow(row, signingKeys)] : []
+      return row ? [officePhoneFromRow(row)] : []
     })
 
     return json({ phones } satisfies OfficePhonesResponse)
+  }
+
+  async function issueOfficePhoneSigningKey(
+    request: Request,
+    env: Env,
+    params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '서명키를 발급할 수 없습니다.')
+    }
+
+    const phoneId = params.phoneId
+    const signingKey = createSigningKey()
+    const permission = actorPermissionGuard(
+      session.userId,
+      'office:manage',
+      'signing_key_issuer',
+    )
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: OFFICE_PHONE_EVENT_TYPES.signingKeyIssued,
+        entity: OFFICE_PHONE_ENTITY,
+        entityId: phoneId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { signingKeyStatus: '설정됨' },
+        createdAt: clock(),
+      },
+      {
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
+    const statements = [
+      env.DB.prepare(
+        `UPDATE office_channels AS phone
+        SET signing_key = ?
+        WHERE phone.id = ?
+          AND phone.office_id = ?
+          AND phone.device_id IS NOT NULL
+          AND ${permission.sql}`,
+      ).bind(
+        signingKey,
+        phoneId,
+        session.officeId,
+        ...permission.bindings,
+      ),
+      ...publication,
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'office:manage',
+      ),
+    ]
+    const [updateResult, , , authorizationResult] =
+      await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
+
+    if (changes(updateResult) === 0) {
+      if (changes(authorizationResult) === 0) {
+        return error('FORBIDDEN', '서명키를 발급할 수 없습니다.')
+      }
+      const phone = await loadStoredOfficePhone(
+        env,
+        session.officeId,
+        phoneId,
+      )
+      if (!phone) {
+        return error('NOT_FOUND', '업무폰을 찾을 수 없습니다.')
+      }
+      return error(
+        'CONFLICT',
+        'Device ID가 없는 대표번호에는 서명키를 발급할 수 없습니다.',
+      )
+    }
+
+    const row = await loadOfficePhone(env, session, phoneId)
+    if (!row) {
+      return error('INTERNAL_ERROR', '업무폰을 불러오지 못했습니다.')
+    }
+    return json(
+      {
+        phone: officePhoneFromRow(row),
+        signingKey,
+      } satisfies OfficePhoneSigningKeyResponse,
+      { headers: { 'Cache-Control': 'no-store' } },
+    )
   }
 
   async function issueOfficePhoneEnrollmentCode(
@@ -1221,13 +1335,9 @@ export function createOfficeRoutes(
     if (!row) {
       return error('INTERNAL_ERROR', '추가한 업무폰을 불러오지 못했습니다.')
     }
-    const signingKeys = readSigningKeyConfiguration(
-      env.SMS_GATEWAY_SIGNING_KEYS,
-    )
-
     return json(
       {
-        phone: officePhoneFromRow(row, signingKeys),
+        phone: officePhoneFromRow(row),
       } satisfies OfficePhoneResponse,
       { status: 201 },
     )
@@ -1321,12 +1431,8 @@ export function createOfficeRoutes(
     if (!row) {
       return error('NOT_FOUND', '업무폰을 찾을 수 없습니다.')
     }
-    const signingKeys = readSigningKeyConfiguration(
-      env.SMS_GATEWAY_SIGNING_KEYS,
-    )
-
     return json({
-      phone: officePhoneFromRow(row, signingKeys),
+      phone: officePhoneFromRow(row),
     } satisfies OfficePhoneResponse)
   }
 
@@ -1425,12 +1531,8 @@ export function createOfficeRoutes(
     if (!row) {
       return error('NOT_FOUND', '업무폰을 찾을 수 없습니다.')
     }
-    const signingKeys = readSigningKeyConfiguration(
-      env.SMS_GATEWAY_SIGNING_KEYS,
-    )
-
     return json({
-      phone: officePhoneFromRow(row, signingKeys),
+      phone: officePhoneFromRow(row),
     } satisfies OfficePhoneResponse)
   }
 
@@ -2022,6 +2124,11 @@ export function createOfficeRoutes(
       method: 'POST',
       path: '/api/office/phones/enrollment-code',
       handler: issueOfficePhoneEnrollmentCode,
+    },
+    {
+      method: 'POST',
+      path: '/api/office/phones/:phoneId/signing-key',
+      handler: issueOfficePhoneSigningKey,
     },
     {
       method: 'GET',

@@ -9,6 +9,7 @@ import {
   getAvailableOfficePhoneDevices,
   getOfficePhones,
   issueOfficePhoneEnrollmentCode,
+  issueOfficePhoneSigningKey,
   OFFICE_PHONE_LABEL_MAX_LENGTH,
   OFFICE_PHONE_VALUE_MAX_LENGTH,
   OFFICE_PHONE_VALUE_MIN_LENGTH,
@@ -341,6 +342,163 @@ function AddOfficePhoneModal({
   )
 }
 
+export function OfficePhoneSigningKeyModal({
+  phone,
+  signingKey,
+  issuing,
+  copied,
+  error,
+  onIssue,
+  onCopy,
+  onClose,
+}: {
+  phone: OfficePhone
+  signingKey: string | null
+  issuing: boolean
+  copied: boolean
+  error: string | null
+  onIssue: () => void
+  onCopy: () => void
+  onClose: () => void
+}) {
+  const reissuing = phone.signingKeyStatus === '설정됨'
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-[80] bg-ink/45"
+        onClick={issuing ? undefined : onClose}
+      />
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="office-phone-signing-key-title"
+        className="fixed z-[90] top-1/2 left-1/2 w-[520px] max-w-[calc(100%-32px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-[22px] shadow-[0_24px_56px_rgba(16,24,40,.3)]"
+      >
+        <div className="flex items-center gap-3">
+          <h2
+            id="office-phone-signing-key-title"
+            className="text-[17px] font-bold tracking-[-0.3px]"
+          >
+            {signingKey
+              ? '서명키 발급 완료'
+              : reissuing
+                ? '서명키 재발급'
+                : '서명키 발급'}
+          </h2>
+          <button
+            type="button"
+            aria-label="서명키 발급 닫기"
+            disabled={issuing}
+            onClick={onClose}
+            className="ml-auto text-[17px] text-ink-400 disabled:text-ink-200"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-ink-500">
+          <span>
+            {phone.label} · {phone.value}
+          </span>
+          {signingKey && (
+            <span className="rounded-[5px] bg-done-bg px-2 py-0.5 text-[11.5px] font-semibold text-done-fg">
+              서명키 설정됨
+            </span>
+          )}
+        </div>
+
+        {signingKey ? (
+          <>
+            <div className="mt-4 rounded-[10px] border border-line bg-surface-sunken p-3">
+              <div className="flex items-center gap-3">
+                <span className="text-[12.5px] font-semibold text-ink-700">
+                  Signing Key
+                </span>
+                <button
+                  type="button"
+                  onClick={onCopy}
+                  className="ml-auto rounded-lg bg-brand px-3 py-1.5 text-[12.5px] font-semibold text-white"
+                >
+                  {copied ? '복사됨' : '복사'}
+                </button>
+              </div>
+              <code className="mt-3 block select-all break-all rounded-lg bg-white px-3 py-2.5 font-mono text-[12px] leading-relaxed text-ink-700">
+                {signingKey}
+              </code>
+            </div>
+            <div className="mt-3 rounded-[10px] bg-doing-bg px-3 py-2.5 text-[12.5px] leading-relaxed text-doing-fg">
+              업무폰 앱의{' '}
+              <strong>설정 → Webhooks → Signing Key</strong>에 복사한
+              값을 입력하세요.
+            </div>
+            <p className="mt-3 text-[12.5px] font-semibold leading-relaxed text-open-fg">
+              이 창을 닫으면 서명키를 다시 볼 수 없습니다. 앱에
+              저장했는지 확인한 뒤 닫아 주세요.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="mt-4 rounded-[10px] border border-danger-border bg-open-bg px-3 py-2.5 text-[12.5px] leading-relaxed text-open-fg">
+              {reissuing ? (
+                <>
+                  <strong className="block">기존 키가 즉시 무효가 됩니다.</strong>
+                  새 키를 업무폰 앱에 입력할 때까지 이 폰의 문자
+                  수신이 끊깁니다.
+                </>
+              ) : (
+                <>
+                  발급한 키는 이 화면에서 한 번만 보여 줍니다. 닫기
+                  전에 업무폰 앱에 저장해 주세요.
+                </>
+              )}
+            </div>
+            <p className="mt-3 text-[12.5px] leading-relaxed text-ink-500">
+              앱 입력 경로:{' '}
+              <strong className="font-semibold text-ink-700">
+                설정 → Webhooks → Signing Key
+              </strong>
+            </p>
+          </>
+        )}
+
+        {error && (
+          <div
+            role="alert"
+            className="mt-3 rounded-lg bg-open-bg px-3 py-2 text-[12.5px] text-open-fg"
+          >
+            {error}
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={issuing}
+            onClick={onClose}
+            className="flex h-9 items-center rounded-[9px] border border-line-strong px-3.5 text-[13.5px] font-medium text-ink-600 disabled:text-ink-300"
+          >
+            {signingKey ? '확인하고 닫기' : '취소'}
+          </button>
+          {!signingKey && (
+            <button
+              type="button"
+              disabled={issuing}
+              onClick={onIssue}
+              className="flex h-9 items-center rounded-[9px] bg-brand px-4 text-[13.5px] font-semibold text-white hover:bg-brand-hover disabled:bg-line-soft"
+            >
+              {issuing
+                ? '발급 중…'
+                : reissuing
+                  ? '재발급하고 기존 키 무효화'
+                  : '서명키 발급'}
+            </button>
+          )}
+        </div>
+      </section>
+    </>
+  )
+}
+
 export function OfficePhonesCard() {
   const [phones, setPhones] = useState<OfficePhone[]>([])
   const [loading, setLoading] = useState(true)
@@ -349,6 +507,14 @@ export function OfficePhonesCard() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [labelDraft, setLabelDraft] = useState('')
   const [pendingId, setPendingId] = useState<string | null>(null)
+  const [signingKeyPhone, setSigningKeyPhone] =
+    useState<OfficePhone | null>(null)
+  const [issuedSigningKey, setIssuedSigningKey] =
+    useState<string | null>(null)
+  const [issuingSigningKey, setIssuingSigningKey] = useState(false)
+  const [signingKeyCopied, setSigningKeyCopied] = useState(false)
+  const [signingKeyError, setSigningKeyError] =
+    useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -410,6 +576,61 @@ export function OfficePhonesCard() {
     }
   }
 
+  const openSigningKey = (phone: OfficePhone) => {
+    setSigningKeyPhone(phone)
+    setIssuedSigningKey(null)
+    setSigningKeyCopied(false)
+    setSigningKeyError(null)
+  }
+
+  const closeSigningKey = () => {
+    if (issuingSigningKey) return
+    setSigningKeyPhone(null)
+    setIssuedSigningKey(null)
+    setSigningKeyCopied(false)
+    setSigningKeyError(null)
+  }
+
+  const issueSigningKey = async () => {
+    if (!signingKeyPhone) return
+
+    setIssuingSigningKey(true)
+    setSigningKeyError(null)
+    try {
+      const response = await issueOfficePhoneSigningKey(
+        signingKeyPhone.id,
+      )
+      setPhones((current) =>
+        replacePhone(current, response.phone),
+      )
+      setSigningKeyPhone(response.phone)
+      setIssuedSigningKey(response.signingKey)
+    } catch (failure: unknown) {
+      setSigningKeyError(
+        errorMessage(failure, '서명키를 발급하지 못했습니다.'),
+      )
+    } finally {
+      setIssuingSigningKey(false)
+    }
+  }
+
+  const copySigningKey = async () => {
+    if (!issuedSigningKey) return
+
+    try {
+      await navigator.clipboard.writeText(issuedSigningKey)
+      setSigningKeyCopied(true)
+      setSigningKeyError(null)
+    } catch (failure: unknown) {
+      setSigningKeyError(
+        errorMessage(
+          failure,
+          '복사하지 못했습니다. 키를 선택해 직접 복사해 주세요.',
+        ),
+      )
+    }
+  }
+
   return (
     <>
       <Card className="p-[18px]">
@@ -435,18 +656,13 @@ export function OfficePhonesCard() {
 
         <div className="mt-3 rounded-[10px] bg-surface-sunken px-3 py-2.5 text-[12px] leading-relaxed text-ink-500">
           <span className="block font-semibold text-ink-700">
-            서명키는 업무폰마다 직접 설정합니다.
+            서명키는 업무폰별로 이 화면에서 발급합니다.
           </span>
-          각 업무폰 앱의{' '}
+          발급한 값을 복사해 각 업무폰 앱의{' '}
           <strong className="font-semibold text-ink-700">
             설정 → Webhooks → Signing Key
           </strong>
-          에 키를 입력하고, Worker 시크릿{' '}
-          <code className="font-mono text-[11.5px] text-ink-700">
-            SMS_GATEWAY_SIGNING_KEYS
-          </code>
-          의 같은 Device ID 항목에도 같은 값을 넣으세요. 두 값이
-          같아야 문자 수신이 됩니다.
+          에 입력하세요. 키는 발급 직후 한 번만 표시됩니다.
         </div>
 
         {error && (
@@ -553,6 +769,18 @@ export function OfficePhonesCard() {
                       </>
                     ) : (
                       <>
+                        {phone.deviceId !== null && (
+                          <button
+                            type="button"
+                            disabled={pending}
+                            onClick={() => openSigningKey(phone)}
+                            className="text-[12.5px] font-semibold text-brand disabled:text-ink-300"
+                          >
+                            {phone.signingKeyStatus === '설정됨'
+                              ? '서명키 재발급'
+                              : '서명키 발급'}
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={pending}
@@ -605,6 +833,18 @@ export function OfficePhonesCard() {
             setPhones((current) => replacePhone(current, phone))
             setAddOpen(false)
           }}
+        />
+      )}
+      {signingKeyPhone && (
+        <OfficePhoneSigningKeyModal
+          phone={signingKeyPhone}
+          signingKey={issuedSigningKey}
+          issuing={issuingSigningKey}
+          copied={signingKeyCopied}
+          error={signingKeyError}
+          onIssue={() => void issueSigningKey()}
+          onCopy={() => void copySigningKey()}
+          onClose={closeSigningKey}
         />
       )}
     </>
