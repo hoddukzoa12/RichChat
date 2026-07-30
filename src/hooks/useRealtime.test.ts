@@ -52,6 +52,7 @@ const conversation: ConversationListItem = {
   officeChannel: {
     id: 'office-channel-1',
     label: '업무폰 1',
+    value: '01012345678',
   },
   customer: {
     id: 'customer-1',

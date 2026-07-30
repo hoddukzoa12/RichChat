@@ -1,6 +1,7 @@
 import { useInbox } from '../state/InboxContext'
 import {
   assigneeLabel,
+  officeChannelLabel,
   visibleConversations,
 } from '../state/selectors'
 import { Avatar, MenuItem, Popover, StatusBadge } from './ui'
@@ -55,7 +56,7 @@ function Row({ conv }: { conv: ConversationListItem }) {
       <div className="flex items-center gap-[7px]">
         {unread && <span className="w-[7px] h-[7px] rounded-full bg-brand flex-none" />}
         <span className="flex-none whitespace-nowrap text-[11.5px] text-ink-600 bg-fill rounded-[5px] px-[7px] py-[1.5px]">
-          {conv.officeChannel.label}
+          {officeChannelLabel(conv.officeChannel)}
         </span>
         <span
           className={`text-[14.5px] tracking-[-0.2px] ${unread ? 'font-extrabold' : 'font-bold'}`}

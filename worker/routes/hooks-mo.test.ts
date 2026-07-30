@@ -82,11 +82,23 @@ function post(body: string, secret?: string): Promise<Response> {
 }
 
 async function insertOffice(id: string): Promise<void> {
-  await env.DB.prepare(
-    'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
-  )
-    .bind(id, OFFICE_NAME, Date.now())
-    .run()
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
+    ).bind(id, OFFICE_NAME, now),
+    env.DB.prepare(
+      `INSERT INTO office_channels (
+         id, office_id, value, label, is_default, active, created_at
+       ) VALUES (?, ?, ?, ?, 1, 1, ?)`,
+    ).bind(
+      `office-channel-${id}`,
+      id,
+      '15445367',
+      'LGU+ 업무폰',
+      now,
+    ),
+  ])
 }
 
 async function expectSuccess(response: Response): Promise<void> {
@@ -369,12 +381,24 @@ describe('LGU+ MO webhook', () => {
 
   it('applies inbound status transitions to existing conversations', async () => {
     const officeId = 'office-mo-reopen'
+    const officeChannelId = 'office-channel-mo-reopen'
     const completedCustomerId = 'customer-mo-reopen'
     const doingCustomerId = 'customer-mo-doing'
     await env.DB.batch([
       env.DB.prepare(
         'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
       ).bind(officeId, OFFICE_NAME, Date.now()),
+      env.DB.prepare(
+        `INSERT INTO office_channels (
+           id, office_id, value, label, is_default, active, created_at
+         ) VALUES (?, ?, ?, ?, 1, 1, ?)`,
+      ).bind(
+        officeChannelId,
+        officeId,
+        '15445367',
+        'LGU+ 업무폰',
+        Date.now(),
+      ),
       env.DB.prepare(
         `INSERT INTO customers (
            id, office_id, phone_e164, name, created_at, updated_at
@@ -403,25 +427,29 @@ describe('LGU+ MO webhook', () => {
       ),
       env.DB.prepare(
         `INSERT INTO conversations (
-           id, office_id, customer_id, status, created_at, updated_at
+           id, office_id, customer_id, office_channel_id, status,
+           created_at, updated_at
          )
-         VALUES (?, ?, ?, '완료', ?, ?)`,
+         VALUES (?, ?, ?, ?, '완료', ?, ?)`,
       ).bind(
         'conversation-mo-reopen',
         officeId,
         completedCustomerId,
+        officeChannelId,
         Date.now(),
         Date.now(),
       ),
       env.DB.prepare(
         `INSERT INTO conversations (
-           id, office_id, customer_id, status, created_at, updated_at
+           id, office_id, customer_id, office_channel_id, status,
+           created_at, updated_at
          )
-         VALUES (?, ?, ?, '처리중', ?, ?)`,
+         VALUES (?, ?, ?, ?, '처리중', ?, ?)`,
       ).bind(
         'conversation-mo-doing',
         officeId,
         doingCustomerId,
+        officeChannelId,
         Date.now(),
         Date.now(),
       ),

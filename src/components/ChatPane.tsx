@@ -16,7 +16,10 @@ import { markConversationRead } from '../api/endpoints/reads'
 import { useConversationWrite } from '../hooks/useConversationWrite'
 import { useInbox } from '../state/InboxContext'
 import { currentConv } from '../state/conversations'
-import { assigneeLabel } from '../state/selectors'
+import {
+  assigneeLabel,
+  officeChannelLabel,
+} from '../state/selectors'
 import {
   threadFor,
   type ThreadFailure,
@@ -275,7 +278,7 @@ function Header({
         </div>
         <div className="flex items-center gap-1.5 text-[12.5px] text-ink-400">
           <span className="rounded bg-fill px-1.5 py-0.5 font-semibold text-ink-600">
-            {cur.officeChannel.label}
+            {officeChannelLabel(cur.officeChannel)}
           </span>
           <span>{cur.customer.phoneE164}</span>
         </div>

@@ -20,15 +20,17 @@ import {
   type MessageSender,
 } from '../../shared/wire/message'
 import { loadMessageAttachments } from '../attachments'
+import {
+  conversationOfficeChannelFromRow,
+  type ConversationOfficeChannelRow,
+} from '../conversation-office-channel'
 import { error } from '../http/error'
 import type { Route, RouteParams } from '../http/router'
 import { requireSession } from '../http/session'
 import { json } from '../http/respond'
 
-interface DetailRow {
+interface DetailRow extends ConversationOfficeChannelRow {
   id: string
-  office_channel_id: string
-  office_channel_label: string
   status: Status
   label: string
   archived_at: number | null
@@ -263,6 +265,7 @@ async function getConversationDetail(
         conversations.id,
         office_channels.id AS office_channel_id,
         office_channels.label AS office_channel_label,
+        office_channels.value AS office_channel_value,
         conversations.status,
         conversations.label,
         conversations.archived_at,
@@ -277,7 +280,7 @@ async function getConversationDetail(
       INNER JOIN customers
         ON customers.id = conversations.customer_id
         AND customers.office_id = conversations.office_id
-      INNER JOIN office_channels
+      LEFT JOIN office_channels
         ON office_channels.id = conversations.office_channel_id
       WHERE conversations.id = ?
         AND conversations.office_id = ?`,
@@ -352,10 +355,7 @@ async function getConversationDetail(
   }))
   const conversation: ConversationDetail = {
     id: detail.id,
-    officeChannel: {
-      id: detail.office_channel_id,
-      label: detail.office_channel_label,
-    },
+    officeChannel: conversationOfficeChannelFromRow(detail),
     status: detail.status,
     label: detail.label,
     archived: detail.archived_at !== null,

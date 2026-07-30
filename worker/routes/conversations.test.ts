@@ -326,6 +326,7 @@ describe('Conversation list API', () => {
         officeChannel: {
           id: `office-channel-${fixture.key}`,
           label: '업무폰 1',
+          value: `0100000${String(fixtureSequence).padStart(4, '0')}`,
         },
         customer: {
           id: `customer-${fixture.key}-joined`,

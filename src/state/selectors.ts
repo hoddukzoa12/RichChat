@@ -3,6 +3,7 @@ import {
   type ConversationListAssignee,
   type ConversationListItem,
   type ConversationListParams,
+  type ConversationOfficeChannel,
 } from '../../shared/wire/conversation'
 import type { InboxState } from './inbox'
 
@@ -21,6 +22,15 @@ export function assigneeLabel(c: AssigneeSource): string {
   return c.assignees.length > 1
     ? `${name} 외 ${c.assignees.length - 1}`
     : name
+}
+
+export function officeChannelLabel(
+  channel: ConversationOfficeChannel | null,
+): string {
+  if (channel === null) return '업무폰 미지정'
+
+  const label = channel.label.trim()
+  return label ? `${label} · ${channel.value}` : channel.value
 }
 
 /** 목록 훅과 실시간 재동기화가 같은 서버 필터를 쓰게 한다. */
