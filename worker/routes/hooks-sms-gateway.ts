@@ -31,6 +31,13 @@ interface OfficeChannelRow {
   office_id: string
 }
 
+class GatewayConfigurationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'GatewayConfigurationError'
+  }
+}
+
 class GatewayPayloadError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
@@ -154,6 +161,7 @@ export function parseGatewayReceivedAt(value: string): number | null {
 
 function parseSmsReceivedEnvelope(
   envelope: Record<string, unknown>,
+  deviceId: string,
 ): SmsReceivedEnvelope {
   const rawPayload = envelope.payload
   if (!isRecord(rawPayload)) {
@@ -169,7 +177,7 @@ function parseSmsReceivedEnvelope(
   }
 
   return {
-    deviceId: requiredString(envelope, 'deviceId'),
+    deviceId,
     payload: {
       messageId: requiredString(rawPayload, 'messageId'),
       message: messageString(rawPayload, 'message'),
@@ -179,6 +187,48 @@ function parseSmsReceivedEnvelope(
       receivedAt,
     },
   }
+}
+
+function signingKeyForDevice(
+  rawSigningKeys: string,
+  deviceId: string,
+): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(rawSigningKeys)
+  } catch (cause) {
+    throw new GatewayConfigurationError(
+      'SMS Gateway 서명키 설정이 JSON 형식이 아닙니다.',
+      { cause },
+    )
+  }
+  if (!isRecord(parsed)) {
+    throw new GatewayConfigurationError(
+      'SMS Gateway 서명키 설정은 기기 ID별 객체여야 합니다.',
+    )
+  }
+
+  for (const signingKey of Object.values(parsed)) {
+    if (typeof signingKey !== 'string' || signingKey.length === 0) {
+      throw new GatewayConfigurationError(
+        'SMS Gateway 서명키 설정에 빈 키가 있습니다.',
+      )
+    }
+  }
+
+  if (!Object.hasOwn(parsed, deviceId)) return null
+  return parsed[deviceId] as string
+}
+
+/**
+ * 앱의 32비트 messageId는 기기 간 또는 다른 사업자의 키와 겹칠 수 있다.
+ * 사업자와 deviceId를 함께 넣어 전역 mo_key 인덱스에서 네임스페이스를 분리한다.
+ */
+export function smsGatewayIdempotencyKey(
+  deviceId: string,
+  messageId: string,
+): string {
+  return `sms-gateway/${encodeURIComponent(deviceId)}/${encodeURIComponent(messageId)}`
 }
 
 function decodeSignature(value: string): Uint8Array | null {
@@ -293,15 +343,6 @@ export function createSmsGatewayWebhookHandler(
       return error('BAD_REQUEST', '요청 본문을 읽을 수 없습니다.')
     }
 
-    const signingKey = env.SMS_GATEWAY_SIGNING_KEY
-    if (
-      typeof signingKey !== 'string' ||
-      signingKey.length === 0 ||
-      !(await authenticate(request, signingKey, rawBody, receivedAt))
-    ) {
-      return error('UNAUTHORIZED', '웹훅 서명이 올바르지 않습니다.')
-    }
-
     let rawEnvelope: unknown
     try {
       rawEnvelope = JSON.parse(rawBody)
@@ -310,6 +351,35 @@ export function createSmsGatewayWebhookHandler(
     }
     if (!isRecord(rawEnvelope)) {
       return error('BAD_REQUEST', '웹훅 페이로드가 올바르지 않습니다.')
+    }
+
+    let deviceId: string
+    try {
+      deviceId = requiredString(rawEnvelope, 'deviceId')
+    } catch (cause) {
+      if (cause instanceof GatewayPayloadError) {
+        return error('BAD_REQUEST', cause.message)
+      }
+      return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+    }
+
+    let signingKey: string | null
+    try {
+      signingKey = signingKeyForDevice(
+        env.SMS_GATEWAY_SIGNING_KEYS,
+        deviceId,
+      )
+    } catch (cause) {
+      console.error('SMS Gateway 서명키 설정을 읽지 못했습니다.', {
+        error: cause instanceof Error ? cause.message : String(cause),
+      })
+      return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+    }
+    if (
+      signingKey === null ||
+      !(await authenticate(request, signingKey, rawBody, receivedAt))
+    ) {
+      return error('UNAUTHORIZED', '웹훅 서명이 올바르지 않습니다.')
     }
 
     const event = rawEnvelope.event
@@ -321,7 +391,7 @@ export function createSmsGatewayWebhookHandler(
     let received: SmsReceivedEnvelope
     let customerPhoneE164: string
     try {
-      received = parseSmsReceivedEnvelope(rawEnvelope)
+      received = parseSmsReceivedEnvelope(rawEnvelope, deviceId)
       const normalized = normalizeKoreanPhoneValue(
         received.payload.sender,
       )
@@ -379,7 +449,10 @@ export function createSmsGatewayWebhookHandler(
           body: received.payload.message,
           occurredAt: received.payload.receivedAt,
           receivedAt,
-          idempotencyKey: received.payload.messageId,
+          idempotencyKey: smsGatewayIdempotencyKey(
+            received.deviceId,
+            received.payload.messageId,
+          ),
           receptionChannelId: officeChannel.id,
           eventMetadata: {
             deviceId: received.deviceId,
