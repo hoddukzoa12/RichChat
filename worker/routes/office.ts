@@ -27,9 +27,12 @@ import {
   type OfficeMemberStatusPatch,
   type OfficeMemberWithStatus,
   type OfficePhone,
+  type OfficePhoneAvailableDevicesResponse,
   type OfficePhoneCreate,
+  type OfficePhoneEnrollmentCodeResponse,
   type OfficePhonePatch,
   type OfficePhoneResponse,
+  type OfficePhoneSigningKeyDeployResponse,
   type OfficePhonesResponse,
   type OfficePhoneStatusPatch,
   type OfficeSettings,
@@ -38,6 +41,12 @@ import {
 } from '../../shared/wire/office'
 import { changes } from '../db/d1'
 import { publish } from '../db/events'
+import {
+  GatewayAdminError,
+  gatewayAdminClient,
+  type GatewayAdminClient,
+} from '../gateway/admin'
+import { parseSigningKeys } from '../gateway/signing-keys'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route } from '../http/router'
@@ -55,6 +64,7 @@ import {
 interface OfficeDependencies {
   clock?: Clock
   idFactory?: () => string
+  gatewayAdmin?: GatewayAdminClient
 }
 
 interface OfficeSettingsRow {
@@ -143,6 +153,16 @@ const OFFICE_PHONE_EVENT_TYPES = {
   updated: 'office.phone.updated',
   statusChanged: 'office.phone.status-changed',
 } as const
+const ENROLLMENT_AUDIT_EVENT_TYPES = {
+  requested: 'office.phone.enrollment-code.requested',
+  succeeded: 'office.phone.enrollment-code.succeeded',
+  failed: 'office.phone.enrollment-code.failed',
+} as const
+const ENROLLMENT_AUDIT_ENTITY = 'office_phone_enrollment'
+const ENROLLMENT_CODE_LIMIT = 3
+const ENROLLMENT_CODE_WINDOW_MS = 5 * 60 * 1_000
+const SIGNING_KEY_DEPLOYED_MESSAGE =
+  '계정 설정을 갱신했습니다. 업무폰 앱의 주기 동기화가 끝난 뒤 반영되며 즉시 확인할 수 없습니다.'
 
 const PERMISSION_ROLES = PERMISSIONS.reduce<
   Record<Permission, readonly Role[]>
@@ -744,11 +764,89 @@ async function officePhoneMutationFailure(
   return null
 }
 
+async function reserveEnrollmentCodeAttempt(
+  env: Env,
+  session: SessionContext,
+  attemptId: string,
+  now: number,
+): Promise<boolean> {
+  const publication = publish(
+    env.DB,
+    {
+      officeId: session.officeId,
+      type: ENROLLMENT_AUDIT_EVENT_TYPES.requested,
+      entity: ENROLLMENT_AUDIT_ENTITY,
+      entityId: attemptId,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: { result: '요청됨' },
+      createdAt: now,
+    },
+    {
+      query: `SELECT 1
+        WHERE (
+          SELECT COUNT(*)
+          FROM events
+          WHERE actor_id = ?
+            AND type = ?
+            AND created_at >= ?
+        ) < ?`,
+      bindings: [
+        session.userId,
+        ENROLLMENT_AUDIT_EVENT_TYPES.requested,
+        now - ENROLLMENT_CODE_WINDOW_MS,
+        ENROLLMENT_CODE_LIMIT,
+      ],
+    },
+  )
+  const [, auditResult] = await env.DB.batch([...publication])
+  return changes(auditResult) === 1
+}
+
+async function recordEnrollmentCodeResult(
+  env: Env,
+  session: SessionContext,
+  attemptId: string,
+  succeeded: boolean,
+  now: number,
+): Promise<void> {
+  const eventType = succeeded
+    ? ENROLLMENT_AUDIT_EVENT_TYPES.succeeded
+    : ENROLLMENT_AUDIT_EVENT_TYPES.failed
+  await env.DB.batch([
+    ...publish(env.DB, {
+      officeId: session.officeId,
+      type: eventType,
+      entity: ENROLLMENT_AUDIT_ENTITY,
+      entityId: attemptId,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: { result: succeeded ? '성공' : '실패' },
+      createdAt: now,
+    }),
+  ])
+}
+
+function gatewayFailure(cause: unknown): Response {
+  const message =
+    cause instanceof GatewayAdminError
+      ? cause.message
+      : 'SMS Gateway 관리 API 요청을 완료하지 못했습니다.'
+  if (!(cause instanceof GatewayAdminError)) {
+    console.error('SMS Gateway 관리 API 요청에 실패했습니다.', {
+      error: cause instanceof Error ? cause.message : String(cause),
+    })
+  }
+  return error('BAD_GATEWAY', message)
+}
+
 export function createOfficeRoutes(
   dependencies: OfficeDependencies = {},
 ): Route[] {
   const clock = dependencies.clock ?? Date.now
   const idFactory = dependencies.idFactory ?? createId
+  const gatewayAdmin =
+    dependencies.gatewayAdmin ?? gatewayAdminClient
 
   async function getSettings(
     request: Request,
@@ -945,6 +1043,121 @@ export function createOfficeRoutes(
     })
 
     return json({ phones } satisfies OfficePhonesResponse)
+  }
+
+  async function issueOfficePhoneEnrollmentCode(
+    request: Request,
+    env: Env,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '업무폰 등록 코드를 발급할 수 없습니다.')
+    }
+
+    const attemptId = idFactory()
+    const reserved = await reserveEnrollmentCodeAttempt(
+      env,
+      session,
+      attemptId,
+      clock(),
+    )
+    if (!reserved) {
+      return error(
+        'RATE_LIMITED',
+        '등록 코드는 5분에 3번까지 발급할 수 있습니다. 잠시 후 다시 시도해 주세요.',
+      )
+    }
+
+    try {
+      const enrollment = await gatewayAdmin.issueEnrollmentCode(env)
+      await recordEnrollmentCodeResult(
+        env,
+        session,
+        attemptId,
+        true,
+        clock(),
+      )
+      return json(
+        { enrollment } satisfies OfficePhoneEnrollmentCodeResponse,
+        { headers: { 'Cache-Control': 'no-store' } },
+      )
+    } catch (cause) {
+      await recordEnrollmentCodeResult(
+        env,
+        session,
+        attemptId,
+        false,
+        clock(),
+      )
+      return gatewayFailure(cause)
+    }
+  }
+
+  async function getAvailableOfficePhoneDevices(
+    request: Request,
+    env: Env,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '등록 가능한 업무폰을 볼 수 없습니다.')
+    }
+
+    try {
+      const gatewayDevices = await gatewayAdmin.listDevices(env)
+      const stored = await env.DB.prepare(
+        `SELECT device_id
+        FROM office_channels
+        WHERE device_id IS NOT NULL`,
+      ).all<{ device_id: string }>()
+      const registered = new Set(
+        stored.results.map(({ device_id }) => device_id),
+      )
+      const devices = gatewayDevices.flatMap((device) =>
+        registered.has(device.id)
+          ? []
+          : [{ deviceId: device.id, name: device.name }],
+      )
+      return json({
+        devices,
+      } satisfies OfficePhoneAvailableDevicesResponse)
+    } catch (cause) {
+      return gatewayFailure(cause)
+    }
+  }
+
+  async function deployOfficePhoneSigningKey(
+    request: Request,
+    env: Env,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '업무폰 서명키를 배포할 수 없습니다.')
+    }
+
+    const signingKeys = parseSigningKeys(
+      env.SMS_GATEWAY_SIGNING_KEYS,
+    )
+    if (!signingKeys || signingKeys.kind !== 'shared') {
+      return error(
+        'CONFLICT',
+        '공통 SMS Gateway 서명키가 설정되지 않았습니다.',
+      )
+    }
+
+    try {
+      await gatewayAdmin.deploySigningKey(
+        env,
+        signingKeys.defaultKey,
+      )
+      return json({
+        message: SIGNING_KEY_DEPLOYED_MESSAGE,
+      } satisfies OfficePhoneSigningKeyDeployResponse)
+    } catch (cause) {
+      return gatewayFailure(cause)
+    }
   }
 
   async function createOfficePhone(
@@ -1841,6 +2054,21 @@ export function createOfficeRoutes(
       method: 'GET',
       path: '/api/office/phones',
       handler: getOfficePhones,
+    },
+    {
+      method: 'POST',
+      path: '/api/office/phones/enrollment-code',
+      handler: issueOfficePhoneEnrollmentCode,
+    },
+    {
+      method: 'GET',
+      path: '/api/office/phones/available-devices',
+      handler: getAvailableOfficePhoneDevices,
+    },
+    {
+      method: 'POST',
+      path: '/api/office/phones/signing-key',
+      handler: deployOfficePhoneSigningKey,
     },
     {
       method: 'POST',

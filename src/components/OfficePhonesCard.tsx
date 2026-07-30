@@ -1,18 +1,23 @@
 import {
+  useCallback,
   useEffect,
   useState,
   type FormEvent,
 } from 'react'
 import {
   createOfficePhone,
+  deployOfficePhoneSigningKey,
+  getAvailableOfficePhoneDevices,
   getOfficePhones,
-  OFFICE_PHONE_DEVICE_ID_MAX_LENGTH,
+  issueOfficePhoneEnrollmentCode,
   OFFICE_PHONE_LABEL_MAX_LENGTH,
   OFFICE_PHONE_VALUE_MAX_LENGTH,
   OFFICE_PHONE_VALUE_MIN_LENGTH,
   updateOfficePhone,
   updateOfficePhoneStatus,
   type OfficePhone,
+  type OfficePhoneAvailableDevice,
+  type OfficePhoneEnrollmentCode,
 } from '../api/endpoints'
 import {
   MEMBER_STATUS_VIEW,
@@ -45,19 +50,93 @@ function AddOfficePhoneModal({
 }) {
   const [value, setValue] = useState('')
   const [label, setLabel] = useState('')
-  const [deviceId, setDeviceId] = useState('')
+  const [devices, setDevices] = useState<
+    OfficePhoneAvailableDevice[]
+  >([])
+  const [selectedDeviceId, setSelectedDeviceId] = useState('')
+  const [enrollment, setEnrollment] =
+    useState<OfficePhoneEnrollmentCode | null>(null)
+  const [issuing, setIssuing] = useState(false)
+  const [loadingDevices, setLoadingDevices] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const loadDevices = useCallback(async () => {
+    setLoadingDevices(true)
+    try {
+      const response = await getAvailableOfficePhoneDevices()
+      setDevices(response.devices)
+      setError(null)
+      setSelectedDeviceId((current) =>
+        response.devices.some(
+          ({ deviceId }) => deviceId === current,
+        )
+          ? current
+          : response.devices[0]?.deviceId ?? '',
+      )
+    } catch (failure: unknown) {
+      setError(
+        errorMessage(
+          failure,
+          '등록된 기기를 찾지 못했습니다.',
+        ),
+      )
+    } finally {
+      setLoadingDevices(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadDevices()
+  }, [loadDevices])
+
+  useEffect(() => {
+    if (!enrollment) return
+    const validUntil = Date.parse(enrollment.validUntil)
+    if (!Number.isFinite(validUntil) || validUntil <= Date.now()) return
+
+    const timer = window.setInterval(() => {
+      if (Date.now() >= validUntil) {
+        window.clearInterval(timer)
+        return
+      }
+      void loadDevices()
+    }, 3_000)
+    return () => window.clearInterval(timer)
+  }, [enrollment, loadDevices])
+
+  const issueCode = async () => {
+    setIssuing(true)
+    setError(null)
+    try {
+      const response = await issueOfficePhoneEnrollmentCode()
+      setEnrollment(response.enrollment)
+      await loadDevices()
+    } catch (failure: unknown) {
+      setError(
+        errorMessage(
+          failure,
+          '업무폰 등록 코드를 발급하지 못했습니다.',
+        ),
+      )
+    } finally {
+      setIssuing(false)
+    }
+  }
+
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (!selectedDeviceId) {
+      setError('등록할 업무폰을 선택해 주세요.')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
       const response = await createOfficePhone({
         value,
         label,
-        deviceId,
+        deviceId: selectedDeviceId,
       })
       onAdded(response.phone)
     } catch (failure: unknown) {
@@ -93,10 +172,106 @@ function AddOfficePhoneModal({
           </button>
         </div>
         <p className="mt-1 mb-[18px] text-[13px] leading-relaxed text-ink-400">
-          Android SMS Gateway에 표시된 전화번호와 Device ID를
-          등록합니다.
+          등록 코드를 업무폰 앱에 입력하면 기기를 자동으로 찾습니다.
         </p>
 
+        <section className="rounded-[10px] border border-line bg-surface-sunken p-3">
+          <div className="flex items-center gap-3">
+            <span className="text-[12.5px] font-semibold text-ink-700">
+              1. 앱 등록 코드
+            </span>
+            <button
+              type="button"
+              disabled={issuing}
+              onClick={() => void issueCode()}
+              className="ml-auto rounded-lg bg-brand px-3 py-1.5 text-[12.5px] font-semibold text-white disabled:bg-line-soft"
+            >
+              {issuing
+                ? '발급 중…'
+                : enrollment
+                  ? '새 코드 발급'
+                  : '등록 코드 받기'}
+            </button>
+          </div>
+          {enrollment ? (
+            <div className="mt-3 grid gap-1.5 text-xs sm:grid-cols-[78px_minmax(0,1fr)]">
+              <span className="text-ink-400">API URL</span>
+              <code className="break-all font-mono text-ink-700">
+                {enrollment.apiUrl}
+              </code>
+              <span className="text-ink-400">6자리 코드</span>
+              <strong className="font-mono text-xl tracking-[0.22em] text-brand">
+                {enrollment.code}
+              </strong>
+              <span className="text-ink-400">만료</span>
+              <span className="text-ink-700">
+                {new Date(enrollment.validUntil).toLocaleString(
+                  'ko-KR',
+                )}
+              </span>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs leading-relaxed text-ink-500">
+              앱의 Sign in by Code에서 API URL과 6자리 코드를
+              입력해 주세요. 코드는 1회용이며 표시된 시각에
+              만료됩니다.
+            </p>
+          )}
+        </section>
+
+        <section className="mt-4">
+          <div className="flex items-center gap-3">
+            <span className="text-[12.5px] font-semibold text-ink-700">
+              2. 감지된 업무폰
+            </span>
+            <button
+              type="button"
+              disabled={loadingDevices}
+              onClick={() => void loadDevices()}
+              className="ml-auto text-[12.5px] font-semibold text-brand disabled:text-ink-300"
+            >
+              {loadingDevices ? '찾는 중…' : '기기 다시 찾기'}
+            </button>
+          </div>
+          {devices.length > 0 ? (
+            <div className="mt-2 flex flex-col gap-2">
+              {devices.map((device) => (
+                <label
+                  key={device.deviceId}
+                  className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-line px-3 py-2.5"
+                >
+                  <input
+                    type="radio"
+                    name="office-phone-device"
+                    required
+                    checked={selectedDeviceId === device.deviceId}
+                    onChange={() =>
+                      setSelectedDeviceId(device.deviceId)
+                    }
+                    className="mt-0.5"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-semibold text-ink-700">
+                      {device.name || '이름 없는 Android 기기'}
+                    </span>
+                    <code className="block break-all font-mono text-[11.5px] text-ink-400">
+                      {device.deviceId}
+                    </code>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 rounded-lg border border-dashed border-line-strong px-3 py-4 text-center text-xs leading-relaxed text-ink-400">
+              아직 새 기기가 없습니다. 앱 등록이 끝나면 이 화면이
+              자동으로 기기를 찾습니다.
+            </p>
+          )}
+        </section>
+
+        <div className="mb-3 mt-4 text-[12.5px] font-semibold text-ink-700">
+          3. 업무폰 정보
+        </div>
         <label className="block">
           <span className="mb-[7px] block text-[12.5px] font-semibold text-ink-700">
             전화번호
@@ -136,26 +311,6 @@ function AddOfficePhoneModal({
           />
         </label>
 
-        <label className="mt-4 block">
-          <span className="mb-[7px] block text-[12.5px] font-semibold text-ink-700">
-            Device ID
-          </span>
-          <input
-            required
-            maxLength={OFFICE_PHONE_DEVICE_ID_MAX_LENGTH}
-            value={deviceId}
-            onChange={(event) => setDeviceId(event.target.value)}
-            placeholder="Android SMS Gateway Device ID"
-            className="w-full rounded-[9px] border border-line-strong px-3 py-2.5 font-mono text-[13px] text-ink outline-none focus:border-brand"
-          />
-        </label>
-
-        <div className="mt-4 rounded-[10px] bg-doing-bg px-3 py-2.5 text-[12.5px] leading-relaxed text-doing-fg">
-          Device ID를 바꾸면 Worker의 서명키 시크릿도 함께 갱신해야
-          합니다. 기기를 교체할 때는 새 업무폰을 추가한 뒤 기존
-          업무폰을 비활성화해 주세요.
-        </div>
-
         {error && (
           <div
             role="alert"
@@ -176,10 +331,10 @@ function AddOfficePhoneModal({
           </button>
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || !selectedDeviceId}
             className="flex h-9 items-center rounded-[9px] bg-brand px-4 text-[13.5px] font-semibold text-white hover:bg-brand-hover disabled:bg-line-soft"
           >
-            {saving ? '추가 중…' : '추가'}
+            {saving ? '등록 중…' : '업무폰 등록'}
           </button>
         </div>
       </form>
@@ -195,6 +350,8 @@ export function OfficePhonesCard() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [labelDraft, setLabelDraft] = useState('')
   const [pendingId, setPendingId] = useState<string | null>(null)
+  const [deployingKey, setDeployingKey] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -256,6 +413,25 @@ export function OfficePhonesCard() {
     }
   }
 
+  const deploySigningKey = async () => {
+    setDeployingKey(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const response = await deployOfficePhoneSigningKey()
+      setNotice(response.message)
+    } catch (failure: unknown) {
+      setError(
+        errorMessage(
+          failure,
+          '업무폰 공통 서명키를 배포하지 못했습니다.',
+        ),
+      )
+    } finally {
+      setDeployingKey(false)
+    }
+  }
+
   return (
     <>
       <Card className="p-[18px]">
@@ -268,14 +444,33 @@ export function OfficePhonesCard() {
               LGU+ 대표번호와 Android SMS Gateway 업무폰을 관리합니다.
             </span>
           </span>
-          <button
-            type="button"
-            onClick={() => setAddOpen(true)}
-            className="ml-auto flex-none text-[12.5px] font-semibold text-brand"
-          >
-            ＋ 업무폰 추가
-          </button>
+          <span className="ml-auto flex flex-none items-center gap-3">
+            <button
+              type="button"
+              disabled={deployingKey}
+              onClick={() => void deploySigningKey()}
+              className="text-[12.5px] font-semibold text-ink-500 disabled:text-ink-300"
+            >
+              {deployingKey ? '배포 중…' : '공통 서명키 배포'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setAddOpen(true)}
+              className="text-[12.5px] font-semibold text-brand"
+            >
+              ＋ 업무폰 등록
+            </button>
+          </span>
         </div>
+
+        {notice && (
+          <div
+            role="status"
+            className="mt-3 rounded-lg bg-done-bg px-3 py-2 text-[12.5px] leading-relaxed text-done-fg"
+          >
+            {notice}
+          </div>
+        )}
 
         {error && (
           <div
@@ -426,9 +621,9 @@ export function OfficePhonesCard() {
         )}
 
         <div className="mt-3 rounded-[10px] bg-surface-sunken px-3 py-2.5 text-[12px] leading-relaxed text-ink-500">
-          Device ID는 등록 후 수정하지 않습니다. 기기 교체 시 새
-          업무폰을 추가하고 서명키 시크릿을 갱신한 뒤 기존 업무폰을
-          비활성화하세요.
+          공통 서명키 배포는 게이트웨이 계정 설정만 갱신합니다.
+          업무폰 앱이 주기 동기화한 뒤 반영되므로 즉시 완료 여부를
+          확인할 수 없습니다.
         </div>
       </Card>
 

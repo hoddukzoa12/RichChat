@@ -106,3 +106,26 @@ export interface OfficePhonePatch {
 export interface OfficePhoneStatusPatch {
   active: boolean
 }
+
+export interface OfficePhoneEnrollmentCode {
+  apiUrl: string
+  code: string
+  validUntil: string
+}
+
+export interface OfficePhoneEnrollmentCodeResponse {
+  enrollment: OfficePhoneEnrollmentCode
+}
+
+export interface OfficePhoneAvailableDevice {
+  deviceId: string
+  name: string
+}
+
+export interface OfficePhoneAvailableDevicesResponse {
+  devices: OfficePhoneAvailableDevice[]
+}
+
+export interface OfficePhoneSigningKeyDeployResponse {
+  message: string
+}

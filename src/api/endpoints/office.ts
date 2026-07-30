@@ -6,9 +6,12 @@ import type {
   OfficeMemberStatusPatch,
   OfficeMembersResponse,
   OfficePhoneCreate,
+  OfficePhoneAvailableDevicesResponse,
+  OfficePhoneEnrollmentCodeResponse,
   OfficePhonePatch,
   OfficePhoneResponse,
   OfficePhonesResponse,
+  OfficePhoneSigningKeyDeployResponse,
   OfficePhoneStatusPatch,
   OfficeSettingsPatch,
   OfficeSettingsResponse,
@@ -27,11 +30,16 @@ export type {
   OfficeMembersResponse,
   OfficeMemberWithStatus,
   OfficePhone,
+  OfficePhoneAvailableDevice,
+  OfficePhoneAvailableDevicesResponse,
   OfficePhoneCreate,
+  OfficePhoneEnrollmentCode,
+  OfficePhoneEnrollmentCodeResponse,
   OfficePhonePatch,
   OfficePhoneResponse,
   OfficePhonesResponse,
   OfficePhoneSigningKeyStatus,
+  OfficePhoneSigningKeyDeployResponse,
   OfficePhoneStatusPatch,
   OfficeSettings,
   OfficeSettingsPatch,
@@ -68,6 +76,32 @@ export function getOfficePhones(
   signal?: AbortSignal,
 ): Promise<OfficePhonesResponse> {
   return apiRequest('/api/office/phones', { signal })
+}
+
+export function issueOfficePhoneEnrollmentCode(
+  signal?: AbortSignal,
+): Promise<OfficePhoneEnrollmentCodeResponse> {
+  return apiRequest('/api/office/phones/enrollment-code', {
+    method: 'POST',
+    signal,
+  })
+}
+
+export function getAvailableOfficePhoneDevices(
+  signal?: AbortSignal,
+): Promise<OfficePhoneAvailableDevicesResponse> {
+  return apiRequest('/api/office/phones/available-devices', {
+    signal,
+  })
+}
+
+export function deployOfficePhoneSigningKey(
+  signal?: AbortSignal,
+): Promise<OfficePhoneSigningKeyDeployResponse> {
+  return apiRequest('/api/office/phones/signing-key', {
+    method: 'POST',
+    signal,
+  })
 }
 
 export function createOfficePhone(

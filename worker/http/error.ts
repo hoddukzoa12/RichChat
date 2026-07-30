@@ -9,6 +9,8 @@ export type ErrorCode =
   | 'NOT_FOUND'
   | 'CONFLICT'
   | 'CONFLICT_VERSION'
+  | 'RATE_LIMITED'
+  | 'BAD_GATEWAY'
   | 'GONE'
   | 'INTERNAL_ERROR'
 
@@ -21,6 +23,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
   CONFLICT: 409,
   CONFLICT_VERSION: 409,
+  RATE_LIMITED: 429,
+  BAD_GATEWAY: 502,
   GONE: 410,
   INTERNAL_ERROR: 500,
 }
