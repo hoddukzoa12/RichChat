@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ConversationMessage } from '../../shared/wire/message'
 import type { ThreadMessage } from '../state/thread'
 import {
+  handleComposerKeyDown,
   MessageBubble,
   MessageComposer,
   restoredScrollTop,
@@ -239,6 +240,114 @@ describe('thread presentation', () => {
       '첨부 파일 발송은 아직 지원하지 않습니다.',
     )
     expect(markup).not.toContain('서버 문구는 바뀔 수 있습니다.')
+  })
+
+  it('does not submit Enter while an IME composition is active', () => {
+    const preventDefault = vi.fn()
+    const submit = vi.fn()
+
+    handleComposerKeyDown(
+      {
+        key: 'Enter',
+        shiftKey: false,
+        nativeEvent: {
+          isComposing: true,
+          keyCode: 13,
+        },
+        preventDefault,
+      },
+      submit,
+    )
+
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('does not submit the legacy IME Enter signal', () => {
+    const preventDefault = vi.fn()
+    const submit = vi.fn()
+
+    handleComposerKeyDown(
+      {
+        key: 'Enter',
+        shiftKey: false,
+        nativeEvent: {
+          isComposing: false,
+          keyCode: 229,
+        },
+        preventDefault,
+      },
+      submit,
+    )
+
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('submits normally after ignoring an IME Enter', () => {
+    const preventDefault = vi.fn()
+    const submit = vi.fn()
+
+    handleComposerKeyDown(
+      {
+        key: 'Enter',
+        shiftKey: false,
+        nativeEvent: {
+          isComposing: true,
+          keyCode: 229,
+        },
+        preventDefault,
+      },
+      submit,
+    )
+    handleComposerKeyDown(
+      {
+        key: 'Enter',
+        shiftKey: false,
+        nativeEvent: {
+          isComposing: false,
+          keyCode: 13,
+        },
+        preventDefault,
+      },
+      submit,
+    )
+
+    expect(preventDefault).toHaveBeenCalledOnce()
+    expect(submit).toHaveBeenCalledOnce()
+  })
+
+  it('submits plain Enter but preserves Shift+Enter', () => {
+    const preventDefault = vi.fn()
+    const submit = vi.fn()
+
+    handleComposerKeyDown(
+      {
+        key: 'Enter',
+        shiftKey: false,
+        nativeEvent: {
+          isComposing: false,
+          keyCode: 13,
+        },
+        preventDefault,
+      },
+      submit,
+    )
+    handleComposerKeyDown(
+      {
+        key: 'Enter',
+        shiftKey: true,
+        nativeEvent: {
+          isComposing: false,
+          keyCode: 13,
+        },
+        preventDefault,
+      },
+      submit,
+    )
+
+    expect(preventDefault).toHaveBeenCalledOnce()
+    expect(submit).toHaveBeenCalledOnce()
   })
 
   it('preserves the visible scroll anchor after prepending history', () => {

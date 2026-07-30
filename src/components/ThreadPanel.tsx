@@ -483,6 +483,33 @@ function imageLimitMessage(rejectedCount: number): string {
     : `이미지는 최대 3장까지 첨부할 수 있습니다. ${rejectedCount}장은 추가하지 않았습니다.`
 }
 
+interface ComposerKeyEvent {
+  key: string
+  shiftKey: boolean
+  nativeEvent: Pick<
+    globalThis.KeyboardEvent,
+    'isComposing' | 'keyCode'
+  >
+  preventDefault: () => void
+}
+
+export function handleComposerKeyDown(
+  event: ComposerKeyEvent,
+  submit: () => void,
+) {
+  if (event.key !== 'Enter' || event.shiftKey) return
+  // 표준 isComposing을 우선 보되, 일부 브라우저·IME가 조합 중에 주는
+  // 레거시 keyCode 229도 함께 확인해야 Enter가 마지막 음절을 먼저 확정한다.
+  if (
+    event.nativeEvent.isComposing ||
+    event.nativeEvent.keyCode === 229
+  ) {
+    return
+  }
+  event.preventDefault()
+  submit()
+}
+
 export function MessageComposer({
   draft,
   sendError,
@@ -544,9 +571,7 @@ export function MessageComposer({
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey) return
-    event.preventDefault()
-    submit()
+    handleComposerKeyDown(event, submit)
   }
 
   const typeLabel = hasImages
