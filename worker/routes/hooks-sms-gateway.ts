@@ -1,3 +1,12 @@
+import {
+  applyDeliveryReports,
+  DELIVERY_ERROR_TEXT_MAX_LENGTH,
+  type DeliveryReport,
+} from '../db/delivery'
+import {
+  gatewayDeliveryStatus,
+  type GatewayState,
+} from '../gateway/send'
 import { error } from '../http/error'
 import type { Route, RouteHandler } from '../http/router'
 import { storeInboundMessage } from '../inbound-message'
@@ -7,6 +16,30 @@ import { normalizeKoreanPhoneValue } from '../lib/phone'
 const SIGNATURE_HEADER = 'X-Signature'
 const TIMESTAMP_HEADER = 'X-Timestamp'
 const SMS_RECEIVED_EVENT = 'sms:received'
+const SMS_DELIVERY_EVENT = {
+  'sms:sent': {
+    gatewayState: 'Sent',
+    timestampKey: 'sentAt',
+  },
+  'sms:delivered': {
+    gatewayState: 'Delivered',
+    timestampKey: 'deliveredAt',
+  },
+  'sms:failed': {
+    gatewayState: 'Failed',
+    timestampKey: 'failedAt',
+  },
+} as const satisfies Record<
+  string,
+  {
+    gatewayState: Extract<
+      GatewayState,
+      'Sent' | 'Delivered' | 'Failed'
+    >
+    timestampKey: string
+  }
+>
+type SmsDeliveryEvent = keyof typeof SMS_DELIVERY_EVENT
 
 // 공식 문서가 재전송 공격 방어와 기기 시계 오차를 함께 고려해 ±5분을 권고한다.
 export const WEBHOOK_TIMESTAMP_WINDOW_MS = 5 * 60 * 1_000
@@ -29,6 +62,10 @@ interface OfficeChannelRow {
   id: string
   office_id: string
   signing_key: string | null
+}
+
+interface GatewayReportFailureRow {
+  attempts: number
 }
 
 class GatewayPayloadError extends Error {
@@ -90,13 +127,12 @@ function nullableSimNumber(value: unknown): number | null {
   return value
 }
 
-/**
- * 오프셋이 명시된 ISO 8601 지역 시각만 받는다.
- * Date의 잘못된 날짜 자동 보정을 피하려고 지역 시각 구성요소를 먼저 검증한다.
- */
-export function parseGatewayReceivedAt(value: string): number | null {
+function parseGatewayIsoDateTime(
+  value: string,
+  defaultOffsetMinutes: number | null,
+): number | null {
   const match =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/.exec(
       value,
     )
   if (!match) return null
@@ -110,15 +146,20 @@ export function parseGatewayReceivedAt(value: string): number | null {
     minuteText,
     secondText,
     millisecondText = '0',
-    offsetText,
+    rawOffsetText,
   ] = match
+  if (rawOffsetText === undefined && defaultOffsetMinutes === null) {
+    return null
+  }
   const year = Number(yearText)
   const month = Number(monthText)
   const day = Number(dayText)
   const hour = Number(hourText)
   const minute = Number(minuteText)
   const second = Number(secondText)
-  const millisecond = Number(millisecondText.padEnd(3, '0'))
+  const millisecond = Number(
+    millisecondText.padEnd(3, '0').slice(0, 3),
+  )
 
   const local = new Date(0)
   local.setUTCFullYear(
@@ -139,17 +180,62 @@ export function parseGatewayReceivedAt(value: string): number | null {
     return null
   }
 
-  if (offsetText === 'Z') return local.getTime()
+  if (rawOffsetText === 'Z') return local.getTime()
 
-  const sign = offsetText.startsWith('+') ? 1 : -1
-  const offsetHours = Number(offsetText.slice(1, 3))
-  const offsetMinutes = Number(offsetText.slice(4, 6))
-  if (offsetHours > 23 || offsetMinutes > 59) return null
+  let offsetMinutes = defaultOffsetMinutes ?? 0
+  if (rawOffsetText !== undefined) {
+    const sign = rawOffsetText.startsWith('+') ? 1 : -1
+    const offsetHours = Number(rawOffsetText.slice(1, 3))
+    const minuteStart = rawOffsetText.includes(':') ? 4 : 3
+    const offsetMinutePart = Number(
+      rawOffsetText.slice(minuteStart, minuteStart + 2),
+    )
+    if (offsetHours > 23 || offsetMinutePart > 59) return null
+    offsetMinutes =
+      sign * (offsetHours * 60 + offsetMinutePart)
+  }
 
-  return (
-    local.getTime() -
-    sign * (offsetHours * 60 + offsetMinutes) * 60 * 1_000
-  )
+  return local.getTime() - offsetMinutes * 60 * 1_000
+}
+
+/**
+ * 수신 메시지는 기기 앱 계약대로 오프셋이 명시된 ISO 8601 시각만 받는다.
+ * Date의 잘못된 날짜 자동 보정을 피하려고 지역 시각 구성요소를 먼저 검증한다.
+ */
+export function parseGatewayReceivedAt(value: string): number | null {
+  return parseGatewayIsoDateTime(value, null)
+}
+
+function parseEpoch(value: unknown): number | null {
+  const numeric =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' &&
+          /^-?\d+(?:\.\d+)?$/.test(value.trim())
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isFinite(numeric)) return null
+
+  const milliseconds =
+    Math.abs(numeric) < 100_000_000_000
+      ? numeric * 1_000
+      : numeric
+  const rounded = Math.round(milliseconds)
+  return Number.isSafeInteger(rounded) &&
+    !Number.isNaN(new Date(rounded).getTime())
+    ? rounded
+    : null
+}
+
+/**
+ * 실제 게이트웨이 시각 형식을 아직 관측하지 못했으므로 epoch 초·밀리초와
+ * ISO 8601을 함께 받는다. 오프셋 없는 지역 시각은 업무폰의 KST로 해석한다.
+ */
+export function parseGatewayReportAt(value: unknown): number | null {
+  const epoch = parseEpoch(value)
+  if (epoch !== null) return epoch
+  if (typeof value !== 'string') return null
+  return parseGatewayIsoDateTime(value.trim(), 9 * 60)
 }
 
 function parseSmsReceivedEnvelope(
@@ -182,6 +268,80 @@ function parseSmsReceivedEnvelope(
   }
 }
 
+function isSmsDeliveryEvent(value: string): value is SmsDeliveryEvent {
+  return Object.hasOwn(SMS_DELIVERY_EVENT, value)
+}
+
+function reasonValue(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim() !== '') {
+    return value.trim()
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  if (!isRecord(value)) return null
+
+  const code =
+    typeof value.code === 'string' ||
+    typeof value.code === 'number'
+      ? String(value.code)
+      : null
+  let description: string | null = null
+  for (const key of ['message', 'error', 'detail', 'reason']) {
+    const candidate = value[key]
+    if (typeof candidate === 'string' && candidate.trim() !== '') {
+      description = candidate.trim()
+      break
+    }
+  }
+  if (description !== null) {
+    return code === null ? description : `${description} (${code})`
+  }
+
+  const serialized = JSON.stringify(value)
+  return serialized === '{}' ? null : serialized
+}
+
+function gatewayFailureText(reason: unknown): string {
+  const description =
+    reasonValue(reason) ?? '원인을 확인할 수 없습니다.'
+  return `SMS Gateway 발송 실패: ${description}`.slice(
+    0,
+    DELIVERY_ERROR_TEXT_MAX_LENGTH,
+  )
+}
+
+function parseSmsDeliveryReport(
+  envelope: Record<string, unknown>,
+  event: SmsDeliveryEvent,
+  receivedAt: number,
+): DeliveryReport {
+  const rawPayload = envelope.payload
+  if (!isRecord(rawPayload)) {
+    throw new GatewayPayloadError('payload 값이 올바르지 않습니다.')
+  }
+
+  const messageId = requiredString(rawPayload, 'messageId')
+  const config = SMS_DELIVERY_EVENT[event]
+  const reportAt = parseGatewayReportAt(
+    rawPayload[config.timestampKey],
+  )
+
+  return {
+    clientKey: messageId,
+    deliveredAt: event === 'sms:delivered' ? reportAt : null,
+    errorText:
+      event === 'sms:failed'
+        ? gatewayFailureText(rawPayload.reason)
+        : null,
+    // 시각 해석 실패는 상태 전이를 막지 않고 감사 이벤트에 수신 시각을 쓴다.
+    eventAt: reportAt ?? receivedAt,
+    msgKey: null,
+    resultCode: config.gatewayState,
+    status: gatewayDeliveryStatus(config.gatewayState),
+  }
+}
+
 /**
  * 앱의 32비트 messageId는 기기 간 또는 다른 사업자의 키와 겹칠 수 있다.
  * 사업자와 deviceId를 함께 넣어 전역 mo_key 인덱스에서 네임스페이스를 분리한다.
@@ -191,6 +351,86 @@ export function smsGatewayIdempotencyKey(
   messageId: string,
 ): string {
   return `sms-gateway/${encodeURIComponent(deviceId)}/${encodeURIComponent(messageId)}`
+}
+
+function identifierValue(value: unknown): string | null {
+  if (
+    (typeof value !== 'string' && typeof value !== 'number') ||
+    String(value).trim() === ''
+  ) {
+    return null
+  }
+  return String(value)
+}
+
+async function rawBodyDigest(rawBody: string): Promise<string> {
+  const bytes = new Uint8Array(
+    await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(rawBody),
+    ),
+  )
+  return [...bytes]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+async function gatewayReportFailureKey(
+  envelope: Record<string, unknown>,
+  deviceId: string,
+  event: SmsDeliveryEvent,
+  rawBody: string,
+): Promise<string> {
+  const payload = isRecord(envelope.payload)
+    ? envelope.payload
+    : {}
+  const identifier =
+    identifierValue(payload.messageId) ??
+    identifierValue(envelope.id) ??
+    identifierValue(envelope.webhookId) ??
+    (await rawBodyDigest(rawBody))
+  return [
+    'sms-gateway-report',
+    encodeURIComponent(deviceId),
+    encodeURIComponent(event),
+    encodeURIComponent(identifier),
+  ].join('/')
+}
+
+async function recordGatewayReportFailure(
+  db: D1Database,
+  values: {
+    errorText: string
+    failureKey: string
+    now: number
+    rawBody: string
+  },
+): Promise<number> {
+  const failure = await db
+    .prepare(
+      `INSERT INTO mo_failures (
+         mo_key, raw_json, error_text, attempts, first_at, last_at
+       )
+       VALUES (?, ?, ?, 1, ?, ?)
+       ON CONFLICT(mo_key) DO UPDATE SET
+         raw_json = excluded.raw_json,
+         error_text = excluded.error_text,
+         attempts = mo_failures.attempts + 1,
+         last_at = excluded.last_at
+       RETURNING attempts`,
+    )
+    .bind(
+      values.failureKey,
+      values.rawBody,
+      values.errorText.slice(0, 1_000),
+      values.now,
+      values.now,
+    )
+    .first<GatewayReportFailureRow>()
+  if (failure === null) {
+    throw new Error('SMS Gateway 리포트 원문을 격리하지 못했습니다.')
+  }
+  return failure.attempts
 }
 
 function decodeSignature(value: string): Uint8Array | null {
@@ -346,7 +586,111 @@ export function createSmsGatewayWebhookHandler(
     if (typeof event !== 'string' || event.length === 0) {
       return error('BAD_REQUEST', 'event 값이 올바르지 않습니다.')
     }
-    if (event !== SMS_RECEIVED_EVENT) return successResponse()
+    if (event !== SMS_RECEIVED_EVENT) {
+      if (!isSmsDeliveryEvent(event)) {
+        console.warn('처리하지 않는 SMS Gateway 이벤트를 건너뜁니다.', {
+          deviceId,
+          event,
+          envelopeId: identifierValue(rawEnvelope.id),
+          webhookId: identifierValue(rawEnvelope.webhookId),
+        })
+        return successResponse()
+      }
+
+      let report: DeliveryReport
+      try {
+        report = parseSmsDeliveryReport(
+          rawEnvelope,
+          event,
+          receivedAt,
+        )
+      } catch (cause) {
+        if (!(cause instanceof GatewayPayloadError)) {
+          console.error(
+            'SMS Gateway 발송 리포트 검증에 실패했습니다.',
+            {
+              deviceId,
+              event,
+              error:
+                cause instanceof Error
+                  ? cause.message
+                  : String(cause),
+            },
+          )
+          return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+        }
+
+        try {
+          const failureKey = await gatewayReportFailureKey(
+            rawEnvelope,
+            deviceId,
+            event,
+            rawBody,
+          )
+          const attempts = await recordGatewayReportFailure(env.DB, {
+            errorText: `${cause.name}: ${cause.message}`,
+            failureKey,
+            now: receivedAt,
+            rawBody,
+          })
+          console.warn(
+            '해석할 수 없는 SMS Gateway 발송 리포트를 격리했습니다.',
+            {
+              attempts,
+              deviceId,
+              event,
+              failureKey,
+              reason: cause.message,
+            },
+          )
+          return successResponse()
+        } catch (recordCause) {
+          console.error(
+            'SMS Gateway 발송 리포트 원문 격리에 실패했습니다.',
+            {
+              deviceId,
+              event,
+              error:
+                recordCause instanceof Error
+                  ? recordCause.message
+                  : String(recordCause),
+            },
+          )
+          return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+        }
+      }
+
+      try {
+        const summary = await applyDeliveryReports(
+          env.DB,
+          [report],
+          { ctx, env },
+        )
+        if (summary.unknown.length > 0) {
+          console.warn(
+            '결합할 메시지가 없는 SMS Gateway 발송 리포트를 건너뜁니다.',
+            {
+              deviceId,
+              event,
+              messageIds: summary.unknown,
+            },
+          )
+        }
+        return successResponse()
+      } catch (cause) {
+        console.error(
+          'SMS Gateway 발송 리포트 D1 커밋에 실패했습니다.',
+          {
+            deviceId,
+            event,
+            messageId: report.clientKey,
+            error:
+              cause instanceof Error ? cause.message : String(cause),
+          },
+        )
+        return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+      }
+    }
 
     let received: SmsReceivedEnvelope
     let customerPhoneE164: string

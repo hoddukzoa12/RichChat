@@ -7,6 +7,7 @@ import {
   testSmsGatewaySignature,
 } from '../../tests/sms-gateway-fixtures'
 import {
+  parseGatewayReportAt,
   smsGatewayIdempotencyKey,
   WEBHOOK_TIMESTAMP_WINDOW_MS,
 } from './hooks-sms-gateway'
@@ -28,6 +29,16 @@ interface PayloadOverrides {
   recipient?: string | null
   simNumber?: number | null
   receivedAt?: string
+}
+
+type DeliveryEvent =
+  | 'sms:sent'
+  | 'sms:delivered'
+  | 'sms:failed'
+
+interface OutboundMessageInput {
+  clientKey: string
+  status?: '대기' | '접수' | '전송중'
 }
 
 function webhookBody(
@@ -53,6 +64,33 @@ function webhookBody(
       receivedAt:
         overrides.receivedAt ??
         '2026-07-30T14:00:00.000+09:00',
+    },
+  })
+}
+
+function deliveryWebhookBody(
+  event: DeliveryEvent,
+  messageId: string,
+  overrides: Record<string, unknown> = {},
+): string {
+  const timestampKey = {
+    'sms:sent': 'sentAt',
+    'sms:delivered': 'deliveredAt',
+    'sms:failed': 'failedAt',
+  } as const satisfies Record<DeliveryEvent, string>
+
+  return JSON.stringify({
+    deviceId: DEVICE_ID,
+    event,
+    id: `delivery-${event}-${messageId}`,
+    webhookId: 'webhook-delivery-reports',
+    payload: {
+      messageId,
+      sender: '01099998888',
+      recipient: '01022334455',
+      simNumber: 1,
+      [timestampKey[event]]: '2026-07-30T14:00:00.000+09:00',
+      ...overrides,
     },
   })
 }
@@ -126,6 +164,59 @@ async function insertOfficeChannels(
   ])
 }
 
+async function insertOutboundMessages(
+  inputs: readonly OutboundMessageInput[],
+): Promise<void> {
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO users (
+         id, office_id, email, name, title, role, status, created_at,
+         updated_at
+       ) VALUES (
+         'user-sms-gateway', ?, 'gateway@rich.test', '박상담', '상담 담당',
+         '상담 담당', '활성', ?, ?
+       )`,
+    ).bind(OFFICE_ID, now, now),
+    env.DB.prepare(
+      `INSERT INTO customers (
+         id, office_id, phone_e164, name, created_at, updated_at
+       ) VALUES (
+         'customer-sms-gateway', ?, '+821022334455', '업무폰 고객', ?, ?
+       )`,
+    ).bind(OFFICE_ID, now, now),
+    env.DB.prepare(
+      `INSERT INTO conversations (
+         id, office_id, customer_id, status, created_at, updated_at
+       ) VALUES (
+         'conversation-sms-gateway', ?, 'customer-sms-gateway',
+         '처리중', ?, ?
+       )`,
+    ).bind(OFFICE_ID, now, now),
+    ...inputs.map((input, index) =>
+      env.DB
+        .prepare(
+          `INSERT INTO messages (
+             id, office_id, conversation_id, direction, channel, body,
+             sender_user_id, occurred_at, created_at, client_key,
+             delivery_status
+           ) VALUES (
+             ?, ?, 'conversation-sms-gateway', 'out', 'SMS', '발송한 문자',
+             'user-sms-gateway', ?, ?, ?, ?
+           )`,
+        )
+        .bind(
+          `outbound-sms-gateway-${index + 1}`,
+          OFFICE_ID,
+          now,
+          now,
+          input.clientKey,
+          input.status ?? '접수',
+        ),
+    ),
+  ])
+}
+
 async function expectSuccess(response: Response): Promise<void> {
   expect(response.status).toBe(204)
   await expect(response.text()).resolves.toBe('')
@@ -156,6 +247,22 @@ function lguBody(moKey: string): string {
 }
 
 describe('Android SMS Gateway webhook', () => {
+  it('parses report times across ISO and epoch formats', () => {
+    expect(parseGatewayReportAt('2026-07-30T14:00:00+09:00')).toBe(
+      Date.UTC(2026, 6, 30, 5),
+    )
+    expect(parseGatewayReportAt('2026-07-30T14:00:00')).toBe(
+      Date.UTC(2026, 6, 30, 5),
+    )
+    expect(parseGatewayReportAt(1_785_386_400)).toBe(
+      1_785_386_400_000,
+    )
+    expect(parseGatewayReportAt('1785386400000')).toBe(
+      1_785_386_400_000,
+    )
+    expect(parseGatewayReportAt('not-a-time')).toBeNull()
+  })
+
   it('distinguishes malformed JSON from authentication failure', async () => {
     const response = await SELF.fetch(HOOK_URL, {
       method: 'POST',
@@ -365,6 +472,9 @@ describe('Android SMS Gateway webhook', () => {
 
   it('acknowledges unsupported events without storing them', async () => {
     await insertOfficeChannels()
+    const warning = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => {})
     const body = JSON.stringify({
       deviceId: DEVICE_ID,
       event: 'system:ping',
@@ -378,6 +488,230 @@ describe('Android SMS Gateway webhook', () => {
       'SELECT COUNT(*) AS count FROM messages',
     ).first<{ count: number }>()
     expect(messageCount?.count).toBe(0)
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('처리하지 않는'),
+      expect.objectContaining({ event: 'system:ping' }),
+    )
+    warning.mockRestore()
+  })
+
+  it('applies sent and delivered reports monotonically', async () => {
+    await insertOfficeChannels()
+    const clientKey = 'gateway-outbound-delivered'
+    await insertOutboundMessages([{ clientKey }])
+
+    await expectSuccess(
+      await post(deliveryWebhookBody('sms:sent', clientKey)),
+    )
+    const sent = await env.DB.prepare(
+      `SELECT delivery_status, result_code, delivered_at
+       FROM messages
+       WHERE client_key = ?`,
+    )
+      .bind(clientKey)
+      .first<{
+        delivered_at: number | null
+        delivery_status: string
+        result_code: string | null
+      }>()
+    expect(sent).toEqual({
+      delivered_at: null,
+      delivery_status: '전송중',
+      result_code: 'Sent',
+    })
+
+    const deliveredBody = deliveryWebhookBody(
+      'sms:delivered',
+      clientKey,
+      { deliveredAt: '2026-07-30T14:05:06.789+09:00' },
+    )
+    await expectSuccess(await post(deliveredBody))
+    const delivered = await env.DB.prepare(
+      `SELECT delivery_status, result_code, delivered_at
+       FROM messages
+       WHERE client_key = ?`,
+    )
+      .bind(clientKey)
+      .first<{
+        delivered_at: number | null
+        delivery_status: string
+        result_code: string | null
+      }>()
+    expect(delivered).toEqual({
+      delivered_at: Date.UTC(2026, 6, 30, 5, 5, 6, 789),
+      delivery_status: '완료',
+      result_code: 'Delivered',
+    })
+
+    await expectSuccess(
+      await post(deliveryWebhookBody('sms:sent', clientKey)),
+    )
+    await expectSuccess(await post(deliveredBody))
+    expect(
+      await env.DB.prepare(
+        `SELECT delivery_status, delivered_at
+         FROM messages
+         WHERE client_key = ?`,
+      )
+        .bind(clientKey)
+        .first(),
+    ).toEqual({
+      delivered_at: Date.UTC(2026, 6, 30, 5, 5, 6, 789),
+      delivery_status: '완료',
+    })
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM events
+         WHERE entity = 'message'
+           AND entity_id = 'outbound-sms-gateway-1'`,
+      ).first<{ count: number }>(),
+    ).toEqual({ count: 2 })
+  })
+
+  it('stores a readable failure reason', async () => {
+    await insertOfficeChannels()
+    const clientKey = 'gateway-outbound-failed'
+    await insertOutboundMessages([{ clientKey }])
+
+    await expectSuccess(
+      await post(
+        deliveryWebhookBody('sms:failed', clientKey, {
+          reason: {
+            code: 'NO_SERVICE',
+            message: '단말에 이동통신 서비스가 없습니다.',
+          },
+        }),
+      ),
+    )
+
+    const failed = await env.DB.prepare(
+      `SELECT delivery_status, result_code, error_text
+       FROM messages
+       WHERE client_key = ?`,
+    )
+      .bind(clientKey)
+      .first<{
+        delivery_status: string
+        error_text: string | null
+        result_code: string | null
+      }>()
+    expect(failed).toEqual({
+      delivery_status: '실패',
+      error_text:
+        'SMS Gateway 발송 실패: 단말에 이동통신 서비스가 없습니다. (NO_SERVICE)',
+      result_code: 'Failed',
+    })
+  })
+
+  it('keeps report authentication on delivery events', async () => {
+    await insertOfficeChannels()
+    const clientKey = 'gateway-outbound-forged'
+    await insertOutboundMessages([{ clientKey }])
+    const body = deliveryWebhookBody('sms:delivered', clientKey)
+
+    const response = await post(body, {
+      signature: '0'.repeat(64),
+    })
+
+    expect(response.status).toBe(401)
+    expect(
+      await env.DB.prepare(
+        `SELECT delivery_status
+         FROM messages
+         WHERE client_key = ?`,
+      )
+        .bind(clientKey)
+        .first<{ delivery_status: string }>(),
+    ).toEqual({ delivery_status: '접수' })
+  })
+
+  it('acknowledges and logs an unknown report message', async () => {
+    await insertOfficeChannels()
+    const warning = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => {})
+
+    await expectSuccess(
+      await post(
+        deliveryWebhookBody('sms:delivered', 'missing-client-key'),
+      ),
+    )
+
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('결합할 메시지가 없는'),
+      expect.objectContaining({
+        messageIds: ['missing-client-key'],
+      }),
+    )
+    warning.mockRestore()
+  })
+
+  it('quarantines malformed known report bodies before acknowledging', async () => {
+    await insertOfficeChannels()
+    const warning = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => {})
+    const body = JSON.stringify({
+      deviceId: DEVICE_ID,
+      event: 'sms:delivered',
+      id: 'malformed-delivery-report',
+      webhookId: 'webhook-delivery-reports',
+      payload: { deliveredAt: 'unexpected-time-shape' },
+    })
+
+    await expectSuccess(await post(body))
+    await expectSuccess(await post(body))
+
+    const failure = await env.DB.prepare(
+      `SELECT raw_json, error_text, attempts
+       FROM mo_failures
+       WHERE mo_key LIKE 'sms-gateway-report/%'`,
+    ).first<{
+      attempts: number
+      error_text: string
+      raw_json: string
+    }>()
+    expect(failure).toEqual({
+      attempts: 2,
+      error_text:
+        'GatewayPayloadError: messageId 값이 올바르지 않습니다.',
+      raw_json: body,
+    })
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('격리했습니다'),
+      expect.objectContaining({
+        event: 'sms:delivered',
+      }),
+    )
+    warning.mockRestore()
+  })
+
+  it('updates status when a report time cannot be parsed', async () => {
+    await insertOfficeChannels()
+    const clientKey = 'gateway-outbound-invalid-time'
+    await insertOutboundMessages([{ clientKey }])
+
+    await expectSuccess(
+      await post(
+        deliveryWebhookBody('sms:delivered', clientKey, {
+          deliveredAt: 'unexpected-time-shape',
+        }),
+      ),
+    )
+
+    expect(
+      await env.DB.prepare(
+        `SELECT delivery_status, delivered_at
+         FROM messages
+         WHERE client_key = ?`,
+      )
+        .bind(clientKey)
+        .first(),
+    ).toEqual({
+      delivered_at: null,
+      delivery_status: '완료',
+    })
   })
 
   it('reopens a completed conversation', async () => {

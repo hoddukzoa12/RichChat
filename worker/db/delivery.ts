@@ -9,6 +9,8 @@ export type ReportDeliveryStatus =
   | '완료'
   | '실패'
 
+export const DELIVERY_ERROR_TEXT_MAX_LENGTH = 500
+
 export interface DeliveryReport {
   clientKey: string | null
   deliveredAt: number | null
@@ -36,7 +38,7 @@ export interface DeliveryBroadcastContext {
   env: Pick<Env, 'OFFICE_HUB'>
 }
 
-const PREVIOUS_DELIVERY_STATUSES: Record<
+export const PREVIOUS_DELIVERY_STATUSES: Record<
   ReportDeliveryStatus,
   readonly DeliveryStatus[]
 > = {

@@ -2,7 +2,10 @@ import type {
   DeliveryReport,
   ReportDeliveryStatus,
 } from '../db/delivery'
-import { applyDeliveryReports } from '../db/delivery'
+import {
+  applyDeliveryReports,
+  DELIVERY_ERROR_TEXT_MAX_LENGTH,
+} from '../db/delivery'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route, RouteHandler } from '../http/router'
@@ -15,8 +18,6 @@ const SUCCESS_BODY = {
   message: 'success',
 } as const
 const RETRY_BODY = { code: '99999', message: 'retry' } as const
-const ERROR_TEXT_MAX_LENGTH = 500
-
 type WebhookReportStatus = 'REG' | 'ING' | 'DONE'
 type WebhookTarget = ReportDeliveryStatus | '결과'
 
@@ -171,7 +172,7 @@ function parseItem(
       ? (
           resultDescription ??
           `LGU+ 전송 실패 (${resultCode ?? 'UNKNOWN'})`
-        ).slice(0, ERROR_TEXT_MAX_LENGTH)
+        ).slice(0, DELIVERY_ERROR_TEXT_MAX_LENGTH)
       : null
 
   return {

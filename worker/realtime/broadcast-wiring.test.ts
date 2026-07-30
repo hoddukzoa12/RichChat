@@ -12,6 +12,7 @@ import {
   vi,
 } from 'vitest'
 import type { EventCatchupResponse } from '../../shared/wire/event'
+import { testSmsGatewaySignature } from '../../tests/sms-gateway-fixtures'
 import { publish } from '../db/events'
 import {
   createSession,
@@ -35,6 +36,8 @@ interface Fixture {
   actorId: string
   conversationId: string
   customerPhone: string
+  deviceId: string
+  gatewaySigningKey: string
   officeId: string
   otherToken: string
   token: string
@@ -53,6 +56,8 @@ async function seedFixture(): Promise<Fixture> {
   const customerId = `customer-${suffix}`
   const conversationId = `conversation-${suffix}`
   const customerPhone = `+8210${String(fixtureSequence).padStart(8, '0')}`
+  const deviceId = `device-${suffix}`
+  const gatewaySigningKey = `signing-key-${suffix}`
   const now = Date.now()
 
   await env.DB.batch([
@@ -114,6 +119,8 @@ async function seedFixture(): Promise<Fixture> {
     actorId,
     conversationId,
     customerPhone,
+    deviceId,
+    gatewaySigningKey,
     officeId,
     otherToken: otherSession.token,
     token: session.token,
@@ -406,6 +413,88 @@ describe('Broadcast wiring', () => {
     )
 
     expect(response.status).toBe(200)
+    expect(JSON.parse((await received)[0]!) as {
+      entityId: string
+      type: string
+    }).toMatchObject({
+      entityId: messageId,
+      type: 'message.delivery_updated',
+    })
+    expect((await catchup(fixture)).events).toHaveLength(1)
+  })
+
+  it('fans out a committed SMS Gateway report webhook', async () => {
+    const fixture = await seedFixture()
+    const messageId = `gateway-report-message-${fixture.officeId}`
+    const clientKey = `gateway-report-client-${fixture.officeId}`
+    const now = Date.now()
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          `UPDATE office_channels
+           SET device_id = ?, signing_key = ?
+           WHERE office_id = ?`,
+        )
+        .bind(
+          fixture.deviceId,
+          fixture.gatewaySigningKey,
+          fixture.officeId,
+        ),
+      env.DB
+        .prepare(
+          `INSERT INTO messages (
+            id, office_id, conversation_id, direction, channel, body,
+            sender_user_id, occurred_at, created_at, client_key,
+            delivery_status
+          ) VALUES (?, ?, ?, 'out', 'SMS', ?, ?, ?, ?, ?, '접수')`,
+        )
+        .bind(
+          messageId,
+          fixture.officeId,
+          fixture.conversationId,
+          '업무폰 리포트 대기 메시지',
+          fixture.actorId,
+          now,
+          now,
+          clientKey,
+        ),
+    ])
+    const socket = await openSocket(fixture.token)
+    const received = frames(socket, 1)
+    const body = JSON.stringify({
+      deviceId: fixture.deviceId,
+      event: 'sms:delivered',
+      id: `gateway-delivered-${clientKey}`,
+      webhookId: 'gateway-broadcast-webhook',
+      payload: {
+        messageId: clientKey,
+        sender: '01099998888',
+        recipient: '01022334455',
+        simNumber: 1,
+        deliveredAt: '2026-07-30T14:00:00+09:00',
+      },
+    })
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = await testSmsGatewaySignature(
+      body,
+      timestamp,
+      fixture.gatewaySigningKey,
+    )
+
+    const response = await SELF.fetch(
+      `${ORIGIN}/api/hooks/sms-gateway`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-signature': signature,
+          'x-timestamp': timestamp,
+        },
+        body,
+      },
+    )
+
+    expect(response.status).toBe(204)
     expect(JSON.parse((await received)[0]!) as {
       entityId: string
       type: string
