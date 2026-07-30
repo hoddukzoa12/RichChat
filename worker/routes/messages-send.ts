@@ -1,4 +1,7 @@
-import type { SendChannel } from '../../shared/domain'
+import type {
+  DeliveryStatus,
+  SendChannel,
+} from '../../shared/domain'
 import { OUTBOUND_IMAGE_LIMITS } from '../../shared/attachments'
 import {
   containsEmoji,
@@ -25,6 +28,10 @@ import {
   requireSession,
   type SessionContext,
 } from '../http/session'
+import {
+  sendGatewayTextMessage,
+  type ConfirmedGatewaySendResult,
+} from '../gateway/send'
 import { LguApiError } from '../lgu/http'
 import {
   LGU_SEND_TIMEOUT_MS,
@@ -35,6 +42,7 @@ import {
 } from '../lgu/send'
 import { uploadMmsFile } from '../lgu/upload'
 import { createId, type Clock } from '../lib/ids'
+import { normalizeKoreanPhoneValue } from '../lib/phone'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 type JsonObject = Record<string, unknown>
@@ -46,7 +54,10 @@ interface ParsedSendMessage {
 }
 
 interface SendContext {
+  active: number | null
   callback: string | null
+  device_id: string | null
+  office_channel_id: string | null
   phone_e164: string
 }
 
@@ -66,6 +77,7 @@ interface MessageRow {
 
 interface MessageSendDependencies {
   clock?: Clock
+  gatewayTimeoutMs?: number
   idFactory?: () => string
   lguRequest?: LguRequest
   timeoutMs?: number
@@ -87,6 +99,13 @@ interface StagedAttachment {
 
 interface PreparedAttachment extends StagedAttachment {
   bytes: ArrayBuffer
+}
+
+interface InitialDeliveryResult {
+  code: string
+  deliveryStatus: Exclude<DeliveryStatus, '수신'>
+  errorText: string | null
+  msgKey: string | null
 }
 
 const MESSAGE_PATH = '/api/conversations/:id/messages'
@@ -317,25 +336,34 @@ async function loadSendContext(
   session: SessionContext,
   conversationId: string,
 ): Promise<SendContext | null> {
+  // 마이그레이션 복구 도구가 남긴 미지정 대화는 기존 기본 채널을 쓴다.
+  // 둘 다 없으면 호출자가 명시적인 충돌 응답을 만든다.
   return await db
     .prepare(
       `SELECT
          customers.phone_e164,
-         (
-           SELECT value
-           FROM office_channels
-           WHERE office_id = ?
-             AND is_default = 1
-             AND active = 1
-         ) AS callback
+         COALESCE(selected_channel.id, default_channel.id)
+           AS office_channel_id,
+         COALESCE(selected_channel.value, default_channel.value)
+           AS callback,
+         COALESCE(selected_channel.device_id, default_channel.device_id)
+           AS device_id,
+         COALESCE(selected_channel.active, default_channel.active)
+           AS active
        FROM conversations
        INNER JOIN customers
          ON customers.id = conversations.customer_id
          AND customers.office_id = conversations.office_id
+       LEFT JOIN office_channels AS selected_channel
+         ON selected_channel.id = conversations.office_channel_id
+       LEFT JOIN office_channels AS default_channel
+         ON conversations.office_channel_id IS NULL
+         AND default_channel.office_id = conversations.office_id
+         AND default_channel.is_default = 1
        WHERE conversations.id = ?
          AND conversations.office_id = ?`,
     )
-    .bind(session.officeId, conversationId, session.officeId)
+    .bind(conversationId, session.officeId)
     .first<SendContext>()
 }
 
@@ -538,15 +566,12 @@ async function recordDeliveryResult(
     conversationId: string
     messageId: string
     now: number
-    result: ConfirmedSendResult
+    result: InitialDeliveryResult
     session: SessionContext
   },
 ): Promise<void> {
   const { conversationId, messageId, now, result, session } = values
-  const accepted = result.kind === 'accepted'
-  const deliveryStatus = accepted ? '접수' : '실패'
-  const msgKey = accepted ? result.msgKey : null
-  const errorText = accepted ? null : result.errorText
+  const deliveryStatus = result.deliveryStatus
   const guard = {
     query: `SELECT 1
             FROM messages
@@ -569,9 +594,9 @@ async function recordDeliveryResult(
     )
     .bind(
       deliveryStatus,
-      msgKey,
+      result.msgKey,
       result.code,
-      errorText,
+      result.errorText,
       messageId,
       session.officeId,
     )
@@ -604,6 +629,35 @@ async function recordDeliveryResult(
     ctx,
     env,
   )
+}
+
+function lguDeliveryResult(
+  result: ConfirmedSendResult,
+): InitialDeliveryResult {
+  return result.kind === 'accepted'
+    ? {
+        code: result.code,
+        deliveryStatus: '접수',
+        errorText: null,
+        msgKey: result.msgKey,
+      }
+    : {
+        code: result.code,
+        deliveryStatus: '실패',
+        errorText: result.errorText,
+        msgKey: null,
+      }
+}
+
+function gatewayDeliveryResult(
+  result: ConfirmedGatewaySendResult,
+): InitialDeliveryResult {
+  return {
+    code: result.code,
+    deliveryStatus: result.deliveryStatus,
+    errorText: result.errorText,
+    msgKey: null,
+  }
 }
 
 async function uploadAttachmentsToLgu(
@@ -655,6 +709,7 @@ export function createMessageSendRoutes(
   dependencies: MessageSendDependencies = {},
 ): Route[] {
   const clock = dependencies.clock ?? Date.now
+  const gatewayTimeoutMs = dependencies.gatewayTimeoutMs
   const idFactory = dependencies.idFactory ?? createId
   const lguRequest = dependencies.lguRequest
   const timeoutMs = dependencies.timeoutMs ?? LGU_SEND_TIMEOUT_MS
@@ -683,12 +738,34 @@ export function createMessageSendRoutes(
     if (!context) {
       return error('NOT_FOUND', '대화를 찾을 수 없습니다.')
     }
-    if (!context.callback) {
-      return error('CONFLICT', '기본 발신번호가 설정되어 있지 않습니다.')
+    if (context.office_channel_id === null) {
+      return error(
+        'CONFLICT',
+        '대화에 발송할 업무폰이 지정되어 있지 않습니다.',
+      )
+    }
+    if (context.active !== 1) {
+      return error(
+        'CONFLICT',
+        '대화에 지정된 업무폰이 비활성 상태입니다.',
+      )
+    }
+    if (context.device_id === null && !context.callback) {
+      return error('CONFLICT', '발신번호가 설정되어 있지 않습니다.')
+    }
+    if (
+      context.device_id !== null &&
+      input.attachments.length > 0
+    ) {
+      return error(
+        'CONFLICT',
+        '업무폰에서는 첨부 문자를 보낼 수 없습니다.',
+      )
     }
 
+    const phoneE164 = normalizeKoreanPhoneValue(context.phone_e164)
     const phone = koreanPhone(context.phone_e164)
-    if (!phone) {
+    if (!phoneE164 || !phone) {
       return error('INTERNAL_ERROR', '수신번호를 확인할 수 없습니다.')
     }
     const attachments = await prepareAttachments(
@@ -759,7 +836,9 @@ export function createMessageSendRoutes(
             conversationId: params.id,
             messageId,
             now: clock(),
-            result: attachmentUploadFailure(cause),
+            result: lguDeliveryResult(
+              attachmentUploadFailure(cause),
+            ),
             session,
           })
         } catch {
@@ -781,28 +860,50 @@ export function createMessageSendRoutes(
       }
     }
 
-    const sendResult = await sendTextMessage(
-      env,
-      {
+    let deliveryResult: InitialDeliveryResult | null
+    if (context.device_id === null) {
+      const sendResult = await sendTextMessage(
+        env,
+        {
+          body: input.body,
+          callback: context.callback as string,
+          channel: input.channel,
+          fileIds: attachments.map(({ id }) => id),
+          officeId: session.officeId,
+          phone,
+          providerKey: messageId,
+          timeoutMs,
+        },
+        lguRequest,
+      )
+      deliveryResult =
+        sendResult.kind === 'uncertain'
+          ? null
+          : lguDeliveryResult(sendResult)
+    } else {
+      const sendResult = await sendGatewayTextMessage(env, {
         body: input.body,
-        callback: context.callback,
-        channel: input.channel,
-        fileIds: attachments.map(({ id }) => id),
-        officeId: session.officeId,
-        phone,
-        providerKey: messageId,
-        timeoutMs,
-      },
-      lguRequest,
-    )
+        clientKey: input.clientKey,
+        deviceId: context.device_id,
+        phoneE164,
+        timeoutMs: gatewayTimeoutMs,
+      })
+      deliveryResult =
+        sendResult.kind === 'uncertain'
+          ? null
+          : gatewayDeliveryResult(sendResult)
+    }
 
-    if (sendResult.kind !== 'uncertain') {
+    if (
+      deliveryResult !== null &&
+      deliveryResult.deliveryStatus !== '대기'
+    ) {
       try {
         await recordDeliveryResult(env, ctx, {
           conversationId: params.id,
           messageId,
           now: clock(),
-          result: sendResult,
+          result: deliveryResult,
           session,
         })
       } catch {

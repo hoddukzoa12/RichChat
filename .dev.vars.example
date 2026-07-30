@@ -77,6 +77,21 @@ LGU_MO_WEBHOOK_SECRET=
 # 미설정 시: LGU+ 발송 결과 웹훅을 인증해 수신할 수 없어 메시지 도달 상태를 갱신할 수 없다.
 LGU_REPORT_WEBHOOK_SECRET=
 
+# 발급: 없음 — 사무실 SMS Gateway 관리 API의 기준 주소다.
+# 설정: 같은 오리진의 `/api/3rdparty/v1/*`를 Cloudflare Access로 보호한 뒤, `https://<게이트웨이>/api/3rdparty/v1` 전체를 입력한다.
+# 미설정 시: 업무폰 문자 발송이 실패로 기록된다.
+SMS_GATEWAY_API_URL=
+
+# 발급: Android SMS Gateway 관리 API 계정에서 발급한다.
+# 확인: 관리 API의 HTTP Basic 인증 계정 아이디다.
+# 미설정 시: 업무폰에 묶인 대화의 문자 발송이 실패로 기록된다.
+SMS_GATEWAY_USERNAME=
+
+# 발급: Android SMS Gateway 관리 API 계정에서 발급한다.
+# 확인: 관리 API의 HTTP Basic 인증 계정 비밀번호다.
+# 미설정 시: 업무폰에 묶인 대화의 문자 발송이 실패로 기록된다.
+SMS_GATEWAY_PASSWORD=
+
 # 발급: 각 Android SMS Gateway 앱 설치가 서로 다른 서명키를 생성한다.
 # 확인: 기기 ID는 API 기기 목록에서, 키는 업무폰마다 Settings > Webhooks > Signing Key에서 확인한다.
 # 형식: 기기 ID를 키로 둔 JSON 객체다. 예: `{"<deviceId-1>":"<Signing Key-1>","<deviceId-2>":"<Signing Key-2>"}`

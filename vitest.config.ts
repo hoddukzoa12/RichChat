@@ -30,6 +30,10 @@ export default defineWorkersConfig(async () => {
               LGU_CONTENT_HOST: 'lgu-content.test.invalid',
               LGU_MO_WEBHOOK_SECRET: 'test-mo-webhook-secret',
               LGU_REPORT_WEBHOOK_SECRET: 'test-report-webhook-secret',
+              SMS_GATEWAY_API_URL:
+                'https://sms-gateway.test.invalid/api/3rdparty/v1',
+              SMS_GATEWAY_USERNAME: 'test-gateway-user',
+              SMS_GATEWAY_PASSWORD: 'test-gateway-password',
               SMS_GATEWAY_SIGNING_KEYS: JSON.stringify(
                 TEST_SMS_GATEWAY_SIGNING_KEYS,
               ),

@@ -23,6 +23,7 @@
     "LGU_AUTH_HOST": "lgu-auth.rich-group.kr", // → api.msghub.uplus.co.kr
     "LGU_SEND_HOST": "lgu-send.rich-group.kr", // → api-send.msghub.uplus.co.kr
     "LGU_CONTENT_HOST": "lgu-file.rich-group.kr", // → mnt-api.msghub.uplus.co.kr
+    "SMS_GATEWAY_API_URL": "https://sms-api.rich-group.kr/api/3rdparty/v1",
     "WORKS_CLIENT_ID": "V6MgQwNfZoK8fnESzNZy",
     "WORKS_ISSUER": "https://auth.worksmobile.com",
     "WORKS_TENANT_ID": "300285491"
@@ -35,6 +36,8 @@
       "LGU_API_PASSWORD",
       "LGU_MO_WEBHOOK_SECRET",
       "LGU_REPORT_WEBHOOK_SECRET",
+      "SMS_GATEWAY_USERNAME",
+      "SMS_GATEWAY_PASSWORD",
       "SMS_GATEWAY_SIGNING_KEYS",
       "WORKS_CLIENT_SECRET"
     ]

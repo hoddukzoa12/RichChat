@@ -10,6 +10,11 @@ import {
 import type { Status } from '../../shared/domain'
 import type { MessageAttachment } from '../../shared/wire/message'
 import type { SendMessageResponse } from '../../shared/wire/message-send'
+import { applyDeliveryReports } from '../db/delivery'
+import {
+  gatewayDeliveryStatus,
+  type GatewayState,
+} from '../gateway/send'
 import {
   createSession,
   SESSION_COOKIE_NAME,
@@ -23,6 +28,10 @@ declare module 'cloudflare:test' {
 const ORIGIN = 'https://example.com'
 const LGU_SEND_ORIGIN = `https://${env.LGU_SEND_HOST}`
 const LGU_CONTENT_ORIGIN = `https://${env.LGU_CONTENT_HOST}`
+const SMS_GATEWAY_API_URL = new URL(env.SMS_GATEWAY_API_URL)
+const SMS_GATEWAY_ORIGIN = SMS_GATEWAY_API_URL.origin
+const SMS_GATEWAY_MESSAGES_PATH =
+  `${SMS_GATEWAY_API_URL.pathname.replace(/\/+$/, '')}/messages`
 const DEFAULT_CALLBACK = '0255550000'
 
 interface Fixture {
@@ -75,9 +84,26 @@ interface MockLguOptions {
   status?: number
 }
 
+interface GatewayRequestBody {
+  deviceId: string
+  id: string
+  phoneNumbers: string[]
+  simNumber: number
+  textMessage: { text: string }
+  withDeliveryReport: boolean
+}
+
+interface MockGatewayOptions {
+  deviceId: string
+  error?: string
+  state?: GatewayState
+  status?: number
+}
+
 let seedSequence = 0
 const lguRequests: LguRequestBody[] = []
 const lguUploadRequests: string[] = []
+const gatewayRequests: GatewayRequestBody[] = []
 
 beforeAll(() => {
   fetchMock.activate()
@@ -88,6 +114,7 @@ afterEach(() => {
   fetchMock.assertNoPendingInterceptors()
   lguRequests.length = 0
   lguUploadRequests.length = 0
+  gatewayRequests.length = 0
 })
 
 afterAll(() => {
@@ -388,6 +415,73 @@ function mockNetworkFailure(): void {
     .replyWithError(new TypeError('connection reset'))
 }
 
+async function bindGatewayChannel(
+  fixture: Fixture,
+  deviceId: string,
+  active = 1,
+): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE office_channels
+       SET device_id = ?, active = ?
+       WHERE office_id = ?
+         AND is_default = 1`,
+    ).bind(deviceId, active, fixture.officeId),
+    env.DB.prepare(
+      `UPDATE conversations
+       SET office_channel_id = (
+         SELECT id
+         FROM office_channels
+         WHERE office_id = ?
+           AND is_default = 1
+       )
+       WHERE id = ?`,
+    ).bind(fixture.officeId, fixture.conversationId),
+  ])
+}
+
+function mockGateway(options: MockGatewayOptions): void {
+  const state = options.state ?? 'Processed'
+  fetchMock
+    .get(SMS_GATEWAY_ORIGIN)
+    .intercept({
+      method: 'POST',
+      path: SMS_GATEWAY_MESSAGES_PATH,
+      headers: {
+        authorization:
+          `Basic ${btoa('test-gateway-user:test-gateway-password')}`,
+        'content-type': 'application/json',
+        'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
+        'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+      },
+    })
+    .reply(
+      options.status ?? 200,
+      ({ body }) => {
+        const request = JSON.parse(String(body)) as GatewayRequestBody
+        gatewayRequests.push(request)
+        if (options.status && options.status >= 400) {
+          return JSON.stringify({
+            message: options.error ?? 'gateway request failed',
+          })
+        }
+        return JSON.stringify({
+          id: request.id,
+          deviceId: options.deviceId,
+          state,
+          recipients: [
+            {
+              phoneNumber: request.phoneNumbers[0],
+              state,
+              error: options.error ?? null,
+            },
+          ],
+        })
+      },
+      { headers: { 'content-type': 'application/json' } },
+    )
+}
+
 async function storedMessages(
   fixture: Fixture,
 ): Promise<StoredMessage[]> {
@@ -494,6 +588,215 @@ describe('Message send route', () => {
       'message.created',
       'message.delivery_updated',
     ])
+  })
+
+  it('uses the conversation gateway device and client key exactly once', async () => {
+    const fixture = await seedFixture()
+    const clientKey = 'gateway-idempotency'
+    const deviceId = 'gateway-device-idempotency'
+    await bindGatewayChannel(fixture, deviceId)
+    mockGateway({ deviceId })
+
+    const first = await postMessage(
+      fixture.conversationId,
+      { clientKey, body: '업무폰으로 답장합니다' },
+      fixture.token,
+    )
+    const second = await postMessage(
+      fixture.conversationId,
+      { clientKey, body: '업무폰으로 답장합니다' },
+      fixture.token,
+    )
+
+    expect(first.status).toBe(201)
+    expect(second.status).toBe(200)
+    expect(gatewayRequests).toEqual([
+      {
+        id: clientKey,
+        deviceId,
+        textMessage: { text: '업무폰으로 답장합니다' },
+        phoneNumbers: [fixture.customerPhone],
+        simNumber: 1,
+        withDeliveryReport: true,
+      },
+    ])
+    await expect(storedMessages(fixture)).resolves.toEqual([
+      expect.objectContaining({
+        delivery_status: '접수',
+        result_code: 'Processed',
+        msg_key: null,
+      }),
+    ])
+  })
+
+  it('keeps the LGU path for a selected channel without a device', async () => {
+    const fixture = await seedFixture()
+    await env.DB.prepare(
+      `UPDATE conversations
+       SET office_channel_id = (
+         SELECT id
+         FROM office_channels
+         WHERE office_id = ?
+           AND is_default = 1
+       )
+       WHERE id = ?`,
+    )
+      .bind(fixture.officeId, fixture.conversationId)
+      .run()
+    mockLgu({ clientKey: 'selected-lgu-channel' })
+
+    const response = await postMessage(
+      fixture.conversationId,
+      {
+        clientKey: 'selected-lgu-channel',
+        body: 'LGU+ 대표번호로 답장합니다',
+      },
+      fixture.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(lguRequests).toHaveLength(1)
+    expect(gatewayRequests).toEqual([])
+  })
+
+  it('maps gateway states and refuses a reverse transition', async () => {
+    const cases: ReadonlyArray<{
+      expected: string
+      state: GatewayState
+    }> = [
+      { state: 'Pending', expected: '대기' },
+      { state: 'Processed', expected: '접수' },
+      { state: 'Sent', expected: '전송중' },
+      { state: 'Delivered', expected: '완료' },
+      { state: 'Failed', expected: '실패' },
+    ]
+    let deliveredFixture: Fixture | null = null
+    let deliveredClientKey = ''
+
+    for (const { state, expected } of cases) {
+      const fixture = await seedFixture()
+      const deviceId = `gateway-device-${state}`
+      const clientKey = `gateway-state-${state}`
+      await bindGatewayChannel(fixture, deviceId)
+      mockGateway({
+        deviceId,
+        state,
+        error: state === 'Failed' ? '업무폰 연결 끊김' : undefined,
+      })
+
+      const response = await postMessage(
+        fixture.conversationId,
+        { clientKey, body: `${state} 상태 확인` },
+        fixture.token,
+      )
+
+      expect(response.status).toBe(201)
+      await expect(storedMessages(fixture)).resolves.toEqual([
+        expect.objectContaining({
+          delivery_status: expected,
+          error_text:
+            state === 'Failed'
+              ? expect.stringContaining('업무폰 연결 끊김')
+              : null,
+        }),
+      ])
+      if (state === 'Delivered') {
+        deliveredFixture = fixture
+        deliveredClientKey = clientKey
+      }
+    }
+
+    if (deliveredFixture === null) {
+      throw new Error('완료 상태 테스트 픽스처를 만들지 못했습니다.')
+    }
+    const reverse = await applyDeliveryReports(env.DB, [
+      {
+        clientKey: deliveredClientKey,
+        deliveredAt: null,
+        errorText: null,
+        eventAt: Date.now(),
+        msgKey: null,
+        resultCode: 'Sent',
+        status: gatewayDeliveryStatus('Sent'),
+      },
+    ])
+
+    expect(reverse).toMatchObject({ changed: 0, unchanged: 1 })
+    await expect(storedMessages(deliveredFixture)).resolves.toEqual([
+      expect.objectContaining({ delivery_status: '완료' }),
+    ])
+  })
+
+  it('stores a gateway HTTP error as a readable failure', async () => {
+    const fixture = await seedFixture()
+    const deviceId = 'gateway-device-http-error'
+    await bindGatewayChannel(fixture, deviceId)
+    mockGateway({
+      deviceId,
+      status: 503,
+      error: '업무폰이 오프라인입니다.',
+    })
+
+    const response = await postMessage(
+      fixture.conversationId,
+      {
+        clientKey: 'gateway-http-error',
+        body: '실패 결과를 저장합니다',
+      },
+      fixture.token,
+    )
+
+    expect(response.status).toBe(201)
+    await expect(storedMessages(fixture)).resolves.toEqual([
+      expect.objectContaining({
+        delivery_status: '실패',
+        result_code: 'HTTP_503',
+        error_text: expect.stringContaining('업무폰이 오프라인입니다.'),
+      }),
+    ])
+  })
+
+  it('rejects an inactive conversation channel before inserting', async () => {
+    const fixture = await seedFixture()
+    await bindGatewayChannel(
+      fixture,
+      'gateway-device-inactive',
+      0,
+    )
+
+    const response = await postMessage(
+      fixture.conversationId,
+      {
+        clientKey: 'gateway-inactive',
+        body: '비활성 업무폰 발송',
+      },
+      fixture.token,
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: expect.stringContaining('비활성') },
+    })
+    await expect(storedMessages(fixture)).resolves.toEqual([])
+  })
+
+  it('returns a readable conflict when no conversation channel exists', async () => {
+    const fixture = await seedFixture({ callback: null })
+
+    const response = await postMessage(
+      fixture.conversationId,
+      {
+        clientKey: 'gateway-missing-channel',
+        body: '채널 없는 대화 발송',
+      },
+      fixture.token,
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: expect.stringContaining('업무폰') },
+    })
+    await expect(storedMessages(fixture)).resolves.toEqual([])
   })
 
   it('serializes concurrent duplicate requests before calling LGU+', async () => {
