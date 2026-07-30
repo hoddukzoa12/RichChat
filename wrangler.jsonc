@@ -23,7 +23,9 @@
     "LGU_AUTH_HOST": "lgu-auth.rich-group.kr", // → api.msghub.uplus.co.kr
     "LGU_SEND_HOST": "lgu-send.rich-group.kr", // → api-send.msghub.uplus.co.kr
     "LGU_CONTENT_HOST": "lgu-file.rich-group.kr", // → mnt-api.msghub.uplus.co.kr
-    "SMS_GATEWAY_API_URL": "https://sms-api.rich-group.kr/api/3rdparty/v1",
+    "SMS_GATEWAY_API_URL": "https://sms-api.rich-group.kr/api/3rdparty/v1", // Access 뒤 — 워커만 접근
+    "SMS_GATEWAY_MOBILE_URL": "https://sms.rich-group.kr/api/mobile/v1", // 업무폰이 직접 접속 — 공개
+
     "WORKS_CLIENT_ID": "V6MgQwNfZoK8fnESzNZy",
     "WORKS_ISSUER": "https://auth.worksmobile.com",
     "WORKS_TENANT_ID": "300285491"

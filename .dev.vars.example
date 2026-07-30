@@ -82,6 +82,11 @@ LGU_REPORT_WEBHOOK_SECRET=
 # 미설정 시: 업무폰 문자 발송이 실패로 기록된다.
 SMS_GATEWAY_API_URL=
 
+# 발급: 없음 — 업무폰 앱이 직접 접속할 주소이며 관리 API와 **호스트가 다르다.**
+# 설정: Access를 걸지 않은 공개 호스트로 `https://<게이트웨이>/api/mobile/v1`까지 입력한다. 외근 나간 폰이 붙어야 하므로 사내망 전용 주소를 넣으면 안 된다.
+# 미설정 시: 업무폰 등록 코드를 발급할 수 없다. 관리 API 주소를 대신 쓰면 Access가 폰을 403으로 막아 영원히 등록되지 않는다.
+SMS_GATEWAY_MOBILE_URL=
+
 # 발급: Android SMS Gateway 관리 API 계정에서 발급한다. 기기 등록용 PRIVATE_TOKEN은 넣지 않는다.
 # 확인: 관리 API의 HTTP Basic 인증 계정 아이디다.
 # 미설정 시: 업무폰에 묶인 대화의 문자 발송이 실패로 기록되고, 등록 코드 발급·기기 자동 감지·계정 공통 서명키 배포가 동작하지 않는다.

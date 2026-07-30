@@ -8,6 +8,8 @@ import {
 const ENV: GatewayAdminEnv = {
   SMS_GATEWAY_API_URL:
     'https://sms-gateway.example/api/3rdparty/v1',
+  SMS_GATEWAY_MOBILE_URL:
+    'https://sms-mobile.example/api/mobile/v1',
   SMS_GATEWAY_USERNAME: 'rich-user',
   SMS_GATEWAY_PASSWORD: 'rich-password',
   CF_ACCESS_CLIENT_ID: 'access-id',
@@ -15,7 +17,7 @@ const ENV: GatewayAdminEnv = {
 }
 
 describe('SMS Gateway admin client', () => {
-  it('derives the mobile code endpoint from the management URL', async () => {
+  it('hands the phone the mobile URL, not the management host', async () => {
     const fetcher = vi.fn(
       (_input: RequestInfo | URL, _init?: RequestInit) =>
         Promise.resolve(
@@ -27,14 +29,16 @@ describe('SMS Gateway admin client', () => {
     )
     const client = createGatewayAdminClient(fetcher)
 
+    // 관리 API는 Access 뒤에 있어 업무폰이 붙으면 403이다. 화면에 뜨는 값과
+    // 코드 발급 요청 둘 다 업무폰 접속 주소를 써야 한다.
     await expect(client.issueEnrollmentCode(ENV)).resolves.toEqual({
-      apiUrl: 'https://sms-gateway.example',
+      apiUrl: 'https://sms-mobile.example/api/mobile/v1',
       code: '123456',
       validUntil: '2026-07-30T10:05:00Z',
     })
     const [input, init] = fetcher.mock.calls[0]
     expect(String(input)).toBe(
-      'https://sms-gateway.example/api/mobile/v1/user/code',
+      'https://sms-mobile.example/api/mobile/v1/user/code',
     )
     const headers = new Headers(init?.headers)
     expect(headers.get('authorization')).toBe(
@@ -44,6 +48,30 @@ describe('SMS Gateway admin client', () => {
     expect(headers.get('CF-Access-Client-Secret')).toBe(
       'access-secret',
     )
+  })
+
+  it('refuses a mobile URL that is missing or points at the management path', async () => {
+    const fetcher = vi.fn(() => Promise.resolve(Response.json({})))
+    const client = createGatewayAdminClient(fetcher)
+
+    for (const [mobileUrl, expected] of [
+      ['', '설정되지 않았습니다'],
+      ['https://sms-mobile.example', '/api/mobile/v1'],
+      ['https://sms-gateway.example/api/3rdparty/v1', '/api/mobile/v1'],
+    ] as const) {
+      await expect(
+        client.issueEnrollmentCode({
+          ...ENV,
+          SMS_GATEWAY_MOBILE_URL: mobileUrl,
+        }),
+      ).rejects.toEqual(
+        expect.objectContaining({
+          name: 'GatewayAdminError',
+          message: expect.stringContaining(expected),
+        }) satisfies Partial<GatewayAdminError>,
+      )
+    }
+    expect(fetcher).not.toHaveBeenCalled()
   })
 
   it('lists devices and deploys the exact shared signing key', async () => {

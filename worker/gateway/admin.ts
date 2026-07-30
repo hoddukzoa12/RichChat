@@ -1,5 +1,6 @@
 export interface GatewayAdminEnv {
   SMS_GATEWAY_API_URL: string
+  SMS_GATEWAY_MOBILE_URL: string
   SMS_GATEWAY_USERNAME: string
   SMS_GATEWAY_PASSWORD: string
   CF_ACCESS_CLIENT_ID?: string
@@ -20,7 +21,8 @@ export interface GatewayDevice {
 type GatewayFetch = typeof fetch
 
 const MANAGEMENT_PATH = '/api/3rdparty/v1'
-const MOBILE_CODE_PATH = '/api/mobile/v1/user/code'
+const MOBILE_PATH = '/api/mobile/v1'
+const MOBILE_CODE_PATH = 'user/code'
 
 export class GatewayAdminError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -33,43 +35,63 @@ function configured(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== ''
 }
 
-function gatewayUrls(rawUrl: string): {
-  apiUrl: string
-  managementUrl: URL
-  mobileCodeUrl: URL
-} {
-  let managementUrl: URL
+function gatewayBaseUrl(
+  rawUrl: unknown,
+  expectedPath: string,
+  label: string,
+): URL {
+  if (!configured(rawUrl)) {
+    throw new GatewayAdminError(
+      `SMS Gateway ${label} 주소가 설정되지 않았습니다.`,
+    )
+  }
+
+  let url: URL
   try {
-    managementUrl = new URL(rawUrl)
+    url = new URL(rawUrl)
   } catch (cause) {
     throw new GatewayAdminError(
-      'SMS Gateway 관리 API 주소가 올바르지 않습니다.',
+      `SMS Gateway ${label} 주소가 올바르지 않습니다.`,
       { cause },
     )
   }
 
-  const pathname = managementUrl.pathname.replace(/\/+$/, '')
+  const pathname = url.pathname.replace(/\/+$/, '')
   if (
-    !['http:', 'https:'].includes(managementUrl.protocol) ||
-    managementUrl.username !== '' ||
-    managementUrl.password !== '' ||
-    managementUrl.search !== '' ||
-    managementUrl.hash !== '' ||
-    pathname !== MANAGEMENT_PATH
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    pathname !== expectedPath
   ) {
     throw new GatewayAdminError(
-      `SMS Gateway 관리 API 주소는 ${MANAGEMENT_PATH} 경로까지 입력해야 합니다.`,
+      `SMS Gateway ${label} 주소는 ${expectedPath} 경로까지 입력해야 합니다.`,
     )
   }
-  managementUrl.pathname = pathname
+  url.pathname = pathname
+  return url
+}
 
-  const mobileCodeUrl = new URL(managementUrl.origin)
-  mobileCodeUrl.pathname = MOBILE_CODE_PATH
-  return {
-    apiUrl: managementUrl.origin,
-    managementUrl,
-    mobileCodeUrl,
-  }
+/**
+ * 관리 API와 업무폰 접속 주소는 **호스트가 다르다.** 관리 API는 Cloudflare
+ * Access 뒤에 있어 업무폰이 접속하면 403이고, 업무폰 주소에는 관리 API가
+ * 없다. 관리 주소에서 파생하면 폰이 절대 붙지 못하는 값을 화면에 띄운다.
+ */
+function managementUrlOf(env: GatewayAdminEnv): URL {
+  return gatewayBaseUrl(
+    env.SMS_GATEWAY_API_URL,
+    MANAGEMENT_PATH,
+    '관리 API',
+  )
+}
+
+function mobileUrlOf(env: GatewayAdminEnv): URL {
+  return gatewayBaseUrl(
+    env.SMS_GATEWAY_MOBILE_URL,
+    MOBILE_PATH,
+    '업무폰 접속',
+  )
 }
 
 function basicAuthorization(username: string, password: string): string {
@@ -193,11 +215,11 @@ export function createGatewayAdminClient(
 ): GatewayAdminClient {
   return {
     async issueEnrollmentCode(env) {
-      const urls = gatewayUrls(env.SMS_GATEWAY_API_URL)
+      const mobileUrl = mobileUrlOf(env)
       const response = await gatewayRequest(
         fetcher,
         env,
-        urls.mobileCodeUrl,
+        new URL(`${mobileUrl}/${MOBILE_CODE_PATH}`),
       )
       const body = await responseJson(response)
       if (
@@ -212,16 +234,14 @@ export function createGatewayAdminClient(
         )
       }
       return {
-        apiUrl: urls.apiUrl,
+        apiUrl: mobileUrl.toString(),
         code: body.code,
         validUntil: body.validUntil,
       }
     },
 
     async listDevices(env) {
-      const { managementUrl } = gatewayUrls(
-        env.SMS_GATEWAY_API_URL,
-      )
+      const managementUrl = managementUrlOf(env)
       const devicesUrl = new URL(`${managementUrl}/devices`)
       const response = await gatewayRequest(
         fetcher,
@@ -250,9 +270,7 @@ export function createGatewayAdminClient(
     },
 
     async deploySigningKey(env, signingKey) {
-      const { managementUrl } = gatewayUrls(
-        env.SMS_GATEWAY_API_URL,
-      )
+      const managementUrl = managementUrlOf(env)
       const settingsUrl = new URL(`${managementUrl}/settings`)
       await gatewayRequest(fetcher, env, settingsUrl, {
         method: 'PATCH',
