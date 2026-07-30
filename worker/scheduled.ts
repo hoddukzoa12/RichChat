@@ -99,13 +99,20 @@ const SCHEDULED_TASKS: readonly ScheduledTask[] = [
   (env, ctx) => runAttachmentDownloads(env, {}, ctx),
 ]
 
+// 기기 ID가 확인된 업무폰만 제외한다. 채널 미지정 대화는 기존 LGU+ 경로로
+// 발송됐을 수 있으므로 LEFT JOIN의 NULL 결과도 보정 대상에 남긴다.
 export const PENDING_DELIVERY_REPORT_QUERY =
-  `SELECT office_id, client_key, created_at
+  `SELECT messages.office_id, messages.client_key, messages.created_at
    FROM messages INDEXED BY ix_messages_pending
-   WHERE delivery_status IN ('대기', '접수', '전송중')
-     AND created_at <= ?
-     AND client_key IS NOT NULL
-   ORDER BY delivery_status, created_at, id
+   INNER JOIN conversations
+     ON conversations.id = messages.conversation_id
+   LEFT JOIN office_channels
+     ON office_channels.id = conversations.office_channel_id
+   WHERE messages.delivery_status IN ('대기', '접수', '전송중')
+     AND messages.created_at <= ?
+     AND messages.client_key IS NOT NULL
+     AND office_channels.device_id IS NULL
+   ORDER BY messages.delivery_status, messages.created_at, messages.id
    LIMIT ?`
 
 async function claimNextAttachment(

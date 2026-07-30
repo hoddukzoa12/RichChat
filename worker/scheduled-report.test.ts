@@ -49,12 +49,15 @@ async function seedPending(
   suffix: string,
   createdAt: number,
   deliveryStatus: '대기' | '접수' | '전송중' = '대기',
+  deviceId?: string | null,
 ): Promise<string> {
   const officeId = `reconcile-office-${suffix}`
   const userId = `reconcile-user-${suffix}`
   const customerId = `reconcile-customer-${suffix}`
   const conversationId = `reconcile-conversation-${suffix}`
   const messageId = `reconcile-message-${suffix}`
+  const officeChannelId =
+    deviceId === undefined ? null : `reconcile-channel-${suffix}`
   await env.DB.batch([
     env.DB.prepare(
       'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
@@ -84,14 +87,32 @@ async function seedPending(
       createdAt,
       createdAt,
     ),
+    ...(officeChannelId === null
+      ? []
+      : [
+          env.DB.prepare(
+            `INSERT INTO office_channels (
+               id, office_id, value, label, device_id, is_default, active,
+               created_at
+             ) VALUES (?, ?, ?, ?, ?, 1, 1, ?)`,
+          ).bind(
+            officeChannelId,
+            officeId,
+            `02-${suffix}`,
+            '보정 발신 채널',
+            deviceId,
+            createdAt,
+          ),
+        ]),
     env.DB.prepare(
       `INSERT INTO conversations (
-         id, office_id, customer_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?)`,
+         id, office_id, customer_id, office_channel_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(
       conversationId,
       officeId,
       customerId,
+      officeChannelId,
       createdAt,
       createdAt,
     ),
@@ -184,9 +205,46 @@ describe('LGU+ scheduled delivery reconciliation', () => {
       .run()
   })
 
+  it('skips a pending message routed through the SMS gateway', async () => {
+    const messageId = await seedPending(
+      '206',
+      NOW - REPORT_RECONCILIATION_AGE_MS,
+      '접수',
+      'reconcile-device-206',
+    )
+    const fetcher = vi.fn<LguFetch>()
+    const tokenProvider = vi.fn(async () => TOKEN)
+
+    const summary = await runDeliveryReportReconciliation(env, {
+      fetch: fetcher,
+      logger: logger(),
+      now: () => NOW,
+      tokenProvider,
+    })
+
+    expect(summary).toEqual({
+      changed: 0,
+      queried: 0,
+      rejected: 0,
+      unchanged: 0,
+      unknown: 0,
+    })
+    expect(tokenProvider).not.toHaveBeenCalled()
+    expect(fetcher).not.toHaveBeenCalled()
+    expect((await messageRow(messageId))?.delivery_status).toBe('접수')
+
+    await env.DB.prepare(
+      `UPDATE messages
+       SET delivery_status = '실패'
+       WHERE id = ? AND delivery_status = '접수'`,
+    )
+      .bind(messageId)
+      .run()
+  })
+
   it('queries an old pending message and stores the completed result', async () => {
     const createdAt = NOW - REPORT_RECONCILIATION_AGE_MS
-    const messageId = await seedPending('202', createdAt)
+    const messageId = await seedPending('202', createdAt, '대기', null)
     const requests: Array<{
       accessClientId: string | null
       accessClientSecret: string | null
@@ -247,6 +305,43 @@ describe('LGU+ scheduled delivery reconciliation', () => {
       delivered_at: NOW,
       delivery_status: '완료',
       msg_key: 'reconcile-msg-202',
+    })
+  })
+
+  it('reconciles a pending message without an assigned office channel', async () => {
+    const messageId = await seedPending(
+      '207',
+      NOW - REPORT_RECONCILIATION_AGE_MS,
+    )
+    const fetcher = vi.fn<LguFetch>(async () =>
+      lguResponse([
+        {
+          cliKey: 'reconcile-client-207',
+          msgKey: 'reconcile-msg-207',
+          status: 'DONE',
+          resultCode: '10000',
+          resultCodeDesc: '성공',
+          rptDt: '2026-07-28T12:00:00',
+        },
+      ]))
+
+    const summary = await runDeliveryReportReconciliation(
+      env,
+      options(fetcher),
+    )
+
+    expect(summary).toEqual({
+      changed: 1,
+      queried: 1,
+      rejected: 0,
+      unchanged: 0,
+      unknown: 0,
+    })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(await messageRow(messageId)).toEqual({
+      delivered_at: NOW,
+      delivery_status: '완료',
+      msg_key: 'reconcile-msg-207',
     })
   })
 
