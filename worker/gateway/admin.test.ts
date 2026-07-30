@@ -74,7 +74,7 @@ describe('SMS Gateway admin client', () => {
     expect(fetcher).not.toHaveBeenCalled()
   })
 
-  it('lists devices and deploys the exact shared signing key', async () => {
+  it('lists gateway devices', async () => {
     const fetcher = vi.fn(
       (input: RequestInfo | URL, _init?: RequestInit) => {
         if (String(input).endsWith('/devices')) {
@@ -88,7 +88,7 @@ describe('SMS Gateway admin client', () => {
             ]),
           )
         }
-        return Promise.resolve(Response.json({ webhooks: {} }))
+        return Promise.resolve(Response.json([]))
       },
     )
     const client = createGatewayAdminClient(fetcher)
@@ -96,15 +96,9 @@ describe('SMS Gateway admin client', () => {
     await expect(client.listDevices(ENV)).resolves.toEqual([
       { id: 'device-1', name: '상담실 업무폰' },
     ])
-    await client.deploySigningKey(ENV, 'shared-signing-key')
-
-    expect(String(fetcher.mock.calls[1][0])).toBe(
-      'https://sms-gateway.example/api/3rdparty/v1/settings',
+    expect(String(fetcher.mock.calls[0][0])).toBe(
+      'https://sms-gateway.example/api/3rdparty/v1/devices',
     )
-    expect(fetcher.mock.calls[1][1]?.method).toBe('PATCH')
-    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual({
-      webhooks: { signing_key: 'shared-signing-key' },
-    })
   })
 
   it('turns gateway failures into a readable error', async () => {

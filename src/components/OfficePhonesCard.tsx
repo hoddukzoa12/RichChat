@@ -6,7 +6,6 @@ import {
 } from 'react'
 import {
   createOfficePhone,
-  deployOfficePhoneSigningKey,
   getAvailableOfficePhoneDevices,
   getOfficePhones,
   issueOfficePhoneEnrollmentCode,
@@ -350,8 +349,6 @@ export function OfficePhonesCard() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [labelDraft, setLabelDraft] = useState('')
   const [pendingId, setPendingId] = useState<string | null>(null)
-  const [deployingKey, setDeployingKey] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -413,25 +410,6 @@ export function OfficePhonesCard() {
     }
   }
 
-  const deploySigningKey = async () => {
-    setDeployingKey(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const response = await deployOfficePhoneSigningKey()
-      setNotice(response.message)
-    } catch (failure: unknown) {
-      setError(
-        errorMessage(
-          failure,
-          '업무폰 공통 서명키를 배포하지 못했습니다.',
-        ),
-      )
-    } finally {
-      setDeployingKey(false)
-    }
-  }
-
   return (
     <>
       <Card className="p-[18px]">
@@ -444,15 +422,7 @@ export function OfficePhonesCard() {
               LGU+ 대표번호와 Android SMS Gateway 업무폰을 관리합니다.
             </span>
           </span>
-          <span className="ml-auto flex flex-none items-center gap-3">
-            <button
-              type="button"
-              disabled={deployingKey}
-              onClick={() => void deploySigningKey()}
-              className="text-[12.5px] font-semibold text-ink-500 disabled:text-ink-300"
-            >
-              {deployingKey ? '배포 중…' : '공통 서명키 배포'}
-            </button>
+          <span className="ml-auto flex flex-none items-center">
             <button
               type="button"
               onClick={() => setAddOpen(true)}
@@ -463,14 +433,21 @@ export function OfficePhonesCard() {
           </span>
         </div>
 
-        {notice && (
-          <div
-            role="status"
-            className="mt-3 rounded-lg bg-done-bg px-3 py-2 text-[12.5px] leading-relaxed text-done-fg"
-          >
-            {notice}
-          </div>
-        )}
+        <div className="mt-3 rounded-[10px] bg-surface-sunken px-3 py-2.5 text-[12px] leading-relaxed text-ink-500">
+          <span className="block font-semibold text-ink-700">
+            서명키는 업무폰마다 직접 설정합니다.
+          </span>
+          각 업무폰 앱의{' '}
+          <strong className="font-semibold text-ink-700">
+            설정 → Webhooks → Signing Key
+          </strong>
+          에 키를 입력하고, Worker 시크릿{' '}
+          <code className="font-mono text-[11.5px] text-ink-700">
+            SMS_GATEWAY_SIGNING_KEYS
+          </code>
+          의 같은 Device ID 항목에도 같은 값을 넣으세요. 두 값이
+          같아야 문자 수신이 됩니다.
+        </div>
 
         {error && (
           <div
@@ -619,12 +596,6 @@ export function OfficePhonesCard() {
             )}
           </div>
         )}
-
-        <div className="mt-3 rounded-[10px] bg-surface-sunken px-3 py-2.5 text-[12px] leading-relaxed text-ink-500">
-          공통 서명키 배포는 게이트웨이 계정 설정만 갱신합니다.
-          업무폰 앱이 주기 동기화한 뒤 반영되므로 즉시 완료 여부를
-          확인할 수 없습니다.
-        </div>
       </Card>
 
       {addOpen && (

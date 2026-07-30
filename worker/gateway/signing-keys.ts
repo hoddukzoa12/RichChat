@@ -90,36 +90,6 @@ export function parseSigningKeys(raw: unknown): SigningKeys | null {
     : null
 }
 
-export type SigningKeyDeployBlock =
-  | '미설정'
-  | '형식 오류'
-  | '기기별 형식'
-
-export type SigningKeyDeployTarget =
-  | { deployable: true; defaultKey: string }
-  | { deployable: false; block: SigningKeyDeployBlock }
-
-/**
- * 공통 키를 배포할 수 있는지와, 막혔다면 그 이유. 이유를 하나로 뭉개면
- * **값이 들어 있는데도 "설정되지 않았습니다"가 떠서** 진단이 엉뚱한 곳으로 간다.
- */
-export function signingKeyDeployTarget(
-  raw: unknown,
-): SigningKeyDeployTarget {
-  if (!hasSigningKeysValue(raw)) {
-    return { deployable: false, block: '미설정' }
-  }
-
-  const configuration = parseSigningKeys(raw)
-  if (!configuration) {
-    return { deployable: false, block: '형식 오류' }
-  }
-  if (configuration.kind === 'legacy') {
-    return { deployable: false, block: '기기별 형식' }
-  }
-  return { deployable: true, defaultKey: configuration.defaultKey }
-}
-
 export function signingKeyForDevice(
   configuration: SigningKeys,
   deviceId: string,

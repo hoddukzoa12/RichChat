@@ -4,7 +4,6 @@ import type { MeResponse } from '../../../shared/wire/settings'
 import { ApiRequestError } from '../client'
 import {
   createOfficePhone,
-  deployOfficePhoneSigningKey,
   getAvailableOfficePhoneDevices,
   getOfficeMembers,
   getOfficePhones,
@@ -128,7 +127,6 @@ describe('Settings endpoints', () => {
     await getOfficePhones()
     await issueOfficePhoneEnrollmentCode()
     await getAvailableOfficePhoneDevices()
-    await deployOfficePhoneSigningKey()
     await createOfficePhone({
       value: phone.value,
       label: phone.label,
@@ -141,13 +139,12 @@ describe('Settings endpoints', () => {
       '/api/office/phones',
       '/api/office/phones/enrollment-code',
       '/api/office/phones/available-devices',
-      '/api/office/phones/signing-key',
       '/api/office/phones',
       '/api/office/phones/phone%2F1',
       '/api/office/phones/phone%2F1/status',
     ])
     expect(
-      JSON.parse(String(fetchMock.mock.calls[4][1]?.body)),
+      JSON.parse(String(fetchMock.mock.calls[3][1]?.body)),
     ).toEqual({
       value: phone.value,
       label: phone.label,

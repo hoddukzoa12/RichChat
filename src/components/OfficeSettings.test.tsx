@@ -97,8 +97,10 @@ describe('office settings access and member presentation', () => {
 
     expect(markup).toContain('문자 연동')
     expect(markup).toContain('＋ 업무폰 등록')
-    expect(markup).toContain('공통 서명키 배포')
-    expect(markup).toContain('즉시 완료 여부를')
+    expect(markup).toContain('설정 → Webhooks → Signing Key')
+    expect(markup).toContain('SMS_GATEWAY_SIGNING_KEYS')
+    expect(markup).toContain('같은 Device ID 항목에도 같은 값')
+    expect(markup).not.toContain('공통 서명키 배포')
     expect(markup).toContain('AI · 데이터 정책')
   })
 

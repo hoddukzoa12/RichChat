@@ -125,7 +125,3 @@ export interface OfficePhoneAvailableDevice {
 export interface OfficePhoneAvailableDevicesResponse {
   devices: OfficePhoneAvailableDevice[]
 }
-
-export interface OfficePhoneSigningKeyDeployResponse {
-  message: string
-}

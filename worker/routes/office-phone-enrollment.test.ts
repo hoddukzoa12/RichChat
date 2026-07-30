@@ -4,7 +4,6 @@ import type { Role } from '../../shared/domain'
 import type {
   OfficePhoneAvailableDevicesResponse,
   OfficePhoneEnrollmentCodeResponse,
-  OfficePhoneSigningKeyDeployResponse,
 } from '../../shared/wire/office'
 import {
   GatewayAdminError,
@@ -94,20 +93,8 @@ function gatewayClient(
       }),
     ),
     listDevices: vi.fn(() => Promise.resolve([])),
-    deploySigningKey: vi.fn(() => Promise.resolve()),
     ...overrides,
   }
-}
-
-function signingKeyEnv(rawSigningKeys: string): Env {
-  return new Proxy(env, {
-    get(target, property, receiver) {
-      if (property === 'SMS_GATEWAY_SIGNING_KEYS') {
-        return rawSigningKeys
-      }
-      return Reflect.get(target, property, receiver)
-    },
-  }) as Env
 }
 
 async function callRoute(
@@ -276,88 +263,17 @@ describe('Office phone enrollment automation', () => {
     })
   })
 
-  it('deploys only the configured shared default key', async () => {
-    const fixture = await seedFixture()
-    const gateway = gatewayClient()
-    const routes = createOfficeRoutes({ gatewayAdmin: gateway })
-    const routeEnv = signingKeyEnv(
-      JSON.stringify({
-        default: 'shared-key',
-        overrides: { 'device-1': 'override-key' },
+  it('does not register the removed signing-key deployment route', () => {
+    const routes = createOfficeRoutes({
+      gatewayAdmin: gatewayClient(),
+    })
+
+    expect(routes).not.toContainEqual(
+      expect.objectContaining({
+        method: 'POST',
+        path: '/api/office/phones/signing-key',
       }),
     )
-
-    const response = await callRoute(
-      routes,
-      'POST',
-      '/api/office/phones/signing-key',
-      fixture.admin.token,
-      routeEnv,
-    )
-
-    expect(response.status).toBe(200)
-    expect(gateway.deploySigningKey).toHaveBeenCalledWith(
-      routeEnv,
-      'shared-key',
-    )
-    const body =
-      await response.json<OfficePhoneSigningKeyDeployResponse>()
-    expect(body.message).toContain('즉시 확인할 수 없습니다')
-  })
-
-  it('deploys a shared key that omits overrides', async () => {
-    const fixture = await seedFixture()
-    const gateway = gatewayClient()
-    const routes = createOfficeRoutes({ gatewayAdmin: gateway })
-    const routeEnv = signingKeyEnv(
-      JSON.stringify({ default: 'shared-key' }),
-    )
-
-    const response = await callRoute(
-      routes,
-      'POST',
-      '/api/office/phones/signing-key',
-      fixture.admin.token,
-      routeEnv,
-    )
-
-    expect(response.status).toBe(200)
-    expect(gateway.deploySigningKey).toHaveBeenCalledWith(
-      routeEnv,
-      'shared-key',
-    )
-  })
-
-  it('names the reason a shared key cannot be deployed', async () => {
-    const fixture = await seedFixture()
-    const gateway = gatewayClient()
-    const routes = createOfficeRoutes({ gatewayAdmin: gateway })
-
-    const blocked = async (rawSigningKeys: string) => {
-      const response = await callRoute(
-        routes,
-        'POST',
-        '/api/office/phones/signing-key',
-        fixture.admin.token,
-        signingKeyEnv(rawSigningKeys),
-      )
-      expect(response.status).toBe(409)
-      const body = await response.json<{
-        error: { message: string }
-      }>()
-      return body.error.message
-    }
-
-    // 값이 들어 있는데 "설정되지 않았습니다"가 뜨면 시크릿을 다시 넣는
-    // 엉뚱한 대응을 하게 된다. 세 경우가 서로 다른 문장이어야 한다.
-    expect(await blocked('')).toContain('설정되지 않았습니다')
-    expect(await blocked('{"default":')).toContain(
-      '해석할 수 없습니다',
-    )
-    expect(
-      await blocked(JSON.stringify({ 'device-1': 'legacy-key' })),
-    ).toContain('기기별 키 목록')
-    expect(gateway.deploySigningKey).not.toHaveBeenCalled()
   })
 
   it('returns a readable gateway error instead of 500', async () => {

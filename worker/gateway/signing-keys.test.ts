@@ -1,14 +1,18 @@
+import { env } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import { smsGatewayWebhookEnv } from '../index'
 import { createSmsGatewayWebhookHandler } from '../routes/hooks-sms-gateway'
 import {
   legacySigningKeysForWebhook,
   parseSigningKeys,
-  signingKeyDeployTarget,
   signingKeyForDevice,
 } from './signing-keys'
 
 const HOOK_URL = 'https://example.com/api/hooks/sms-gateway'
+
+declare module 'cloudflare:test' {
+  interface ProvidedEnv extends Env {}
+}
 
 async function signature(
   body: string,
@@ -53,18 +57,86 @@ async function authenticatedEvent(
     },
     body,
   })
-  const env = {
+  const hookEnv = {
     SMS_GATEWAY_SIGNING_KEYS: rawSigningKeys,
     get DB(): never {
       throw new Error('서명 검증 뒤 알 수 없는 이벤트는 D1을 쓰지 않습니다.')
     },
   } as unknown as Env
-  const routeEnv = await smsGatewayWebhookEnv(request, env)
+  const routeEnv = await smsGatewayWebhookEnv(request, hookEnv)
   return createSmsGatewayWebhookHandler()(
     request,
     routeEnv,
     {},
   )
+}
+
+async function authenticatedSmsEvent(
+  rawSigningKeys: string,
+  deviceId: string,
+  signingKey: string,
+  messageId: string,
+): Promise<Response> {
+  const body = JSON.stringify({
+    deviceId,
+    event: 'sms:received',
+    id: `delivery-${messageId}`,
+    webhookId: 'webhook-signing-keys',
+    payload: {
+      messageId,
+      message: `수신 ${messageId}`,
+      sender: '01022334455',
+      recipient: '01099998888',
+      simNumber: 1,
+      receivedAt: '2026-07-30T14:00:00.000+09:00',
+    },
+  })
+  const timestamp = String(Math.floor(Date.now() / 1_000))
+  const request = new Request(HOOK_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-signature': await signature(body, timestamp, signingKey),
+      'x-timestamp': timestamp,
+    },
+    body,
+  })
+  const hookEnv = new Proxy(env, {
+    get(target, property, receiver) {
+      if (property === 'SMS_GATEWAY_SIGNING_KEYS') {
+        return rawSigningKeys
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  }) as Env
+  const routeEnv = await smsGatewayWebhookEnv(request, hookEnv)
+  return createSmsGatewayWebhookHandler()(
+    request,
+    routeEnv,
+    {},
+  )
+}
+
+async function seedOfficePhone(deviceId: string): Promise<void> {
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      'INSERT INTO offices (id, name, created_at) VALUES (?, ?, ?)',
+    ).bind('office-signing-keys', '세무법인 리치', now),
+    env.DB.prepare(
+      `INSERT INTO office_channels (
+        id, office_id, value, label, device_id, is_default, active,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 1, ?)`,
+    ).bind(
+      'phone-signing-keys',
+      'office-signing-keys',
+      '01099998888',
+      '서명키 검증 업무폰',
+      deviceId,
+      now,
+    ),
+  ])
 }
 
 describe('SMS Gateway signing key configuration', () => {
@@ -142,34 +214,6 @@ describe('SMS Gateway signing key configuration', () => {
     ).toHaveProperty('status', 204)
   })
 
-  it('separates an unset key from an unreadable one', () => {
-    expect(signingKeyDeployTarget('')).toEqual({
-      deployable: false,
-      block: '미설정',
-    })
-    expect(signingKeyDeployTarget(undefined)).toEqual({
-      deployable: false,
-      block: '미설정',
-    })
-    expect(signingKeyDeployTarget('{"default":')).toEqual({
-      deployable: false,
-      block: '형식 오류',
-    })
-    expect(
-      signingKeyDeployTarget(
-        JSON.stringify({ default: 'shared-key', overrides: 'nope' }),
-      ),
-    ).toEqual({ deployable: false, block: '형식 오류' })
-    expect(
-      signingKeyDeployTarget(
-        JSON.stringify({ 'device-1': 'legacy-key' }),
-      ),
-    ).toEqual({ deployable: false, block: '기기별 형식' })
-    expect(
-      signingKeyDeployTarget(JSON.stringify({ default: 'shared-key' })),
-    ).toEqual({ deployable: true, defaultKey: 'shared-key' })
-  })
-
   it('authenticates an overridden device only with its override', async () => {
     const raw = JSON.stringify({
       default: 'shared-key',
@@ -182,5 +226,63 @@ describe('SMS Gateway signing key configuration', () => {
     expect(
       await authenticatedEvent(raw, 'device-2', 'override-key'),
     ).toHaveProperty('status', 204)
+  })
+
+  it('stores SMS events with device and shared key formats', async () => {
+    const deviceId = 'device-signing-keys'
+    await seedOfficePhone(deviceId)
+
+    const deviceKeys = JSON.stringify({
+      [deviceId]: 'device-signing-key',
+    })
+    expect(
+      await authenticatedSmsEvent(
+        deviceKeys,
+        deviceId,
+        'different-key',
+        'device-key-rejected',
+      ),
+    ).toHaveProperty('status', 401)
+    expect(
+      await authenticatedSmsEvent(
+        deviceKeys,
+        deviceId,
+        'device-signing-key',
+        'device-key-accepted',
+      ),
+    ).toHaveProperty('status', 204)
+
+    const sharedKeys = JSON.stringify({
+      default: 'shared-signing-key',
+    })
+    expect(
+      await authenticatedSmsEvent(
+        sharedKeys,
+        deviceId,
+        'different-key',
+        'shared-key-rejected',
+      ),
+    ).toHaveProperty('status', 401)
+    expect(
+      await authenticatedSmsEvent(
+        sharedKeys,
+        deviceId,
+        'shared-signing-key',
+        'shared-key-accepted',
+      ),
+    ).toHaveProperty('status', 204)
+
+    const { results } = await env.DB.prepare(
+      `SELECT body
+      FROM messages
+      WHERE office_id = ?
+      ORDER BY body`,
+    )
+      .bind('office-signing-keys')
+      .all<{ body: string }>()
+    expect(results.map(({ body }) => body)).toEqual([
+      '수신 device-key-accepted',
+      '수신 shared-key-accepted',
+    ])
   })
 })

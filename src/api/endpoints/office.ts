@@ -11,7 +11,6 @@ import type {
   OfficePhonePatch,
   OfficePhoneResponse,
   OfficePhonesResponse,
-  OfficePhoneSigningKeyDeployResponse,
   OfficePhoneStatusPatch,
   OfficeSettingsPatch,
   OfficeSettingsResponse,
@@ -39,7 +38,6 @@ export type {
   OfficePhoneResponse,
   OfficePhonesResponse,
   OfficePhoneSigningKeyStatus,
-  OfficePhoneSigningKeyDeployResponse,
   OfficePhoneStatusPatch,
   OfficeSettings,
   OfficeSettingsPatch,
@@ -91,15 +89,6 @@ export function getAvailableOfficePhoneDevices(
   signal?: AbortSignal,
 ): Promise<OfficePhoneAvailableDevicesResponse> {
   return apiRequest('/api/office/phones/available-devices', {
-    signal,
-  })
-}
-
-export function deployOfficePhoneSigningKey(
-  signal?: AbortSignal,
-): Promise<OfficePhoneSigningKeyDeployResponse> {
-  return apiRequest('/api/office/phones/signing-key', {
-    method: 'POST',
     signal,
   })
 }

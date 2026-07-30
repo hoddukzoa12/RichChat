@@ -204,10 +204,6 @@ export interface GatewayAdminClient {
     env: GatewayAdminEnv,
   ): Promise<GatewayEnrollmentCode>
   listDevices(env: GatewayAdminEnv): Promise<GatewayDevice[]>
-  deploySigningKey(
-    env: GatewayAdminEnv,
-    signingKey: string,
-  ): Promise<void>
 }
 
 export function createGatewayAdminClient(
@@ -267,17 +263,6 @@ export function createGatewayAdminClient(
         id: (device as Record<string, unknown>).id as string,
         name: (device as Record<string, unknown>).name as string,
       }))
-    },
-
-    async deploySigningKey(env, signingKey) {
-      const managementUrl = managementUrlOf(env)
-      const settingsUrl = new URL(`${managementUrl}/settings`)
-      await gatewayRequest(fetcher, env, settingsUrl, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          webhooks: { signing_key: signingKey },
-        }),
-      })
     },
   }
 }
