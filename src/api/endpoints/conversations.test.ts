@@ -13,6 +13,10 @@ const RESPONSE: ConversationListResponse = {
   conversations: [
     {
       id: 'conversation-1',
+      officeChannel: {
+        id: 'office-channel-1',
+        label: '업무폰 1',
+      },
       customer: {
         id: 'customer-1',
         name: '김리치',

@@ -47,6 +47,8 @@ interface ListFilters {
 
 interface PageRow {
   id: string
+  office_channel_id: string
+  office_channel_label: string
   customer_id: string
   customer_name: string
   customer_company: string
@@ -255,7 +257,9 @@ function joinedSource(archive: ConversationArchiveFilter): string {
   return `FROM conversations AS c INDEXED BY ${source.index}
     INNER JOIN customers AS customer
       ON customer.id = c.customer_id
-      AND customer.office_id = c.office_id`
+      AND customer.office_id = c.office_id
+    INNER JOIN office_channels AS office_channel
+      ON office_channel.id = c.office_channel_id`
 }
 
 function filteredWhere(
@@ -330,6 +334,8 @@ export function buildConversationPageQuery(
   return {
     sql: `SELECT
       c.id,
+      office_channel.id AS office_channel_id,
+      office_channel.label AS office_channel_label,
       customer.id AS customer_id,
       customer.name AS customer_name,
       customer.company AS customer_company,
@@ -492,6 +498,10 @@ function archiveFacets(
 function itemFromRow(row: PageRow): ConversationListItem {
   return {
     id: row.id,
+    officeChannel: {
+      id: row.office_channel_id,
+      label: row.office_channel_label,
+    },
     customer: {
       id: row.customer_id,
       name: row.customer_name,

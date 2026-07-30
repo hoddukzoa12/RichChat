@@ -27,6 +27,8 @@ import { json } from '../http/respond'
 
 interface DetailRow {
   id: string
+  office_channel_id: string
+  office_channel_label: string
   status: Status
   label: string
   archived_at: number | null
@@ -259,6 +261,8 @@ async function getConversationDetail(
     env.DB.prepare(
       `SELECT
         conversations.id,
+        office_channels.id AS office_channel_id,
+        office_channels.label AS office_channel_label,
         conversations.status,
         conversations.label,
         conversations.archived_at,
@@ -273,6 +277,8 @@ async function getConversationDetail(
       INNER JOIN customers
         ON customers.id = conversations.customer_id
         AND customers.office_id = conversations.office_id
+      INNER JOIN office_channels
+        ON office_channels.id = conversations.office_channel_id
       WHERE conversations.id = ?
         AND conversations.office_id = ?`,
     ).bind(id, session.officeId),
@@ -346,6 +352,10 @@ async function getConversationDetail(
   }))
   const conversation: ConversationDetail = {
     id: detail.id,
+    officeChannel: {
+      id: detail.office_channel_id,
+      label: detail.office_channel_label,
+    },
     status: detail.status,
     label: detail.label,
     archived: detail.archived_at !== null,

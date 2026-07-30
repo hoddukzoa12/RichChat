@@ -59,6 +59,7 @@ async function seedFixture(): Promise<Fixture> {
   const userBId = `user-b-${key}`
   const now = Date.now()
   const baseTime = 1_700_000_000_000 + fixtureSequence * 10_000
+  const officeChannelId = `office-channel-${key}`
 
   await env.DB.batch([
     env.DB.prepare(
@@ -76,6 +77,17 @@ async function seedFixture(): Promise<Fixture> {
       '상담 담당',
       '상담 담당',
       now,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO office_channels (
+        id, office_id, value, label, is_default, active, created_at
+      ) VALUES (?, ?, ?, ?, 1, 1, ?)`,
+    ).bind(
+      officeChannelId,
+      officeId,
+      `0100000${String(fixtureSequence).padStart(4, '0')}`,
+      '업무폰 1',
       now,
     ),
     env.DB.prepare(
@@ -152,14 +164,15 @@ async function seedConversation(
     ),
     env.DB.prepare(
       `INSERT INTO conversations (
-        id, office_id, customer_id, status, label, archived_at,
+        id, office_id, customer_id, office_channel_id, status, label, archived_at,
         last_message_id, last_message_at, inbound_count, version,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
     ).bind(
       id,
       fixture.officeId,
       customerId,
+      `office-channel-${fixture.key}`,
       status,
       `라벨 ${seed.key}`,
       archivedAt,
@@ -310,6 +323,10 @@ describe('Conversation list API', () => {
     expect(forA.conversations).toEqual([
       {
         id: conversationId,
+        officeChannel: {
+          id: `office-channel-${fixture.key}`,
+          label: '업무폰 1',
+        },
         customer: {
           id: `customer-${fixture.key}-joined`,
           name: '김리치',
@@ -534,13 +551,14 @@ describe('Conversation list API', () => {
           ),
           env.DB.prepare(
             `INSERT INTO conversations (
-              id, office_id, customer_id, status, last_message_id,
+              id, office_id, customer_id, office_channel_id, status, last_message_id,
               last_message_at, inbound_count, created_at, updated_at
-            ) VALUES (?, ?, ?, '미처리', NULL, NULL, 10, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, '미처리', NULL, NULL, 10, ?, ?)`,
           ).bind(
             conversationId,
             fixture.officeId,
             customerId,
+            `office-channel-${fixture.key}`,
             firstOccurredAt,
             firstOccurredAt,
           ),

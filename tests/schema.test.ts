@@ -33,6 +33,7 @@ const PARTIAL_INDEX_PREDICATES: Record<string, string> = {
   ux_users_works_sub: 'WHERE works_sub IS NOT NULL',
   ix_conversations_active_last_message: 'WHERE archived_at IS NULL',
   ix_conversations_archived_last_message: 'WHERE archived_at IS NOT NULL',
+  ux_conv_customer_unassigned: 'WHERE office_channel_id IS NULL',
   ux_msg_mo_key: 'WHERE mo_key IS NOT NULL',
   ux_msg_client_key: 'WHERE client_key IS NOT NULL',
   ux_msg_msg_key: 'WHERE msg_key IS NOT NULL',
