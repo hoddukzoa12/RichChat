@@ -72,6 +72,7 @@ function responseFor(path: string, init?: RequestInit): Response {
       officeChannel: {
         id: 'office-channel-1',
         label: '업무폰 1',
+        value: '01012345678',
       },
       status: '미처리',
       label: '',

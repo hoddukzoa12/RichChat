@@ -429,6 +429,7 @@ describe('Conversation detail routes', () => {
         officeChannel: {
           id: `office-channel-b7-${seedSequence}`,
           label: '업무폰 1',
+          value: `0105555${String(seedSequence).padStart(4, '0')}`,
         },
         status: '처리중',
         label: '신고',

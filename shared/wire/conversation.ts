@@ -39,11 +39,12 @@ export interface ConversationListAssignee {
 export interface ConversationOfficeChannel {
   id: string
   label: string
+  value: string
 }
 
 export interface ConversationListItem {
   id: string
-  officeChannel: ConversationOfficeChannel
+  officeChannel: ConversationOfficeChannel | null
   customer: ConversationListCustomer
   preview: string
   lastMessageAt: number | null
@@ -96,7 +97,7 @@ export interface ConversationAssignee {
  */
 export interface ConversationDetail {
   id: string
-  officeChannel: ConversationOfficeChannel
+  officeChannel: ConversationOfficeChannel | null
   status: Status
   label: string
   archived: boolean

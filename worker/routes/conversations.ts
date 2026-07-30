@@ -12,6 +12,10 @@ import {
   type ConversationStatusFilter,
 } from '../../shared/wire/conversation'
 import type { Status } from '../../shared/domain'
+import {
+  conversationOfficeChannelFromRow,
+  type ConversationOfficeChannelRow,
+} from '../conversation-office-channel'
 import { executeBatch } from '../db/d1'
 import { error } from '../http/error'
 import { json } from '../http/respond'
@@ -45,10 +49,8 @@ interface ListFilters {
   limit: number
 }
 
-interface PageRow {
+interface PageRow extends ConversationOfficeChannelRow {
   id: string
-  office_channel_id: string
-  office_channel_label: string
   customer_id: string
   customer_name: string
   customer_company: string
@@ -258,7 +260,7 @@ function joinedSource(archive: ConversationArchiveFilter): string {
     INNER JOIN customers AS customer
       ON customer.id = c.customer_id
       AND customer.office_id = c.office_id
-    INNER JOIN office_channels AS office_channel
+    LEFT JOIN office_channels AS office_channel
       ON office_channel.id = c.office_channel_id`
 }
 
@@ -336,6 +338,7 @@ export function buildConversationPageQuery(
       c.id,
       office_channel.id AS office_channel_id,
       office_channel.label AS office_channel_label,
+      office_channel.value AS office_channel_value,
       customer.id AS customer_id,
       customer.name AS customer_name,
       customer.company AS customer_company,
@@ -498,10 +501,7 @@ function archiveFacets(
 function itemFromRow(row: PageRow): ConversationListItem {
   return {
     id: row.id,
-    officeChannel: {
-      id: row.office_channel_id,
-      label: row.office_channel_label,
-    },
+    officeChannel: conversationOfficeChannelFromRow(row),
     customer: {
       id: row.customer_id,
       name: row.customer_name,

@@ -74,6 +74,7 @@ function listResponse(
       officeChannel: {
         id: 'office-channel-1',
         label: '업무폰 1',
+        value: '01012345678',
       },
       customer: {
         id: `customer-${id}`,
@@ -131,6 +132,7 @@ function conversationDetail(): ConversationDetail {
     officeChannel: {
       id: 'office-channel-1',
       label: '업무폰 1',
+      value: '01012345678',
     },
     status: '미처리',
     label: '',
