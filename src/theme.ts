@@ -4,6 +4,9 @@ import type {
   TaskKind,
   UserStatus,
 } from './types'
+import type {
+  OfficePhoneSigningKeyStatus,
+} from '../shared/wire/office'
 
 export const STATUS_BADGE: Record<Status, string> = {
   미처리: 'text-open-fg bg-open-bg',
@@ -58,6 +61,28 @@ export const MEMBER_STATUS_VIEW: Record<
     badgeClass: 'text-ink-500 bg-fill',
     rowClass: 'bg-surface-sunken opacity-70',
     avatarClass: 'grayscale',
+  },
+}
+
+export const OFFICE_PHONE_SIGNING_KEY_VIEW: Record<
+  OfficePhoneSigningKeyStatus,
+  { label: string; badgeClass: string }
+> = {
+  설정됨: {
+    label: '서명키 설정됨',
+    badgeClass: 'text-done-fg bg-done-bg',
+  },
+  미설정: {
+    label: '서명키 미설정',
+    badgeClass: 'text-open-fg bg-open-bg',
+  },
+  '확인 불가': {
+    label: '서명키 확인 불가',
+    badgeClass: 'text-doing-fg bg-doing-bg',
+  },
+  '해당 없음': {
+    label: '서명키 해당 없음',
+    badgeClass: 'text-ink-500 bg-fill',
   },
 }
 

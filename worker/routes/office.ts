@@ -11,6 +11,10 @@ import {
 } from '../../shared/permissions'
 import {
   MEMBER_STATUS_VALUES,
+  OFFICE_PHONE_DEVICE_ID_MAX_LENGTH,
+  OFFICE_PHONE_LABEL_MAX_LENGTH,
+  OFFICE_PHONE_VALUE_MAX_LENGTH,
+  OFFICE_PHONE_VALUE_MIN_LENGTH,
   RETENTION_YEARS_MAX,
   RETENTION_YEARS_MIN,
   type MemberStatus,
@@ -22,6 +26,12 @@ import {
   type OfficeMembersResponse,
   type OfficeMemberStatusPatch,
   type OfficeMemberWithStatus,
+  type OfficePhone,
+  type OfficePhoneCreate,
+  type OfficePhonePatch,
+  type OfficePhoneResponse,
+  type OfficePhonesResponse,
+  type OfficePhoneStatusPatch,
   type OfficeSettings,
   type OfficeSettingsPatch,
   type OfficeSettingsResponse,
@@ -37,6 +47,10 @@ import {
 } from '../http/session'
 import { createId, type Clock } from '../lib/ids'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
+import {
+  readSigningKeyConfiguration,
+  signingKeyStatus,
+} from '../sms-gateway-signing-key-status'
 
 interface OfficeDependencies {
   clock?: Clock
@@ -63,6 +77,24 @@ interface ListedOfficeMemberRow extends OfficeMemberRow {
   can_manage: number
 }
 
+interface OfficePhoneRow {
+  id: string
+  value: string
+  label: string
+  device_id: string | null
+  is_default: number
+  active: number
+}
+
+interface ListedOfficePhoneRow {
+  id: string | null
+  value: string | null
+  label: string | null
+  device_id: string | null
+  is_default: number | null
+  active: number | null
+}
+
 interface SqlGuard {
   sql: string
   bindings: readonly unknown[]
@@ -77,12 +109,22 @@ const SETTINGS_PATCH_KEYS = new Set([
 const INVITE_KEYS = new Set(['email', 'name', 'title', 'role'])
 const MEMBER_PATCH_KEYS = new Set(['name', 'title', 'role'])
 const MEMBER_STATUS_KEYS = new Set(['status'])
+const OFFICE_PHONE_CREATE_KEYS = new Set([
+  'value',
+  'label',
+  'deviceId',
+])
+const OFFICE_PHONE_PATCH_KEYS = new Set(['label'])
+const OFFICE_PHONE_STATUS_KEYS = new Set(['active'])
 const ROLE_SET = new Set<string>(ROLES)
 const MEMBER_STATUS_SET = new Set<string>(MEMBER_STATUS_VALUES)
 const EMAIL_MAX_LENGTH = 254
 const EMAIL_LOCAL_MAX_LENGTH = 64
 const EMAIL_PATTERN =
   /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
+const OFFICE_PHONE_VALUE_PATTERN = new RegExp(
+  `^\\d{${OFFICE_PHONE_VALUE_MIN_LENGTH},${OFFICE_PHONE_VALUE_MAX_LENGTH}}$`,
+)
 const ADMIN_ROLE = '관리자' satisfies Role
 const INVITED_STATUS = '초대' satisfies UserStatus
 const ACTIVE_STATUS = '활성' satisfies UserStatus
@@ -94,6 +136,12 @@ const MEMBER_EVENT_TYPES = {
   invited: 'office.member.invited',
   updated: 'office.member.updated',
   statusChanged: 'office.member.status-changed',
+} as const
+const OFFICE_PHONE_ENTITY = 'office_channel'
+const OFFICE_PHONE_EVENT_TYPES = {
+  created: 'office.phone.created',
+  updated: 'office.phone.updated',
+  statusChanged: 'office.phone.status-changed',
 } as const
 
 const PERMISSION_ROLES = PERMISSIONS.reduce<
@@ -360,6 +408,105 @@ async function readMemberStatusPatch(
   return { status: value.status }
 }
 
+function phoneValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+
+  const trimmed = value.trim()
+  return OFFICE_PHONE_VALUE_PATTERN.test(trimmed)
+    ? trimmed
+    : undefined
+}
+
+function phoneLabel(value: unknown): string | undefined {
+  const label = nonEmptyText(value)
+  return label && label.length <= OFFICE_PHONE_LABEL_MAX_LENGTH
+    ? label
+    : undefined
+}
+
+function phoneDeviceId(value: unknown): string | undefined {
+  const deviceId = nonEmptyText(value)
+  return (
+    deviceId &&
+    deviceId.length <= OFFICE_PHONE_DEVICE_ID_MAX_LENGTH
+  )
+    ? deviceId
+    : undefined
+}
+
+async function readOfficePhoneCreate(
+  request: Request,
+): Promise<OfficePhoneCreate | Response> {
+  const value = await readJsonObject(request)
+  if (value instanceof Response) return value
+
+  if (!hasExactKeys(value, OFFICE_PHONE_CREATE_KEYS)) {
+    return error('BAD_REQUEST', '업무폰 등록 정보가 올바르지 않습니다.')
+  }
+
+  const normalizedValue = phoneValue(value.value)
+  if (!normalizedValue) {
+    return error(
+      'BAD_REQUEST',
+      `전화번호는 하이픈 없이 ${OFFICE_PHONE_VALUE_MIN_LENGTH}~${OFFICE_PHONE_VALUE_MAX_LENGTH}자리 숫자로 입력해 주세요.`,
+    )
+  }
+
+  const label = phoneLabel(value.label)
+  if (!label) {
+    return error(
+      'BAD_REQUEST',
+      `라벨은 ${OFFICE_PHONE_LABEL_MAX_LENGTH}자 이내로 입력해 주세요.`,
+    )
+  }
+
+  const deviceId = phoneDeviceId(value.deviceId)
+  if (!deviceId) {
+    return error(
+      'BAD_REQUEST',
+      `Device ID는 ${OFFICE_PHONE_DEVICE_ID_MAX_LENGTH}자 이내로 입력해 주세요.`,
+    )
+  }
+
+  return { value: normalizedValue, label, deviceId }
+}
+
+async function readOfficePhonePatch(
+  request: Request,
+): Promise<OfficePhonePatch | Response> {
+  const value = await readJsonObject(request)
+  if (value instanceof Response) return value
+
+  const label = phoneLabel(value.label)
+  if (
+    !hasExactKeys(value, OFFICE_PHONE_PATCH_KEYS) ||
+    !label
+  ) {
+    return error(
+      'BAD_REQUEST',
+      `라벨은 ${OFFICE_PHONE_LABEL_MAX_LENGTH}자 이내로 입력해 주세요.`,
+    )
+  }
+
+  return { label }
+}
+
+async function readOfficePhoneStatusPatch(
+  request: Request,
+): Promise<OfficePhoneStatusPatch | Response> {
+  const value = await readJsonObject(request)
+  if (value instanceof Response) return value
+
+  if (
+    !hasExactKeys(value, OFFICE_PHONE_STATUS_KEYS) ||
+    typeof value.active !== 'boolean'
+  ) {
+    return error('BAD_REQUEST', '업무폰 상태가 올바르지 않습니다.')
+  }
+
+  return { active: value.active }
+}
+
 function settingsFromRow(row: OfficeSettingsRow): OfficeSettings {
   return {
     exportLog: row.export_log === 1,
@@ -385,6 +532,47 @@ function memberWithStatusFromRow(
   return {
     ...memberFromRow(row),
     status: row.status,
+  }
+}
+
+function officePhoneFromRow(
+  row: OfficePhoneRow,
+  signingKeys: ReturnType<typeof readSigningKeyConfiguration>,
+): OfficePhone {
+  return {
+    id: row.id,
+    value: row.value,
+    label: row.label,
+    deviceId: row.device_id,
+    isDefault: row.is_default === 1,
+    active: row.active === 1,
+    signingKeyStatus: signingKeyStatus(
+      signingKeys,
+      row.device_id,
+    ),
+  }
+}
+
+function officePhoneRowFromList(
+  row: ListedOfficePhoneRow,
+): OfficePhoneRow | null {
+  if (
+    row.id === null ||
+    row.value === null ||
+    row.label === null ||
+    row.is_default === null ||
+    row.active === null
+  ) {
+    return null
+  }
+
+  return {
+    id: row.id,
+    value: row.value,
+    label: row.label,
+    device_id: row.device_id,
+    is_default: row.is_default,
+    active: row.active,
   }
 }
 
@@ -424,6 +612,49 @@ async function loadMember(
   )
     .bind(memberId, officeId)
     .first<OfficeMemberRow>()
+}
+
+async function loadOfficePhone(
+  env: Env,
+  session: SessionContext,
+  phoneId: string,
+): Promise<OfficePhoneRow | null> {
+  const permission = actorPermissionGuard(
+    session.userId,
+    'office:manage',
+    'phone_actor',
+  )
+  return env.DB.prepare(
+    `SELECT
+      phone.id,
+      phone.value,
+      phone.label,
+      phone.device_id,
+      phone.is_default,
+      phone.active
+    FROM office_channels AS phone
+    WHERE phone.id = ?
+      AND phone.office_id = ?
+      AND ${permission.sql}`,
+  )
+    .bind(phoneId, session.officeId, ...permission.bindings)
+    .first<OfficePhoneRow>()
+}
+
+async function loadStoredOfficePhone(
+  env: Env,
+  officeId: string,
+  phoneId: string,
+): Promise<OfficePhoneRow | null> {
+  return env.DB.prepare(
+    `SELECT
+      id, value, label, device_id, is_default, active
+    FROM office_channels
+    WHERE id = ?
+      AND office_id = ?`,
+  )
+    .bind(phoneId, officeId)
+    .first<OfficePhoneRow>()
 }
 
 async function loadActorRole(
@@ -479,6 +710,35 @@ async function memberMutationFailure(
     desiredStatus === INACTIVE_STATUS
   ) {
     return error('CONFLICT', '자기 자신을 비활성화할 수 없습니다.')
+  }
+
+  return null
+}
+
+async function officePhoneMutationFailure(
+  env: Env,
+  session: SessionContext,
+  phoneId: string,
+  desiredActive?: boolean,
+): Promise<Response | null> {
+  const [actorRole, phone] = await Promise.all([
+    loadActorRole(env, session.userId),
+    loadStoredOfficePhone(env, session.officeId, phoneId),
+  ])
+  if (
+    !actorRole ||
+    !hasPermission(actorRole, 'office:manage')
+  ) {
+    return error('FORBIDDEN', '업무폰을 관리할 수 없습니다.')
+  }
+  if (!phone) {
+    return error('NOT_FOUND', '업무폰을 찾을 수 없습니다.')
+  }
+  if (desiredActive === false && phone.is_default === 1) {
+    return error(
+      'CONFLICT',
+      '기본 발신번호는 비활성화할 수 없습니다.',
+    )
   }
 
   return null
@@ -631,6 +891,371 @@ export function createOfficeRoutes(
     return json({
       settings: settingsFromRow(row),
     } satisfies OfficeSettingsResponse)
+  }
+
+  async function getOfficePhones(
+    request: Request,
+    env: Env,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '업무폰 목록을 볼 수 없습니다.')
+    }
+
+    const manageRoles = PERMISSION_ROLES['office:manage']
+    const { results } = await env.DB.prepare(
+      `SELECT
+        phone.id,
+        phone.value,
+        phone.label,
+        phone.device_id,
+        phone.is_default,
+        phone.active
+      FROM users AS actor
+      LEFT JOIN office_channels AS phone
+        ON phone.office_id = ?
+      WHERE actor.id = ?
+        AND actor.status = ?
+        AND actor.role IN (${placeholders(manageRoles)})
+      ORDER BY
+        phone.is_default DESC,
+        phone.active DESC,
+        phone.created_at,
+        phone.id`,
+    )
+      .bind(
+        session.officeId,
+        session.userId,
+        ACTIVE_STATUS,
+        ...manageRoles,
+      )
+      .all<ListedOfficePhoneRow>()
+
+    if (results.length === 0) {
+      return error('FORBIDDEN', '업무폰 목록을 볼 수 없습니다.')
+    }
+
+    const signingKeys = readSigningKeyConfiguration(
+      env.SMS_GATEWAY_SIGNING_KEYS,
+    )
+    const phones = results.flatMap((listed) => {
+      const row = officePhoneRowFromList(listed)
+      return row ? [officePhoneFromRow(row, signingKeys)] : []
+    })
+
+    return json({ phones } satisfies OfficePhonesResponse)
+  }
+
+  async function createOfficePhone(
+    request: Request,
+    env: Env,
+    _params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '업무폰을 추가할 수 없습니다.')
+    }
+
+    const phone = await readOfficePhoneCreate(request)
+    if (phone instanceof Response) return phone
+
+    const phoneId = idFactory()
+    const now = clock()
+    const permission = actorPermissionGuard(
+      session.userId,
+      'office:manage',
+      'phone_creator',
+    )
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: OFFICE_PHONE_EVENT_TYPES.created,
+        entity: OFFICE_PHONE_ENTITY,
+        entityId: phoneId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: {
+          value: phone.value,
+          label: phone.label,
+          deviceId: phone.deviceId,
+          active: true,
+        },
+        createdAt: now,
+      },
+      {
+        // 직전 INSERT가 실제로 새 업무폰을 만든 경우에만 이벤트를 기록한다.
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
+    const statements = [
+      env.DB.prepare(
+        `INSERT INTO office_channels (
+          id,
+          office_id,
+          value,
+          label,
+          device_id,
+          is_default,
+          active,
+          created_at
+        )
+        SELECT ?, ?, ?, ?, ?, 0, 1, ?
+        WHERE ${permission.sql}
+        ON CONFLICT(device_id) DO NOTHING`,
+      ).bind(
+        phoneId,
+        session.officeId,
+        phone.value,
+        phone.label,
+        phone.deviceId,
+        now,
+        ...permission.bindings,
+      ),
+      ...publication,
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'office:manage',
+      ),
+    ]
+    const [insertResult, , , authorizationResult] =
+      await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
+
+    if (changes(insertResult) === 0) {
+      if (changes(authorizationResult) === 0) {
+        return error('FORBIDDEN', '업무폰을 추가할 수 없습니다.')
+      }
+      return error(
+        'CONFLICT',
+        '이미 등록된 Device ID입니다. 다른 업무폰의 Device ID를 확인해 주세요.',
+      )
+    }
+
+    const row = await loadOfficePhone(env, session, phoneId)
+    if (!row) {
+      return error('INTERNAL_ERROR', '추가한 업무폰을 불러오지 못했습니다.')
+    }
+    const signingKeys = readSigningKeyConfiguration(
+      env.SMS_GATEWAY_SIGNING_KEYS,
+    )
+
+    return json(
+      {
+        phone: officePhoneFromRow(row, signingKeys),
+      } satisfies OfficePhoneResponse,
+      { status: 201 },
+    )
+  }
+
+  async function updateOfficePhone(
+    request: Request,
+    env: Env,
+    params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '업무폰을 수정할 수 없습니다.')
+    }
+
+    const patch = await readOfficePhonePatch(request)
+    if (patch instanceof Response) return patch
+
+    const phoneId = params.phoneId
+    const permission = actorPermissionGuard(
+      session.userId,
+      'office:manage',
+      'phone_editor',
+    )
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: OFFICE_PHONE_EVENT_TYPES.updated,
+        entity: OFFICE_PHONE_ENTITY,
+        entityId: phoneId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { label: patch.label },
+        createdAt: clock(),
+      },
+      {
+        // 직전 UPDATE가 실제로 라벨을 바꾼 경우에만 이벤트를 기록한다.
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
+    const statements = [
+      env.DB.prepare(
+        `UPDATE office_channels AS phone
+        SET label = ?
+        WHERE phone.id = ?
+          AND phone.office_id = ?
+          AND phone.label <> ?
+          AND ${permission.sql}`,
+      ).bind(
+        patch.label,
+        phoneId,
+        session.officeId,
+        patch.label,
+        ...permission.bindings,
+      ),
+      ...publication,
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'office:manage',
+      ),
+    ]
+    const [updateResult, , , authorizationResult] =
+      await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
+
+    if (
+      changes(updateResult) === 0 &&
+      changes(authorizationResult) === 0
+    ) {
+      return error('FORBIDDEN', '업무폰을 수정할 수 없습니다.')
+    }
+    if (changes(updateResult) === 0) {
+      const failure = await officePhoneMutationFailure(
+        env,
+        session,
+        phoneId,
+      )
+      if (failure) return failure
+    }
+
+    const row = await loadOfficePhone(env, session, phoneId)
+    if (!row) {
+      return error('NOT_FOUND', '업무폰을 찾을 수 없습니다.')
+    }
+    const signingKeys = readSigningKeyConfiguration(
+      env.SMS_GATEWAY_SIGNING_KEYS,
+    )
+
+    return json({
+      phone: officePhoneFromRow(row, signingKeys),
+    } satisfies OfficePhoneResponse)
+  }
+
+  async function updateOfficePhoneStatus(
+    request: Request,
+    env: Env,
+    params: Readonly<Record<string, string>>,
+    ctx?: ExecutionContext,
+  ): Promise<Response> {
+    const session = await requireSession(request, env)
+    if (session instanceof Response) return session
+    if (!hasPermission(session.role, 'office:manage')) {
+      return error('FORBIDDEN', '업무폰 상태를 변경할 수 없습니다.')
+    }
+
+    const patch = await readOfficePhoneStatusPatch(request)
+    if (patch instanceof Response) return patch
+
+    const phoneId = params.phoneId
+    const active = Number(patch.active)
+    const permission = actorPermissionGuard(
+      session.userId,
+      'office:manage',
+      'phone_status_actor',
+    )
+    const publication = publish(
+      env.DB,
+      {
+        officeId: session.officeId,
+        type: OFFICE_PHONE_EVENT_TYPES.statusChanged,
+        entity: OFFICE_PHONE_ENTITY,
+        entityId: phoneId,
+        actorKind: 'user',
+        actorId: session.userId,
+        payload: { active: patch.active },
+        createdAt: clock(),
+      },
+      {
+        // 직전 UPDATE가 실제로 상태를 바꾼 경우에만 이벤트를 기록한다.
+        query: 'SELECT 1 WHERE changes() = 1',
+      },
+    )
+    const statements = [
+      env.DB.prepare(
+        `UPDATE office_channels AS phone
+        SET active = ?
+        WHERE phone.id = ?
+          AND phone.office_id = ?
+          AND phone.active <> ?
+          AND (phone.is_default = 0 OR ? = 1)
+          AND ${permission.sql}`,
+      ).bind(
+        active,
+        phoneId,
+        session.officeId,
+        active,
+        active,
+        ...permission.bindings,
+      ),
+      ...publication,
+      permissionAuthorizationProbe(
+        env.DB,
+        session.userId,
+        'office:manage',
+      ),
+    ]
+    const [updateResult, , , authorizationResult] =
+      await executeBatchAndBroadcast(
+        env.DB,
+        statements,
+        [publication],
+        ctx,
+        env,
+      )
+
+    if (
+      changes(updateResult) === 0 &&
+      changes(authorizationResult) === 0
+    ) {
+      return error(
+        'FORBIDDEN',
+        '업무폰 상태를 변경할 수 없습니다.',
+      )
+    }
+    if (changes(updateResult) === 0) {
+      const failure = await officePhoneMutationFailure(
+        env,
+        session,
+        phoneId,
+        patch.active,
+      )
+      if (failure) return failure
+    }
+
+    const row = await loadOfficePhone(env, session, phoneId)
+    if (!row) {
+      return error('NOT_FOUND', '업무폰을 찾을 수 없습니다.')
+    }
+    const signingKeys = readSigningKeyConfiguration(
+      env.SMS_GATEWAY_SIGNING_KEYS,
+    )
+
+    return json({
+      phone: officePhoneFromRow(row, signingKeys),
+    } satisfies OfficePhoneResponse)
   }
 
   async function getMembers(
@@ -1211,6 +1836,26 @@ export function createOfficeRoutes(
       method: 'PATCH',
       path: '/api/office/settings',
       handler: updateSettings,
+    },
+    {
+      method: 'GET',
+      path: '/api/office/phones',
+      handler: getOfficePhones,
+    },
+    {
+      method: 'POST',
+      path: '/api/office/phones',
+      handler: createOfficePhone,
+    },
+    {
+      method: 'PATCH',
+      path: '/api/office/phones/:phoneId',
+      handler: updateOfficePhone,
+    },
+    {
+      method: 'PATCH',
+      path: '/api/office/phones/:phoneId/status',
+      handler: updateOfficePhoneStatus,
     },
     {
       method: 'GET',

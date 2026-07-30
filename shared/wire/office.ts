@@ -60,3 +60,49 @@ export interface OfficeMemberPatch {
 export interface OfficeMemberStatusPatch {
   status: MemberStatus
 }
+
+export const OFFICE_PHONE_VALUE_MIN_LENGTH = 8
+export const OFFICE_PHONE_VALUE_MAX_LENGTH = 11
+export const OFFICE_PHONE_LABEL_MAX_LENGTH = 100
+export const OFFICE_PHONE_DEVICE_ID_MAX_LENGTH = 200
+
+export const OFFICE_PHONE_SIGNING_KEY_STATUSES = [
+  '설정됨',
+  '미설정',
+  '확인 불가',
+  '해당 없음',
+] as const
+export type OfficePhoneSigningKeyStatus =
+  (typeof OFFICE_PHONE_SIGNING_KEY_STATUSES)[number]
+
+export interface OfficePhone {
+  id: string
+  value: string
+  label: string
+  deviceId: string | null
+  isDefault: boolean
+  active: boolean
+  signingKeyStatus: OfficePhoneSigningKeyStatus
+}
+
+export interface OfficePhonesResponse {
+  phones: OfficePhone[]
+}
+
+export interface OfficePhoneResponse {
+  phone: OfficePhone
+}
+
+export interface OfficePhoneCreate {
+  value: string
+  label: string
+  deviceId: string
+}
+
+export interface OfficePhonePatch {
+  label: string
+}
+
+export interface OfficePhoneStatusPatch {
+  active: boolean
+}

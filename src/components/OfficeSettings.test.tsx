@@ -96,6 +96,8 @@ describe('office settings access and member presentation', () => {
     const markup = renderToStaticMarkup(<OfficeSettings />)
 
     expect(markup).toContain('문자 연동')
+    expect(markup).toContain('＋ 업무폰 추가')
+    expect(markup).toContain('Device ID는 등록 후 수정하지 않습니다.')
     expect(markup).toContain('AI · 데이터 정책')
   })
 

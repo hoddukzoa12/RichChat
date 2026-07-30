@@ -3,8 +3,12 @@ import { permissionsForRole } from '../../../shared/permissions'
 import type { MeResponse } from '../../../shared/wire/settings'
 import { ApiRequestError } from '../client'
 import {
+  createOfficePhone,
   getOfficeMembers,
+  getOfficePhones,
   inviteOfficeMember,
+  updateOfficePhone,
+  updateOfficePhoneStatus,
   updateOfficeMember,
   updateOfficeMemberStatus,
   updateMe,
@@ -94,6 +98,55 @@ describe('Settings endpoints', () => {
 
     expect(members).toHaveLength(1)
     expect(members[0]).not.toHaveProperty('status')
+  })
+
+  it('uses the office-phone routes without sending secret material', async () => {
+    const phone = {
+      id: 'phone/1',
+      value: '01056129001',
+      label: '업무폰 1',
+      deviceId: 'android-device-1',
+      isDefault: false,
+      active: true,
+      signingKeyStatus: '설정됨' as const,
+    }
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(
+          Response.json(
+            String(input).endsWith('/phones')
+              ? { phones: [phone] }
+              : { phone },
+          ),
+        ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getOfficePhones()
+    await createOfficePhone({
+      value: phone.value,
+      label: phone.label,
+      deviceId: phone.deviceId,
+    })
+    await updateOfficePhone(phone.id, { label: '상담실' })
+    await updateOfficePhoneStatus(phone.id, { active: false })
+
+    expect(fetchMock.mock.calls.map(([input]) => input)).toEqual([
+      '/api/office/phones',
+      '/api/office/phones',
+      '/api/office/phones/phone%2F1',
+      '/api/office/phones/phone%2F1/status',
+    ])
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[1][1]?.body)),
+    ).toEqual({
+      value: phone.value,
+      label: phone.label,
+      deviceId: phone.deviceId,
+    })
+    expect(
+      JSON.stringify(fetchMock.mock.calls.map((call) => call[1])),
+    ).not.toContain('test-sms-gateway-signing-key')
   })
 
   it('surfaces the server error for a malformed invite email', async () => {

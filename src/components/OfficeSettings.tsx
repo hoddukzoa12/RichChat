@@ -18,24 +18,8 @@ import { useInbox } from '../state/InboxContext'
 import type { OfficeSettings as OfficeFlags } from '../state/inbox'
 import { MEMBER_STATUS_VIEW } from '../theme'
 import type { Role, UserStatus } from '../types'
+import { OfficePhonesCard } from './OfficePhonesCard'
 import { Avatar, Card, ToggleRow } from './ui'
-
-const CONNECTIONS = [
-  {
-    name: '문자 발신번호 02-556-1234',
-    sub: 'SMS · LMS',
-    state: '연결됨',
-    action: '관리',
-    dot: 'bg-brand-500',
-  },
-  {
-    name: 'LGU+ 메시지허브',
-    sub: 'API 키 · 발송 한도 월 20,000건',
-    state: '정상',
-    action: '설정',
-    dot: 'bg-done-dot',
-  },
-]
 
 const OFFICE_TOGGLES: Array<{
   key: keyof OfficeFlags
@@ -562,56 +546,7 @@ export function OfficeSettings() {
             </div>
           )}
 
-          {canManageOffice && (
-            <Card className="p-[18px]">
-              <div className="text-sm font-bold mb-1">문자 연동</div>
-              <div className="text-[12.5px] text-ink-400 mb-3.5">
-                LGU+ 메시지허브를 통해 고객 문자를 한 인박스에서
-                주고받습니다
-              </div>
-              <div className="flex flex-col gap-[9px]">
-                {CONNECTIONS.map((connection) => (
-                  <div
-                    key={connection.name}
-                    className="flex items-center gap-[11px] px-[13px] py-3 border border-line rounded-[10px]"
-                  >
-                    <span
-                      className={`w-2.5 h-2.5 rounded-[3px] flex-none ${connection.dot}`}
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-[13.5px] font-semibold">
-                        {connection.name}
-                      </span>
-                      <span className="block text-xs text-ink-400">
-                        {connection.sub}
-                      </span>
-                    </span>
-                    <span className="ml-auto text-[11.5px] font-semibold text-done-fg bg-done-bg rounded-[5px] px-2 py-0.5">
-                      {connection.state}
-                    </span>
-                    <button
-                      type="button"
-                      className="h-[30px] px-[11px] border border-line-strong rounded-lg flex items-center text-[12.5px] font-semibold text-ink-700 hover:border-brand hover:text-brand"
-                    >
-                      {connection.action}
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-[13px] px-[13px] py-3 rounded-[10px] bg-surface-sunken flex items-center gap-2.5">
-                <span className="text-[12.5px] text-ink-600">
-                  이번 달 발송
-                </span>
-                <span className="text-[13.5px] font-bold">3,182건</span>
-                <span className="text-[12.5px] text-ink-400">
-                  / 20,000건
-                </span>
-                <span className="ml-auto w-40 h-2 rounded bg-line overflow-hidden block">
-                  <span className="block w-[16%] h-full bg-brand" />
-                </span>
-              </div>
-            </Card>
-          )}
+          {canManageOffice && <OfficePhonesCard />}
 
           <Card className="p-[18px]">
             <div className="flex items-center mb-3.5">
