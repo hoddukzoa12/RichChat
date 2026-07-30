@@ -92,7 +92,7 @@ SMS_GATEWAY_USERNAME=
 # 미설정 시: 업무폰에 묶인 대화의 문자 발송이 실패로 기록되고, 등록 코드 발급·기기 자동 감지·계정 공통 서명키 배포가 동작하지 않는다.
 SMS_GATEWAY_PASSWORD=
 
-# 발급: 공통 키는 우리가 32바이트 ASCII 문자열로 만든다. 예: `openssl rand -hex 16`
+# 발급: 공통 키는 256비트(32바이트) 난수를 64자리 hex로 저장한다. macOS/Linux: `openssl rand -hex 32`; Windows PowerShell: `$bytes = [byte[]]::new(32); $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($bytes); $rng.Dispose(); [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()`
 # 신규 형식: `{"default":"<공통 키>","overrides":{"<deviceId>":"<기기별 예외 키>"}}`
 # 해석 순서: `overrides`에 Device ID가 있으면 예외 키를 쓰고, 없으면 `default` 공통 키를 쓴다.
 # 기존 형식: 운영 중인 `{"<deviceId-1>":"<키-1>","<deviceId-2>":"<키-2>"}`도 그대로 지원한다.
