@@ -7,15 +7,32 @@ import {
   gatewayDeliveryStatus,
   type GatewayState,
 } from '../gateway/send'
+import { attachmentObjectKey } from '../attachments'
+import { publish, type EventPublication } from '../db/events'
 import { error } from '../http/error'
 import type { Route, RouteHandler } from '../http/router'
-import { storeInboundMessage } from '../inbound-message'
+import {
+  storeInboundMessage,
+  type InboundAttachment,
+  type StoredInboundMessage,
+} from '../inbound-message'
 import type { Clock } from '../lib/ids'
 import { normalizeKoreanPhoneValue } from '../lib/phone'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 const SIGNATURE_HEADER = 'X-Signature'
 const TIMESTAMP_HEADER = 'X-Timestamp'
 const SMS_RECEIVED_EVENT = 'sms:received'
+const MMS_INBOUND_EVENT = {
+  'mms:received': { downloaded: false },
+  'mms:downloaded': { downloaded: true },
+} as const satisfies Record<string, { downloaded: boolean }>
+type MmsInboundEvent = keyof typeof MMS_INBOUND_EVENT
+
+// 국내 MMS보다 넉넉한 10 MiB까지 허용하되 Base64 디코딩과 R2 업로드의
+// isolate 메모리 사용량이 입력 하나로 무한히 커지지 않게 상한을 둔다.
+export const MMS_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+
 const SMS_DELIVERY_EVENT = {
   'sms:sent': {
     gatewayState: 'Sent',
@@ -58,6 +75,29 @@ interface SmsReceivedEnvelope {
   payload: SmsReceivedPayload
 }
 
+interface MmsAttachmentPayload extends InboundAttachment {
+  bytes: Uint8Array | null
+  contentIndex: number
+}
+
+interface MmsInboundEnvelope {
+  deviceId: string
+  payload: {
+    attachments: MmsAttachmentPayload[]
+    body: string
+    contentClass: string | null
+    messageId: string
+    occurredAt: number
+    recipient: string | null
+    sender: string
+    simNumber: number | null
+    size: number | null
+    subject: string | null
+    transactionId: string | null
+  }
+  oversizedContentIndexes: number[]
+}
+
 interface OfficeChannelRow {
   id: string
   office_id: string
@@ -66,6 +106,24 @@ interface OfficeChannelRow {
 
 interface GatewayReportFailureRow {
   attempts: number
+}
+
+interface MmsAttachmentRow {
+  content_index: number
+  download_status: '대기' | '완료' | '실패'
+  id: string
+}
+
+type PutMmsAttachment = (
+  bucket: R2Bucket,
+  key: string,
+  bytes: Uint8Array,
+  contentType: string,
+) => Promise<void>
+
+interface SmsGatewayWebhookDependencies {
+  clock?: Clock
+  putMmsAttachment?: PutMmsAttachment
 }
 
 class GatewayPayloadError extends Error {
@@ -236,6 +294,168 @@ export function parseGatewayReportAt(value: unknown): number | null {
   if (epoch !== null) return epoch
   if (typeof value !== 'string') return null
   return parseGatewayIsoDateTime(value.trim(), 9 * 60)
+}
+
+function isMmsInboundEvent(value: string): value is MmsInboundEvent {
+  return Object.hasOwn(MMS_INBOUND_EVENT, value)
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function optionalNonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : null
+}
+
+function normalizedBase64(value: string): string | null {
+  const compact = value.replace(/\s/gu, '')
+  if (!/^[A-Za-z\d+/]*={0,2}$/.test(compact)) return null
+
+  const firstPadding = compact.indexOf('=')
+  if (
+    firstPadding >= 0 &&
+    firstPadding < compact.length - (compact.endsWith('==') ? 2 : 1)
+  ) {
+    return null
+  }
+
+  const unpadded = compact.replace(/=+$/u, '')
+  if (unpadded.length % 4 === 1) return null
+  return unpadded.padEnd(Math.ceil(unpadded.length / 4) * 4, '=')
+}
+
+function decodedBase64Size(value: string | null): number | null {
+  if (value === null || value === '') return 0
+  const normalized = normalizedBase64(value)
+  if (normalized === null) return null
+  const padding = normalized.endsWith('==')
+    ? 2
+    : normalized.endsWith('=')
+      ? 1
+      : 0
+  return (normalized.length / 4) * 3 - padding
+}
+
+function decodeBase64(value: string | null): Uint8Array | null {
+  if (value === null || value === '') return new Uint8Array()
+  const normalized = normalizedBase64(value)
+  if (normalized === null) return null
+
+  try {
+    const binary = atob(normalized)
+    return Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    )
+  } catch {
+    return null
+  }
+}
+
+function parseMmsAttachments(
+  value: unknown,
+  body: string,
+): {
+  attachments: MmsAttachmentPayload[]
+  oversizedContentIndexes: number[]
+} {
+  if (!Array.isArray(value)) {
+    return { attachments: [], oversizedContentIndexes: [] }
+  }
+
+  const attachments: MmsAttachmentPayload[] = []
+  const oversizedContentIndexes: number[] = []
+  for (const [contentIndex, rawAttachment] of value.entries()) {
+    if (!isRecord(rawAttachment)) continue
+
+    const rawData =
+      typeof rawAttachment.data === 'string'
+        ? rawAttachment.data
+        : null
+    const declaredSize = optionalNonNegativeInteger(rawAttachment.size)
+    const decodedSize = decodedBase64Size(rawData)
+    if (
+      (declaredSize !== null &&
+        declaredSize > MMS_ATTACHMENT_MAX_BYTES) ||
+      (decodedSize !== null &&
+        decodedSize > MMS_ATTACHMENT_MAX_BYTES)
+    ) {
+      oversizedContentIndexes.push(contentIndex)
+      continue
+    }
+
+    const bytes = decodeBase64(rawData)
+    const contentType =
+      optionalString(rawAttachment.contentType) ??
+      'application/octet-stream'
+    if (
+      bytes !== null &&
+      contentType.toLowerCase().startsWith('text/') &&
+      new TextDecoder().decode(bytes) === body
+    ) {
+      continue
+    }
+
+    const partId =
+      identifierValue(rawAttachment.partId) ?? String(contentIndex)
+    attachments.push({
+      originalFilename:
+        optionalString(rawAttachment.name) ?? `mms-part-${partId}`,
+      byteSize: bytes?.byteLength ?? declaredSize ?? 0,
+      mimeType: contentType,
+      contentUrl: null,
+      contentIndex,
+      bytes,
+    })
+  }
+
+  return { attachments, oversizedContentIndexes }
+}
+
+function parseMmsInboundEnvelope(
+  envelope: Record<string, unknown>,
+  deviceId: string,
+  event: MmsInboundEvent,
+  receivedAt: number,
+): MmsInboundEnvelope {
+  const rawPayload = envelope.payload
+  if (!isRecord(rawPayload)) {
+    throw new GatewayPayloadError('payload 값이 올바르지 않습니다.')
+  }
+
+  const downloaded = MMS_INBOUND_EVENT[event].downloaded
+  const body =
+    downloaded && typeof rawPayload.body === 'string'
+      ? rawPayload.body
+      : ''
+  const occurredAt =
+    parseGatewayReportAt(rawPayload.receivedAt) ?? receivedAt
+  const parsedAttachments = downloaded
+    ? parseMmsAttachments(rawPayload.attachments, body)
+    : { attachments: [], oversizedContentIndexes: [] }
+
+  return {
+    deviceId,
+    payload: {
+      attachments: parsedAttachments.attachments,
+      body,
+      contentClass: optionalString(rawPayload.contentClass),
+      messageId: requiredString(rawPayload, 'messageId'),
+      occurredAt,
+      recipient: optionalString(rawPayload.recipient),
+      sender: requiredString(rawPayload, 'sender'),
+      simNumber: optionalNonNegativeInteger(rawPayload.simNumber),
+      size: optionalNonNegativeInteger(rawPayload.size),
+      subject: optionalString(rawPayload.subject),
+      transactionId: identifierValue(rawPayload.transactionId),
+    },
+    oversizedContentIndexes:
+      parsedAttachments.oversizedContentIndexes,
+  }
 }
 
 function parseSmsReceivedEnvelope(
@@ -433,6 +653,182 @@ async function recordGatewayReportFailure(
   return failure.attempts
 }
 
+const putMmsAttachment: PutMmsAttachment = async (
+  bucket,
+  key,
+  bytes,
+  contentType,
+) => {
+  await bucket.put(key, bytes, {
+    httpMetadata: { contentType },
+  })
+}
+
+async function quarantineOversizedMms(
+  db: D1Database,
+  idempotencyKey: string,
+  contentIndexes: readonly number[],
+  rawBody: string,
+  now: number,
+): Promise<void> {
+  if (contentIndexes.length === 0) return
+
+  await recordGatewayReportFailure(db, {
+    errorText:
+      `MMS 첨부가 ${MMS_ATTACHMENT_MAX_BYTES}바이트 상한을 넘었습니다. ` +
+      `contentIndex=${contentIndexes.join(',')}`,
+    failureKey:
+      `sms-gateway-mms-oversize/${encodeURIComponent(idempotencyKey)}`,
+    now,
+    rawBody,
+  })
+}
+
+async function finalizeMmsAttachments(
+  env: Env,
+  officeId: string,
+  stored: StoredInboundMessage,
+  attachments: readonly MmsAttachmentPayload[],
+  writeAttachment: PutMmsAttachment,
+  now: number,
+  ctx?: ExecutionContext,
+): Promise<void> {
+  const rows =
+    attachments.length === 0
+      ? []
+      : (
+          await env.DB.prepare(
+            `SELECT id, content_index, download_status
+             FROM message_attachments
+             WHERE message_id = ?`,
+          )
+            .bind(stored.id)
+            .all<MmsAttachmentRow>()
+        ).results
+  const rowByContentIndex = new Map(
+    rows.map((row) => [row.content_index, row]),
+  )
+  const statements: D1PreparedStatement[] = []
+  let attachmentChanged = false
+
+  for (const attachment of attachments) {
+    const row = rowByContentIndex.get(attachment.contentIndex)
+    if (!row) {
+      throw new Error(
+        `MMS 첨부 메타데이터를 찾지 못했습니다. contentIndex=${attachment.contentIndex}`,
+      )
+    }
+    if (row.download_status === '완료') continue
+
+    const r2Key = attachmentObjectKey(row.id)
+    let uploaded = false
+    if (attachment.bytes !== null) {
+      try {
+        await writeAttachment(
+          env.ATTACHMENTS,
+          r2Key,
+          attachment.bytes,
+          attachment.mimeType ?? 'application/octet-stream',
+        )
+        uploaded = true
+      } catch (cause) {
+        console.error('SMS Gateway MMS 첨부 R2 저장에 실패했습니다.', {
+          attachmentId: row.id,
+          contentIndex: attachment.contentIndex,
+          error: cause instanceof Error ? cause.message : String(cause),
+        })
+      }
+    } else {
+      console.warn(
+        'SMS Gateway MMS 첨부 Base64를 해석하지 못해 실패로 기록합니다.',
+        {
+          attachmentId: row.id,
+          contentIndex: attachment.contentIndex,
+        },
+      )
+    }
+
+    if (uploaded) {
+      statements.push(
+        env.DB
+          .prepare(
+            `UPDATE message_attachments
+             SET
+               original_filename = ?,
+               byte_size = ?,
+               mime_type = ?,
+               r2_key = ?,
+               download_status = '완료',
+               download_lease_until = 0
+             WHERE id = ?
+               AND download_status <> '완료'`,
+          )
+          .bind(
+            attachment.originalFilename,
+            attachment.byteSize,
+            attachment.mimeType,
+            r2Key,
+            row.id,
+          ),
+      )
+      attachmentChanged = true
+      continue
+    }
+
+    if (row.download_status !== '실패') {
+      statements.push(
+        env.DB
+          .prepare(
+            `UPDATE message_attachments
+             SET
+               r2_key = NULL,
+               download_status = '실패',
+               download_lease_until = 0
+             WHERE id = ?
+               AND download_status <> '실패'`,
+          )
+          .bind(row.id),
+      )
+      attachmentChanged = true
+    }
+  }
+
+  const publications: EventPublication[] = []
+  if (stored.contentUpdated || attachmentChanged) {
+    const publication = publish(
+      env.DB,
+      {
+        officeId,
+        type: 'message.updated',
+        entity: 'message',
+        entityId: stored.id,
+        conversationId: stored.conversationId,
+        actorKind: 'customer',
+        payload: {
+          channel: 'MMS',
+          direction: 'in',
+        },
+        createdAt: now,
+      },
+      {
+        query: 'SELECT 1 FROM messages WHERE id = ?',
+        bindings: [stored.id],
+      },
+    )
+    statements.push(...publication)
+    publications.push(publication)
+  }
+
+  if (statements.length === 0) return
+  await executeBatchAndBroadcast(
+    env.DB,
+    statements,
+    publications,
+    ctx,
+    env,
+  )
+}
+
 function decodeSignature(value: string): Uint8Array | null {
   const normalized = value.trim().toLowerCase()
   if (!/^[\da-f]{64}$/.test(normalized)) return null
@@ -521,10 +917,113 @@ function successResponse(): Response {
   return new Response(null, { status: 204 })
 }
 
+async function handleMmsInbound(
+  rawEnvelope: Record<string, unknown>,
+  event: MmsInboundEvent,
+  deviceId: string,
+  officeChannel: OfficeChannelRow,
+  rawBody: string,
+  receivedAt: number,
+  env: Env,
+  writeAttachment: PutMmsAttachment,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  let received: MmsInboundEnvelope
+  let customerPhoneE164: string
+  try {
+    received = parseMmsInboundEnvelope(
+      rawEnvelope,
+      deviceId,
+      event,
+      receivedAt,
+    )
+    const normalized = normalizeKoreanPhoneValue(received.payload.sender)
+    if (normalized === null) {
+      throw new GatewayPayloadError(
+        'sender가 국내 전화번호 형식이 아닙니다.',
+      )
+    }
+    customerPhoneE164 = normalized
+  } catch (cause) {
+    if (cause instanceof GatewayPayloadError) {
+      return error('BAD_REQUEST', cause.message)
+    }
+    console.error('SMS Gateway MMS 수신 페이로드 검증에 실패했습니다.', {
+      deviceId,
+      event,
+      error: cause instanceof Error ? cause.message : String(cause),
+    })
+    return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+  }
+
+  const idempotencyKey = smsGatewayIdempotencyKey(
+    received.deviceId,
+    received.payload.messageId,
+  )
+  try {
+    const stored = await storeInboundMessage(
+      env,
+      {
+        officeId: officeChannel.office_id,
+        officeChannelId: officeChannel.id,
+        customerPhoneE164,
+        channel: 'MMS',
+        title: received.payload.subject,
+        body: received.payload.body,
+        occurredAt: received.payload.occurredAt,
+        receivedAt,
+        idempotencyKey,
+        attachments: received.payload.attachments,
+        mergeExistingBody: MMS_INBOUND_EVENT[event].downloaded,
+        mergeExistingTitle: true,
+        eventMetadata: {
+          contentClass: received.payload.contentClass,
+          deviceId: received.deviceId,
+          gatewayEvent: event,
+          recipient: received.payload.recipient,
+          simNumber: received.payload.simNumber,
+          size: received.payload.size,
+          transactionId: received.payload.transactionId,
+        },
+      },
+      ctx,
+    )
+    await quarantineOversizedMms(
+      env.DB,
+      idempotencyKey,
+      received.oversizedContentIndexes,
+      rawBody,
+      receivedAt,
+    )
+    await finalizeMmsAttachments(
+      env,
+      officeChannel.office_id,
+      stored,
+      received.payload.attachments,
+      writeAttachment,
+      receivedAt,
+      ctx,
+    )
+  } catch (cause) {
+    console.error('SMS Gateway MMS 수신 저장에 실패했습니다.', {
+      deviceId,
+      event,
+      messageId: received.payload.messageId,
+      error: cause instanceof Error ? cause.message : String(cause),
+    })
+    return error('INTERNAL_ERROR', '웹훅 처리에 실패했습니다.')
+  }
+
+  return successResponse()
+}
+
 export function createSmsGatewayWebhookHandler(
-  clock: Clock = Date.now,
+  dependencies: SmsGatewayWebhookDependencies = {},
 ): RouteHandler {
   return async (request, env, _params, ctx) => {
+    const clock = dependencies.clock ?? Date.now
+    const writeAttachment =
+      dependencies.putMmsAttachment ?? putMmsAttachment
     const receivedAt = clock()
     let rawBody: string
     try {
@@ -585,6 +1084,19 @@ export function createSmsGatewayWebhookHandler(
     const event = rawEnvelope.event
     if (typeof event !== 'string' || event.length === 0) {
       return error('BAD_REQUEST', 'event 값이 올바르지 않습니다.')
+    }
+    if (isMmsInboundEvent(event)) {
+      return handleMmsInbound(
+        rawEnvelope,
+        event,
+        deviceId,
+        officeChannel,
+        rawBody,
+        receivedAt,
+        env,
+        writeAttachment,
+        ctx,
+      )
     }
     if (event !== SMS_RECEIVED_EVENT) {
       if (!isSmsDeliveryEvent(event)) {

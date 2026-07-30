@@ -36,12 +36,12 @@ async function seedOffice(): Promise<void> {
   ])
 }
 
-function store(
+async function store(
   officeChannelId: string,
   idempotencyKey: string,
   occurredAt: number,
 ): Promise<void> {
-  return storeInboundMessage(env, {
+  await storeInboundMessage(env, {
     officeId: 'office-inbound-channel',
     officeChannelId,
     customerPhoneE164: '+821055556666',

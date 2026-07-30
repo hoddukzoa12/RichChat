@@ -9,6 +9,7 @@ export interface InboundAttachment {
   byteSize: number | null
   mimeType: string | null
   contentUrl: string | null
+  contentIndex?: number
 }
 
 export interface InboundMessageInput {
@@ -22,7 +23,15 @@ export interface InboundMessageInput {
   receivedAt: number
   idempotencyKey: string
   attachments?: readonly InboundAttachment[]
+  mergeExistingBody?: boolean
+  mergeExistingTitle?: boolean
   eventMetadata?: Readonly<Record<string, JsonValue>>
+}
+
+export interface StoredInboundMessage {
+  id: string
+  conversationId: string
+  contentUpdated: boolean
 }
 
 /**
@@ -33,7 +42,7 @@ export async function storeInboundMessage(
   env: Env,
   input: InboundMessageInput,
   ctx?: ExecutionContext,
-): Promise<void> {
+): Promise<StoredInboundMessage> {
   const db = env.DB
   const customerId = createId()
   const conversationId = createId()
@@ -149,9 +158,47 @@ export async function storeInboundMessage(
         input.officeChannelId,
       ),
   ]
-  const messageInsertIndex = statements.length - 1
+  statements.push(
+    db
+      .prepare(
+        `UPDATE messages
+         SET
+           channel = CASE WHEN ? = 1 THEN ? ELSE channel END,
+           title = CASE
+             WHEN ? = 1 THEN COALESCE(title, ?)
+             ELSE title
+           END,
+           body = CASE WHEN ? = 1 AND ? <> '' THEN ? ELSE body END
+         WHERE mo_key = ?
+           AND direction = 'in'
+           AND (
+             (? = 1 AND title IS NULL AND ? IS NOT NULL)
+             OR (? = 1 AND channel <> ?)
+             OR (? = 1 AND ? <> '' AND body <> ?)
+           )`,
+      )
+      .bind(
+        input.mergeExistingBody ? 1 : 0,
+        input.channel,
+        input.mergeExistingTitle ? 1 : 0,
+        input.title,
+        input.mergeExistingBody ? 1 : 0,
+        input.body,
+        input.body,
+        input.idempotencyKey,
+        input.mergeExistingTitle ? 1 : 0,
+        input.title,
+        input.mergeExistingBody ? 1 : 0,
+        input.channel,
+        input.mergeExistingBody ? 1 : 0,
+        input.body,
+        input.body,
+      ),
+  )
+  const contentUpdateIndex = statements.length - 1
 
-  for (const [contentIndex, attachment] of attachments.entries()) {
+  for (const [position, attachment] of attachments.entries()) {
+    const contentIndex = attachment.contentIndex ?? position
     statements.push(
       db
         .prepare(
@@ -288,13 +335,22 @@ export async function storeInboundMessage(
     ctx,
     env,
   )
-  if (changes(results[messageInsertIndex]) === 1) return
+  const contentUpdated = changes(results[contentUpdateIndex]) === 1
 
   const duplicate = await db
-    .prepare('SELECT id FROM messages WHERE mo_key = ?')
+    .prepare(
+      `SELECT id, conversation_id
+       FROM messages
+       WHERE mo_key = ?`,
+    )
     .bind(input.idempotencyKey)
-    .first<{ id: string }>()
+    .first<{ id: string; conversation_id: string }>()
   if (!duplicate) {
     throw new Error('수신 메시지가 커밋되지 않았습니다.')
+  }
+  return {
+    id: duplicate.id,
+    conversationId: duplicate.conversation_id,
+    contentUpdated,
   }
 }

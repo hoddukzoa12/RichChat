@@ -1,4 +1,9 @@
-import { env, SELF } from 'cloudflare:test'
+import {
+  createExecutionContext,
+  env,
+  SELF,
+  waitOnExecutionContext,
+} from 'cloudflare:test'
 import { describe, expect, it, vi } from 'vitest'
 import {
   TEST_SMS_GATEWAY_PRIMARY_DEVICE_ID,
@@ -7,6 +12,8 @@ import {
   testSmsGatewaySignature,
 } from '../../tests/sms-gateway-fixtures'
 import {
+  createSmsGatewayWebhookHandler,
+  MMS_ATTACHMENT_MAX_BYTES,
   parseGatewayReportAt,
   smsGatewayIdempotencyKey,
   WEBHOOK_TIMESTAMP_WINDOW_MS,
@@ -39,6 +46,55 @@ type DeliveryEvent =
 interface OutboundMessageInput {
   clientKey: string
   status?: '대기' | '접수' | '전송중'
+}
+
+type MmsEvent = 'mms:received' | 'mms:downloaded'
+
+const PHOTO_BYTES = Uint8Array.of(0, 1, 127, 128, 254, 255)
+
+function base64(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function mmsWebhookBody(
+  event: MmsEvent,
+  messageId: string,
+  overrides: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    deviceId: DEVICE_ID,
+    event,
+    id: `${event}-${messageId}`,
+    webhookId: 'webhook-mms',
+    payload: {
+      messageId,
+      sender: '01022334455',
+      recipient: '01099998888',
+      simNumber: 1,
+      transactionId: `transaction-${messageId}`,
+      subject: '세금계산서 사진',
+      size: PHOTO_BYTES.byteLength,
+      contentClass: 'personal',
+      receivedAt: '2026-07-30T14:00:00+09:00',
+      ...(event === 'mms:downloaded'
+        ? {
+            body: '첨부 자료를 확인해 주세요.',
+            attachments: [
+              {
+                partId: 'photo-1',
+                contentType: 'image/jpeg',
+                name: 'receipt.jpg',
+                size: PHOTO_BYTES.byteLength,
+                data: base64(PHOTO_BYTES),
+              },
+            ],
+          }
+        : {}),
+      ...overrides,
+    },
+  })
 }
 
 function webhookBody(
@@ -130,6 +186,27 @@ async function post(
     },
     body,
   })
+}
+
+async function postWithFailedR2(body: string): Promise<Response> {
+  const timestamp = String(Math.floor(Date.now() / 1_000))
+  const request = new Request(HOOK_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-signature': await signature(body, timestamp),
+      'x-timestamp': timestamp,
+    },
+    body,
+  })
+  const ctx = createExecutionContext()
+  const response = await createSmsGatewayWebhookHandler({
+    putMmsAttachment: async () => {
+      throw new Error('forced R2 failure')
+    },
+  })(request, env, {}, ctx)
+  await waitOnExecutionContext(ctx)
+  return response
 }
 
 async function insertOfficeChannels(
@@ -295,6 +372,309 @@ describe('Android SMS Gateway webhook', () => {
       .bind(smsGatewayIdempotencyKey(DEVICE_ID, 'gateway-message-1'))
       .first<{ body: string }>()
     expect(message?.body).toBe('부가세 문의드려요')
+  })
+
+  it('merges received then downloaded MMS and stores one R2 attachment once', async () => {
+    await insertOfficeChannels()
+    const messageId = 'gateway-mms-forward'
+    const received = mmsWebhookBody('mms:received', messageId)
+    const downloaded = mmsWebhookBody('mms:downloaded', messageId)
+
+    await expectSuccess(await post(received))
+    await expectSuccess(await post(downloaded))
+    await expectSuccess(await post(downloaded))
+    await expectSuccess(await post(downloaded))
+
+    const key = smsGatewayIdempotencyKey(DEVICE_ID, messageId)
+    const message = await env.DB.prepare(
+      `SELECT id, body, title, channel
+       FROM messages
+       WHERE mo_key = ?`,
+    )
+      .bind(key)
+      .first<{
+        body: string
+        channel: string
+        id: string
+        title: string | null
+      }>()
+    expect(message).toMatchObject({
+      body: '첨부 자료를 확인해 주세요.',
+      channel: 'MMS',
+      title: '세금계산서 사진',
+    })
+
+    const attachments = await env.DB.prepare(
+      `SELECT id, byte_size, mime_type, r2_key, download_status
+       FROM message_attachments
+       WHERE message_id = ?`,
+    )
+      .bind(message?.id)
+      .all<{
+        byte_size: number
+        download_status: string
+        id: string
+        mime_type: string
+        r2_key: string
+      }>()
+    expect(attachments.results).toHaveLength(1)
+    const attachment = attachments.results[0]!
+    expect(attachment).toMatchObject({
+      byte_size: PHOTO_BYTES.byteLength,
+      download_status: '완료',
+      mime_type: 'image/jpeg',
+      r2_key: `attachments/${attachment.id}`,
+    })
+    const object = await env.ATTACHMENTS.get(attachment.r2_key)
+    expect(object).not.toBeNull()
+    expect(new Uint8Array(await object!.arrayBuffer())).toEqual(PHOTO_BYTES)
+
+    expect(
+      await env.DB.prepare(
+        `SELECT inbound_count
+         FROM conversations
+         WHERE id = (
+           SELECT conversation_id FROM messages WHERE mo_key = ?
+         )`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({ inbound_count: 1 })
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM events
+         WHERE entity_id = ?`,
+      )
+        .bind(message?.id)
+        .first(),
+    ).toEqual({ count: 2 })
+  })
+
+  it('keeps downloaded content when received arrives later and filters duplicate text', async () => {
+    await insertOfficeChannels()
+    const messageId = 'gateway-mms-reversed'
+    const before = Date.now()
+    const downloaded = mmsWebhookBody('mms:downloaded', messageId, {
+      subject: null,
+      receivedAt: 'not-an-observed-time',
+      body: '순서가 바뀐 문의',
+      attachments: [
+        {
+          partId: 'body-text',
+          contentType: 'text/plain; charset=utf-8',
+          name: 'body.txt',
+          size: new TextEncoder().encode('순서가 바뀐 문의').byteLength,
+          data: base64(new TextEncoder().encode('순서가 바뀐 문의')),
+        },
+        {
+          partId: 'empty-binary',
+          contentType: 'application/octet-stream',
+          name: 'empty.bin',
+          size: 0,
+          data: null,
+          undocumentedPartField: true,
+        },
+      ],
+      undocumentedPayloadField: 'accepted',
+    })
+
+    await expectSuccess(await post(downloaded))
+    const after = Date.now()
+    const key = smsGatewayIdempotencyKey(DEVICE_ID, messageId)
+    const downloadedOnly = await env.DB.prepare(
+      `SELECT id, body, title, occurred_at
+       FROM messages
+       WHERE mo_key = ?`,
+    )
+      .bind(key)
+      .first<{
+        body: string
+        id: string
+        occurred_at: number
+        title: string | null
+      }>()
+    expect(downloadedOnly?.body).toBe('순서가 바뀐 문의')
+    expect(downloadedOnly?.title).toBeNull()
+    expect(downloadedOnly?.occurred_at).toBeGreaterThanOrEqual(before)
+    expect(downloadedOnly?.occurred_at).toBeLessThanOrEqual(after)
+
+    await expectSuccess(
+      await post(
+        mmsWebhookBody('mms:received', messageId, {
+          subject: '나중에 도착한 제목',
+          receivedAt: 1_785_386_400,
+          productCode: 'unknown-field',
+        }),
+      ),
+    )
+
+    expect(
+      await env.DB.prepare(
+        `SELECT body, title, channel
+         FROM messages
+         WHERE mo_key = ?`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({
+      body: '순서가 바뀐 문의',
+      channel: 'MMS',
+      title: '나중에 도착한 제목',
+    })
+    const attachments = await env.DB.prepare(
+      `SELECT byte_size, download_status, r2_key
+       FROM message_attachments
+       WHERE message_id = ?`,
+    )
+      .bind(downloadedOnly?.id)
+      .all<{
+        byte_size: number
+        download_status: string
+        r2_key: string
+      }>()
+    expect(attachments.results).toEqual([
+      {
+        byte_size: 0,
+        download_status: '완료',
+        r2_key: expect.stringMatching(/^attachments\//),
+      },
+    ])
+    const object = await env.ATTACHMENTS.get(
+      attachments.results[0]!.r2_key,
+    )
+    expect(object?.size).toBe(0)
+  })
+
+  it('keeps the MMS body and quarantines the raw webhook when an attachment exceeds the limit', async () => {
+    await insertOfficeChannels()
+    const messageId = 'gateway-mms-oversized'
+    const body = mmsWebhookBody('mms:downloaded', messageId, {
+      body: '큰 첨부가 있어도 본문은 보존합니다.',
+      attachments: [
+        {
+          partId: 'oversized',
+          contentType: 'image/jpeg',
+          name: 'oversized.jpg',
+          size: MMS_ATTACHMENT_MAX_BYTES + 1,
+          data: base64(PHOTO_BYTES),
+        },
+      ],
+    })
+
+    await expectSuccess(await post(body))
+
+    const key = smsGatewayIdempotencyKey(DEVICE_ID, messageId)
+    expect(
+      await env.DB.prepare(
+        `SELECT body FROM messages WHERE mo_key = ?`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({ body: '큰 첨부가 있어도 본문은 보존합니다.' })
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM message_attachments
+         WHERE message_id = (
+           SELECT id FROM messages WHERE mo_key = ?
+         )`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({ count: 0 })
+    const failure = await env.DB.prepare(
+      `SELECT raw_json, error_text
+       FROM mo_failures
+       WHERE mo_key LIKE 'sms-gateway-mms-oversize/%'`,
+    ).first<{ error_text: string; raw_json: string }>()
+    expect(failure?.raw_json).toBe(body)
+    expect(failure?.error_text).toContain(
+      String(MMS_ATTACHMENT_MAX_BYTES),
+    )
+  })
+
+  it('keeps the MMS body and marks one attachment failed when R2 rejects it', async () => {
+    await insertOfficeChannels()
+    const messageId = 'gateway-mms-r2-failure'
+    const body = mmsWebhookBody('mms:downloaded', messageId)
+    const failure = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {})
+
+    await expectSuccess(await postWithFailedR2(body))
+
+    const key = smsGatewayIdempotencyKey(DEVICE_ID, messageId)
+    expect(
+      await env.DB.prepare(
+        `SELECT body FROM messages WHERE mo_key = ?`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({ body: '첨부 자료를 확인해 주세요.' })
+    expect(
+      await env.DB.prepare(
+        `SELECT download_status, r2_key
+         FROM message_attachments
+         WHERE message_id = (
+           SELECT id FROM messages WHERE mo_key = ?
+         )`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({
+      download_status: '실패',
+      r2_key: null,
+    })
+
+    await expectSuccess(await post(body))
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM message_attachments
+         WHERE message_id = (
+           SELECT id FROM messages WHERE mo_key = ?
+         )`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({ count: 1 })
+    expect(
+      await env.DB.prepare(
+        `SELECT download_status
+         FROM message_attachments
+         WHERE message_id = (
+           SELECT id FROM messages WHERE mo_key = ?
+         )`,
+      )
+        .bind(key)
+        .first(),
+    ).toEqual({ download_status: '완료' })
+    failure.mockRestore()
+  })
+
+  it('rejects a forged MMS without storing a message or attachment', async () => {
+    await insertOfficeChannels()
+    const body = mmsWebhookBody(
+      'mms:downloaded',
+      'gateway-mms-forged',
+    )
+
+    const response = await post(body, {
+      signature: '0'.repeat(64),
+    })
+
+    expect(response.status).toBe(401)
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM messages',
+      ).first(),
+    ).toEqual({ count: 0 })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM message_attachments',
+      ).first(),
+    ).toEqual({ count: 0 })
   })
 
   it('stores matching messageIds from devices with distinct signing keys', async () => {
@@ -807,6 +1187,40 @@ describe('Android SMS Gateway webhook', () => {
       .bind(smsGatewayIdempotencyKey(DEVICE_ID, 'gateway-message-1'))
       .first<{ id: string }>()
     expect(message).toBeNull()
+    failure.mockRestore()
+  })
+
+  it('does not acknowledge downloaded MMS before the body commit succeeds', async () => {
+    await insertOfficeChannels()
+    await env.DB.prepare(
+      `CREATE TRIGGER fail_gateway_mms
+       BEFORE INSERT ON messages
+       BEGIN
+         SELECT RAISE(FAIL, 'forced MMS test failure');
+       END`,
+    ).run()
+    const failure = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {})
+    const messageId = 'gateway-mms-commit-failure'
+
+    const response = await post(
+      mmsWebhookBody('mms:downloaded', messageId),
+    )
+
+    expect(response.status).toBe(500)
+    expect(
+      await env.DB.prepare(
+        'SELECT id FROM messages WHERE mo_key = ?',
+      )
+        .bind(smsGatewayIdempotencyKey(DEVICE_ID, messageId))
+        .first(),
+    ).toBeNull()
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM message_attachments',
+      ).first(),
+    ).toEqual({ count: 0 })
     failure.mockRestore()
   })
 })
