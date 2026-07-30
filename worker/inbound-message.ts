@@ -24,14 +24,26 @@ export interface InboundMessageInput {
   idempotencyKey: string
   attachments?: readonly InboundAttachment[]
   mergeExistingBody?: boolean
+  mergeExistingOccurredAt?: boolean
   mergeExistingTitle?: boolean
+  replaceExistingAttachments?: boolean
   eventMetadata?: Readonly<Record<string, JsonValue>>
 }
 
 export interface StoredInboundMessage {
   id: string
   conversationId: string
+  attachmentCandidates: Array<{
+    contentIndex: number
+    id: string
+  }>
+  attachmentsUpdated: boolean
   contentUpdated: boolean
+  created: boolean
+  replacedAttachments: Array<{
+    id: string
+    r2Key: string | null
+  }>
 }
 
 /**
@@ -158,6 +170,7 @@ export async function storeInboundMessage(
         input.officeChannelId,
       ),
   ]
+  const messageInsertIndex = statements.length - 1
   statements.push(
     db
       .prepare(
@@ -168,13 +181,18 @@ export async function storeInboundMessage(
              WHEN ? = 1 THEN COALESCE(title, ?)
              ELSE title
            END,
-           body = CASE WHEN ? = 1 AND ? <> '' THEN ? ELSE body END
+           body = CASE WHEN ? = 1 AND ? <> '' THEN ? ELSE body END,
+           occurred_at = CASE
+             WHEN ? = 1 THEN MIN(occurred_at, ?)
+             ELSE occurred_at
+           END
          WHERE mo_key = ?
            AND direction = 'in'
            AND (
              (? = 1 AND title IS NULL AND ? IS NOT NULL)
              OR (? = 1 AND channel <> ?)
              OR (? = 1 AND ? <> '' AND body <> ?)
+             OR (? = 1 AND occurred_at > ?)
            )`,
       )
       .bind(
@@ -185,6 +203,8 @@ export async function storeInboundMessage(
         input.mergeExistingBody ? 1 : 0,
         input.body,
         input.body,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAt,
         input.idempotencyKey,
         input.mergeExistingTitle ? 1 : 0,
         input.title,
@@ -193,12 +213,70 @@ export async function storeInboundMessage(
         input.mergeExistingBody ? 1 : 0,
         input.body,
         input.body,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAt,
       ),
   )
   const contentUpdateIndex = statements.length - 1
+  statements.push(
+    db
+      .prepare(
+        `WITH target AS (
+           SELECT conversation_id
+           FROM messages
+           WHERE mo_key = ? AND id <> ?
+         ),
+         latest AS (
+           SELECT id, occurred_at
+           FROM messages
+           WHERE conversation_id = (SELECT conversation_id FROM target)
+           ORDER BY occurred_at DESC, id DESC
+           LIMIT 1
+         )
+         UPDATE conversations
+         SET
+           last_message_id = (SELECT id FROM latest),
+           last_message_at = (SELECT occurred_at FROM latest),
+           version = version + 1,
+           updated_at = ?
+         WHERE id = (SELECT conversation_id FROM target)
+           AND ? = 1
+           AND (
+             last_message_id IS NOT (SELECT id FROM latest)
+             OR last_message_at IS NOT (SELECT occurred_at FROM latest)
+           )`,
+      )
+      .bind(
+        input.idempotencyKey,
+        messageId,
+        input.receivedAt,
+        input.mergeExistingOccurredAt ? 1 : 0,
+      ),
+  )
 
+  let replacedAttachmentIndex: number | null = null
+  if (input.replaceExistingAttachments) {
+    statements.push(
+      db
+        .prepare(
+          `DELETE FROM message_attachments
+           WHERE message_id = (
+             SELECT id FROM messages WHERE mo_key = ?
+           )
+           RETURNING id, r2_key`,
+        )
+        .bind(input.idempotencyKey),
+    )
+    replacedAttachmentIndex = statements.length - 1
+  }
+
+  const attachmentCandidates: StoredInboundMessage['attachmentCandidates'] =
+    []
+  const attachmentInsertIndexes: number[] = []
   for (const [position, attachment] of attachments.entries()) {
     const contentIndex = attachment.contentIndex ?? position
+    const attachmentId = createId()
+    attachmentCandidates.push({ contentIndex, id: attachmentId })
     statements.push(
       db
         .prepare(
@@ -218,7 +296,7 @@ export async function storeInboundMessage(
              )`,
         )
         .bind(
-          createId(),
+          attachmentId,
           input.officeId,
           attachment.originalFilename,
           attachment.byteSize,
@@ -230,6 +308,7 @@ export async function storeInboundMessage(
           contentIndex,
         ),
     )
+    attachmentInsertIndexes.push(statements.length - 1)
     statements.push(
       db
         .prepare(
@@ -335,7 +414,22 @@ export async function storeInboundMessage(
     ctx,
     env,
   )
+  const created = changes(results[messageInsertIndex]) === 1
   const contentUpdated = changes(results[contentUpdateIndex]) === 1
+  const replacedAttachments =
+    replacedAttachmentIndex === null
+      ? []
+      : (
+          results[replacedAttachmentIndex]?.results as Array<{
+            id: string
+            r2_key: string | null
+          }>
+        ).map(({ id, r2_key }) => ({ id, r2Key: r2_key }))
+  const attachmentsUpdated =
+    replacedAttachments.length > 0 ||
+    attachmentInsertIndexes.some(
+      (index) => changes(results[index]) === 1,
+    )
 
   const duplicate = await db
     .prepare(
@@ -351,6 +445,10 @@ export async function storeInboundMessage(
   return {
     id: duplicate.id,
     conversationId: duplicate.conversation_id,
+    attachmentCandidates,
+    attachmentsUpdated,
     contentUpdated,
+    created,
+    replacedAttachments,
   }
 }

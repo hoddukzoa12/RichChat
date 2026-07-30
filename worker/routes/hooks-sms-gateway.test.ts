@@ -588,7 +588,17 @@ describe('Android SMS Gateway webhook', () => {
        FROM mo_failures
        WHERE mo_key LIKE 'sms-gateway-mms-oversize/%'`,
     ).first<{ error_text: string; raw_json: string }>()
-    expect(failure?.raw_json).toBe(body)
+    const quarantine = JSON.parse(failure!.raw_json) as {
+      r2Key: string
+      sha256: string
+    }
+    expect(quarantine.sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(quarantine.r2Key).toBe(
+      `quarantine/sms-gateway-mms/${quarantine.sha256}.json`,
+    )
+    const rawWebhook = await env.ATTACHMENTS.get(quarantine.r2Key)
+    expect(rawWebhook).not.toBeNull()
+    expect(await rawWebhook!.text()).toBe(body)
     expect(failure?.error_text).toContain(
       String(MMS_ATTACHMENT_MAX_BYTES),
     )
