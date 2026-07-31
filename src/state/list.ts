@@ -79,6 +79,10 @@ export type ListAction =
         'archived' | 'label' | 'status' | 'version'
       >
     }
+  | {
+      type: 'conversationStarted'
+      conversation: ConversationListItem
+    }
 
 const ARCHIVE_FILTER: Record<
   `${boolean}`,
@@ -266,4 +270,21 @@ export const listHandlers = {
       action.conversationId,
       action.conversation,
     ),
+
+  conversationStarted: (state, action) => ({
+    ...state,
+    convs: [
+      action.conversation,
+      ...state.convs.filter(
+        ({ id }) => id !== action.conversation.id,
+      ),
+    ],
+    selected: action.conversation.id,
+    query: '',
+    filter: '전체',
+    scope: 'all',
+    archivedView: action.conversation.archived,
+    mobileView: 'chat',
+    menu: null,
+  }),
 } satisfies ActionHandlers<InboxState, ListAction>

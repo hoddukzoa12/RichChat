@@ -28,6 +28,7 @@ const EXPECTED_ACTION_TYPES = [
   'conversationListLoadStarted',
   'conversationListLoadSucceeded',
   'conversationListLoadFailed',
+  'conversationStarted',
   'conversationWriteApplied',
   'assigneeAssigned',
   'assigneeUnassigned',
@@ -266,6 +267,51 @@ describe('inbox reducer', () => {
       listLoadStatus: 'loaded',
       listRequestId: 1,
     })
+  })
+
+  it('opens a started conversation outside the current filters', () => {
+    const response = listResponse(['conversation-1'])
+    const loaded = run([
+      {
+        type: 'conversationListLoadStarted',
+        requestId: 1,
+        append: false,
+      },
+      {
+        type: 'conversationListLoadSucceeded',
+        requestId: 1,
+        append: false,
+        response,
+      },
+      { type: 'setQuery', value: '이전 검색' },
+      { type: 'setFilter', value: '미처리' },
+      { type: 'setScope', value: 'none' },
+    ])
+    const started = {
+      ...response.conversations[0],
+      id: 'conversation-started',
+      customer: {
+        ...response.conversations[0].customer,
+        id: 'customer-started',
+        phoneE164: '+821012345678',
+      },
+      preview: '',
+      lastMessageAt: null,
+      assignees: [{ id: 'user-1', name: '박상담' }],
+      status: '처리중' as const,
+    }
+
+    const state = reducer(loaded, {
+      type: 'conversationStarted',
+      conversation: started,
+    })
+
+    expect(state.convs[0]).toEqual(started)
+    expect(state.selected).toBe(started.id)
+    expect(state.query).toBe('')
+    expect(state.filter).toBe('전체')
+    expect(state.scope).toBe('all')
+    expect(state.mobileView).toBe('chat')
   })
 
   it('updates status facets and restores the previous optimistic value', () => {
