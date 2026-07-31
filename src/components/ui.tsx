@@ -52,18 +52,21 @@ export function ToggleRow({
   on,
   onFlip,
   size = 'sm',
+  disabled = false,
 }: {
   name: string
   sub: string
   on: boolean
   onFlip: () => void
   size?: 'sm' | 'lg'
+  disabled?: boolean
 }) {
   return (
     <button
       type="button"
       onClick={onFlip}
-      className="flex items-center gap-3 py-[11px] px-0.5 text-left w-full"
+      disabled={disabled}
+      className="flex items-center gap-3 py-[11px] px-0.5 text-left w-full disabled:cursor-not-allowed disabled:opacity-55"
     >
       <span className="min-w-0">
         <span className="block text-[13.5px] font-semibold">{name}</span>

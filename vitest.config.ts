@@ -12,7 +12,7 @@ export default defineWorkersConfig(async () => {
     test: {
       exclude: [
         ...configDefaults.exclude,
-        'src/components/card/InfoTabView.dom.test.tsx',
+        'src/**/*.dom.test.tsx',
       ],
       setupFiles: ['./tests/apply-migrations.ts'],
       poolOptions: {

@@ -28,7 +28,7 @@ const InboxContext = createContext<InboxContextValue | null>(null)
 export function InboxProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState)
   const { me } = useAuth()
-  useRealtime(state, dispatch)
+  useRealtime(state, dispatch, me.settings, me.user.id)
 
   useEffect(() => {
     const controller = new AbortController()

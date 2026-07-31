@@ -5,6 +5,7 @@ import type {
 import { TASK_KINDS } from '../../../shared/domain'
 import { formatCalendarDate, formatClockTime } from '../../lib/time'
 import { TASK_KIND_VIEW } from '../../theme'
+import { maskedPhone } from '../../lib/customer'
 import { Avatar, Card } from '../ui'
 
 const inputClass =
@@ -24,16 +25,6 @@ export interface InfoTabViewProps {
 
 function displayOrganization(company: string, roleTitle: string): string {
   return [company, roleTitle].filter(Boolean).join(' · ')
-}
-
-function maskedPhone(phoneE164: string): string {
-  const digits = phoneE164.replace(/\D/g, '')
-  const local =
-    digits.startsWith('82') && digits.length === 12
-      ? `0${digits.slice(2)}`
-      : digits
-  if (local.length < 8) return phoneE164
-  return `${local.slice(0, 3)}-****-${local.slice(-4)}`
 }
 
 function noteTime(createdAt: number, updatedAt: number): string {

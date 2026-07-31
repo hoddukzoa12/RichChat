@@ -4,6 +4,7 @@ import type {
   EventCursorGoneResponse,
   EventEnvelope,
 } from '../../shared/wire/event'
+import type { UserSettings } from '../../shared/wire/settings'
 import { ApiRequestError } from '../api/client'
 import {
   getConversationDetail,
@@ -18,6 +19,7 @@ import {
   type EventBatchApplier,
 } from '../state/realtime'
 import { conversationListParams } from '../state/selectors'
+import { useDesktopNotifications } from './useDesktopNotifications'
 
 type PageVisibility = 'hidden' | 'visible'
 type SocketConnection = 'connected' | 'disconnected'
@@ -50,7 +52,8 @@ const RESOURCE_ENTITIES: Record<
 }
 
 interface RealtimeCallbacks {
-  applyEvents: EventBatchApplier
+  applyCatchUpEvents: EventBatchApplier
+  applyLiveEvents: EventBatchApplier
   fullResync: (signal: AbortSignal) => Promise<void>
 }
 
@@ -218,11 +221,20 @@ function protocolError(message: string): ApiRequestError {
  * WebSocket 프레임이 캐치업 응답을 앞질러 커서를 전진시킬 수 없다.
  */
 function useRealtimeSubscription({
-  applyEvents,
+  applyCatchUpEvents,
+  applyLiveEvents,
   fullResync,
 }: RealtimeCallbacks): void {
-  const callbacksRef = useRef({ applyEvents, fullResync })
-  callbacksRef.current = { applyEvents, fullResync }
+  const callbacksRef = useRef({
+    applyCatchUpEvents,
+    applyLiveEvents,
+    fullResync,
+  })
+  callbacksRef.current = {
+    applyCatchUpEvents,
+    applyLiveEvents,
+    fullResync,
+  }
 
   useEffect(() => {
     const cursor = new RealtimeCursor()
@@ -233,6 +245,7 @@ function useRealtimeSubscription({
     let reconnectTimer: number | undefined
     let reconnectAttempt = 0
     let queue: Promise<void> = Promise.resolve()
+    let pollingCanNotify = false
 
     const withSignal = async (
       operation: (signal: AbortSignal) => Promise<void>,
@@ -258,7 +271,10 @@ function useRealtimeSubscription({
       return next
     }
 
-    const catchUp = async (signal: AbortSignal): Promise<void> => {
+    const catchUp = async (
+      signal: AbortSignal,
+      applyEvents: EventBatchApplier,
+    ): Promise<void> => {
       try {
         while (!signal.aborted) {
           const since = cursor.lastSeq
@@ -276,7 +292,7 @@ function useRealtimeSubscription({
 
           const applied = await cursor.apply(
             response.events,
-            callbacksRef.current.applyEvents,
+            applyEvents,
             signal,
           )
           if (!applied) {
@@ -298,12 +314,29 @@ function useRealtimeSubscription({
           signal,
         )
         if (!recovered) throw error
-        await catchUp(signal)
+        await catchUp(
+          signal,
+          callbacksRef.current.applyCatchUpEvents,
+        )
       }
     }
 
     const pollingSchedule = createPollingSchedule(
-      () => enqueue(catchUp),
+      () =>
+        enqueue(async (signal) => {
+          try {
+            await catchUp(
+              signal,
+              pollingCanNotify
+                ? callbacksRef.current.applyLiveEvents
+                : callbacksRef.current.applyCatchUpEvents,
+            )
+            pollingCanNotify = true
+          } catch (error) {
+            pollingCanNotify = false
+            throw error
+          }
+        }),
       () => document.hidden,
     )
 
@@ -337,7 +370,13 @@ function useRealtimeSubscription({
       nextSocket.addEventListener('open', () => {
         if (disposed || socket !== nextSocket) return
         connecting = false
-        void enqueue(catchUp)
+        void enqueue(async (signal) => {
+          await catchUp(
+            signal,
+            callbacksRef.current.applyCatchUpEvents,
+          )
+          pollingCanNotify = true
+        })
           .then(() => {
             reconnectAttempt = 0
           })
@@ -350,8 +389,12 @@ function useRealtimeSubscription({
           applyRealtimeFrame(
             frame,
             cursor,
-            catchUp,
-            callbacksRef.current.applyEvents,
+            (catchUpSignal) =>
+              catchUp(
+                catchUpSignal,
+                callbacksRef.current.applyCatchUpEvents,
+              ),
+            callbacksRef.current.applyLiveEvents,
             signal,
           ),
         ).catch(() => undefined)
@@ -362,6 +405,7 @@ function useRealtimeSubscription({
       nextSocket.addEventListener('close', () => {
         if (socket === nextSocket) socket = null
         connecting = false
+        pollingCanNotify = false
         scheduleReconnect()
       })
     }
@@ -373,7 +417,11 @@ function useRealtimeSubscription({
         scheduleReconnect()
         return
       }
-      await catchUp(signal)
+      await catchUp(
+        signal,
+        callbacksRef.current.applyCatchUpEvents,
+      )
+      pollingCanNotify = true
       openSocket()
     }
 
@@ -466,7 +514,13 @@ export async function reloadInboxState(
   events: readonly EventEnvelope[],
   full: boolean,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<{
+  list: Awaited<ReturnType<typeof getConversations>>
+  threads: Array<{
+    conversationId: string
+    page: Awaited<ReturnType<typeof getConversationMessages>>
+  }>
+}> {
   const threadIds = reloadIds(state, events, 'thread', full)
   const cardIds = reloadIds(state, events, 'card', full)
   const [list, threads, cards] = await Promise.all([
@@ -515,31 +569,90 @@ export async function reloadInboxState(
       },
     })
   }
+  return { list, threads }
 }
 
 export function useRealtime(
   state: InboxState,
   dispatch: Dispatch<Action>,
+  settings: UserSettings,
+  userId: string,
 ): void {
   const stateRef = useRef(state)
   stateRef.current = state
+  const notifyLiveEvents = useDesktopNotifications(
+    settings,
+    userId,
+    dispatch,
+  )
 
-  const applyEvents = useCallback<EventBatchApplier>(
-    (events, signal) =>
-      reloadInboxState(
+  const applyCatchUpEvents = useCallback<EventBatchApplier>(
+    async (events, signal) => {
+      await reloadInboxState(
         stateRef.current,
         dispatch,
         events,
         false,
         signal,
-      ),
+      )
+    },
     [dispatch],
   )
+  const applyLiveEvents = useCallback<EventBatchApplier>(
+    async (events, signal) => {
+      const before = stateRef.current
+      const notificationListRequest =
+        !before.archivedView &&
+        before.scope === 'all' &&
+        before.filter === '전체' &&
+        before.query.trim() === ''
+          ? null
+          : getConversations(
+              conversationListParams({
+                ...before,
+                archivedView: false,
+                scope: 'all',
+                filter: '전체',
+                query: '',
+              }),
+              signal,
+            )
+      const reloaded = await reloadInboxState(
+        before,
+        dispatch,
+        events,
+        false,
+        signal,
+      )
+      const notificationList =
+        (await notificationListRequest) ?? reloaded.list
+      await notifyLiveEvents(events, {
+        before,
+        conversations: notificationList.conversations,
+        threads: reloaded.threads.map(({ conversationId, page }) => ({
+          conversationId,
+          messages: page.messages,
+        })),
+      })
+    },
+    [dispatch, notifyLiveEvents],
+  )
   const fullResync = useCallback(
-    (signal: AbortSignal) =>
-      reloadInboxState(stateRef.current, dispatch, [], true, signal),
+    async (signal: AbortSignal) => {
+      await reloadInboxState(
+        stateRef.current,
+        dispatch,
+        [],
+        true,
+        signal,
+      )
+    },
     [dispatch],
   )
 
-  useRealtimeSubscription({ applyEvents, fullResync })
+  useRealtimeSubscription({
+    applyCatchUpEvents,
+    applyLiveEvents,
+    fullResync,
+  })
 }

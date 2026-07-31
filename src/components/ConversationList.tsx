@@ -15,6 +15,7 @@ import {
 } from '../../shared/wire/conversation'
 import { useConversationList } from '../hooks/useConversationList'
 import { formatRelativeTime } from '../lib/time'
+import { customerDisplayName } from '../lib/customer'
 import { ComposeConversationModal } from './ComposeConversationModal'
 
 const SCOPE_LABELS: Record<ConversationScope, string> = {
@@ -63,7 +64,7 @@ function Row({ conv }: { conv: ConversationListItem }) {
         <span
           className={`text-[14.5px] tracking-[-0.2px] ${unread ? 'font-extrabold' : 'font-bold'}`}
         >
-          {conv.customer.name}
+          {customerDisplayName(conv.customer)}
         </span>
         {conv.customer.company && (
           <span className="text-[13px] text-ink-400">

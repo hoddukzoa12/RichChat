@@ -10,6 +10,11 @@ import {
 } from '../api/endpoints'
 import { useInbox } from '../state/InboxContext'
 import type { AiSettings } from '../state/inbox'
+import {
+  readDesktopNotificationPermission,
+  requestDesktopNotificationPermission,
+  type DesktopNotificationPermission,
+} from '../hooks/useDesktopNotifications'
 import { Card, ToggleRow } from './ui'
 
 type ProfileDraft = Pick<MeResponse['user'], 'name' | 'title' | 'email'>
@@ -46,7 +51,7 @@ const NOTIFY_TOGGLES: Array<{
   {
     key: 'notifyNewChat',
     name: '새 대화 알림',
-    sub: '미배정 대화가 들어오면 알립니다',
+    sub: '새 메시지가 도착하면 데스크톱에서 알립니다',
   },
   {
     key: 'notifyMineOnly',
@@ -59,6 +64,16 @@ const NOTIFY_TOGGLES: Array<{
     sub: '데스크톱 알림에 소리를 함께 재생합니다',
   },
 ]
+
+const NOTIFICATION_PERMISSION_SUB: Record<
+  DesktopNotificationPermission,
+  string | null
+> = {
+  default: '새 메시지 알림을 받으려면 브라우저에서 허용해 주세요',
+  denied: '브라우저에서 차단됨',
+  granted: null,
+  unsupported: '이 브라우저에서는 데스크톱 알림을 지원하지 않습니다',
+}
 
 const AI_TOGGLES: { key: keyof AiSettings; name: string; sub: string }[] = [
   { key: 'summary', name: '대화 요약 자동 생성', sub: '새 메시지가 오면 요약을 갱신합니다' },
@@ -79,6 +94,10 @@ export function MySettings() {
   const [notify, setNotify] = useState<UserSettings>(me.settings)
   const [notifySaving, setNotifySaving] = useState(false)
   const [notifyError, setNotifyError] = useState<string | null>(null)
+  const [notificationPermission, setNotificationPermission] =
+    useState<DesktopNotificationPermission>(
+      readDesktopNotificationPermission,
+    )
   const [logoutPending, setLogoutPending] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
 
@@ -86,6 +105,13 @@ export function MySettings() {
     setProfileDraft(profileDraftFrom(me))
     setNotify(me.settings)
   }, [me])
+
+  useEffect(() => {
+    const refreshPermission = () =>
+      setNotificationPermission(readDesktopNotificationPermission())
+    window.addEventListener('focus', refreshPermission)
+    return () => window.removeEventListener('focus', refreshPermission)
+  }, [])
 
   const saveProfile = async () => {
     const optimistic = { ...profileDraft }
@@ -113,11 +139,30 @@ export function MySettings() {
   const flipNotify = async (key: UserSettingField) => {
     if (notifySaving) return
     const previous = notify
-    const nextValue = !previous[key]
-    setNotify({ ...previous, [key]: nextValue })
+    if (
+      key === 'notifyNewChat' &&
+      (notificationPermission === 'denied' ||
+        notificationPermission === 'unsupported')
+    ) {
+      return
+    }
+
     setNotifySaving(true)
     setNotifyError(null)
     try {
+      let nextValue = !previous[key]
+      if (
+        key === 'notifyNewChat' &&
+        notificationPermission !== 'granted'
+      ) {
+        const permission =
+          await requestDesktopNotificationPermission()
+        setNotificationPermission(permission)
+        nextValue = permission === 'granted'
+      }
+
+      if (nextValue === previous[key]) return
+      setNotify({ ...previous, [key]: nextValue })
       const response = await updateMeSettings({ [key]: nextValue })
       applyMeResponse(response)
       setNotify(response.settings)
@@ -250,8 +295,24 @@ export function MySettings() {
                   <ToggleRow
                     key={t.key}
                     name={t.name}
-                    sub={t.sub}
-                    on={notify[t.key]}
+                    sub={
+                      t.key === 'notifyNewChat'
+                        ? (NOTIFICATION_PERMISSION_SUB[
+                            notificationPermission
+                          ] ?? t.sub)
+                        : t.sub
+                    }
+                    on={
+                      t.key === 'notifyNewChat'
+                        ? notify.notifyNewChat &&
+                          notificationPermission === 'granted'
+                        : notify[t.key]
+                    }
+                    disabled={
+                      t.key === 'notifyNewChat' &&
+                      (notificationPermission === 'denied' ||
+                        notificationPermission === 'unsupported')
+                    }
                     onFlip={() => void flipNotify(t.key)}
                   />
                 ))}
