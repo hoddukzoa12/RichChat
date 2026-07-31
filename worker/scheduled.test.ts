@@ -583,7 +583,7 @@ describe('Attachment scheduled download', () => {
     expect(error).toHaveBeenCalledOnce()
   })
 
-  it('promotes only stale pending MMS headers and cleans successful markers', async () => {
+  it('promotes stale MMS headers without deleting permanent matches', async () => {
     const staleAt = Date.now() - MMS_DOWNLOAD_WAIT_MS - 1_000
     await env.DB.batch([
       env.DB
@@ -603,14 +603,13 @@ describe('Attachment scheduled download', () => {
         ),
       env.DB
         .prepare(
-          `INSERT INTO sms_gateway_mms_downloaded (
-             mo_key, device_id, sender_e164, downloaded_at
-           ) VALUES (?, ?, ?, ?)`,
+          `INSERT INTO sms_gateway_mms_matches (
+             downloaded_mo_key, received_mo_key, matched_at
+           ) VALUES (?, ?, ?)`,
         )
         .bind(
           'sms-gateway/device/completed',
-          'device',
-          '+821022334455',
+          'sms-gateway/device/completed-header',
           staleAt,
         ),
     ])
@@ -631,11 +630,11 @@ describe('Attachment scheduled download', () => {
         `SELECT
            (SELECT COUNT(*) FROM sms_gateway_mms_pending)
              AS pending_count,
-           (SELECT COUNT(*) FROM sms_gateway_mms_downloaded)
-             AS downloaded_count`,
+           (SELECT COUNT(*) FROM sms_gateway_mms_matches)
+             AS match_count`,
       ).first(),
     ).toEqual({
-      downloaded_count: 0,
+      match_count: 1,
       pending_count: 0,
     })
   })

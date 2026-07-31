@@ -11,6 +11,7 @@ import {
   TEST_SMS_GATEWAY_SIGNING_KEY_BY_DEVICE,
   testSmsGatewaySignature,
 } from '../../tests/sms-gateway-fixtures'
+import { promoteStaleMmsHeaders } from '../sms-gateway-mms-diagnostics'
 import {
   createSmsGatewayWebhookHandler,
   MMS_ATTACHMENT_MAX_BYTES,
@@ -470,6 +471,12 @@ describe('Android SMS Gateway webhook', () => {
       await env.DB.prepare(
         'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
       ).first(),
+    ).toEqual({ count: 1 })
+    await promoteStaleMmsHeaders(env.DB)
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
+      ).first(),
     ).toEqual({ count: 0 })
     expect(
       await env.DB.prepare(
@@ -555,6 +562,12 @@ describe('Android SMS Gateway webhook', () => {
         'SELECT COUNT(*) AS count FROM messages',
       ).first(),
     ).toEqual({ count: 1 })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
+      ).first(),
+    ).toEqual({ count: 1 })
+    await promoteStaleMmsHeaders(env.DB)
     expect(
       await env.DB.prepare(
         'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',

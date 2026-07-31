@@ -11,7 +11,7 @@ describe('SMS Gateway MMS pending migration', () => {
       query.replace(/\s+/g, ' ').trim(),
     )
 
-    expect(queries).toHaveLength(4)
+    expect(queries).toHaveLength(3)
     expect(queries[0]).toMatch(
       /^CREATE TABLE sms_gateway_mms_pending/u,
     )
@@ -19,10 +19,7 @@ describe('SMS Gateway MMS pending migration', () => {
       /^CREATE INDEX ix_sms_gateway_mms_pending_match/u,
     )
     expect(queries[2]).toMatch(
-      /^CREATE TABLE sms_gateway_mms_downloaded/u,
-    )
-    expect(queries[3]).toMatch(
-      /^CREATE INDEX ix_sms_gateway_mms_downloaded_match/u,
+      /^CREATE TABLE sms_gateway_mms_matches/u,
     )
     expect(queries.every((query) => !query.includes('DROP TABLE'))).toBe(
       true,
@@ -38,28 +35,27 @@ describe('SMS Gateway MMS pending migration', () => {
       await env.DB.prepare(
         `SELECT strict
          FROM pragma_table_list
-         WHERE name = 'sms_gateway_mms_downloaded'`,
+         WHERE name = 'sms_gateway_mms_matches'`,
       ).first(),
     ).toEqual({ strict: 1 })
-    expect(
-      await env.DB.prepare(
-        `SELECT "notnull", dflt_value
-         FROM pragma_table_info('sms_gateway_mms_downloaded')
-         WHERE name = 'consumed'`,
-      ).first(),
-    ).toEqual({ dflt_value: '0', notnull: 1 })
-    expect(
-      await env.DB.prepare(
-        `SELECT "notnull", dflt_value
-         FROM pragma_table_info('sms_gateway_mms_downloaded')
-         WHERE name = 'received_mo_key'`,
-      ).first(),
-    ).toEqual({ dflt_value: null, notnull: 0 })
+
+    await env.DB.prepare(
+      `INSERT INTO sms_gateway_mms_matches (
+         downloaded_mo_key, received_mo_key, matched_at
+       ) VALUES ('downloaded-1', 'received-1', 1)`,
+    ).run()
     await expect(
       env.DB.prepare(
-        `INSERT INTO sms_gateway_mms_downloaded (
-           mo_key, device_id, sender_e164, downloaded_at, consumed
-         ) VALUES ('invalid-consumed', 'device', '+821000000000', 1, 1)`,
+        `INSERT INTO sms_gateway_mms_matches (
+           downloaded_mo_key, received_mo_key, matched_at
+         ) VALUES ('downloaded-1', 'received-2', 2)`,
+      ).run(),
+    ).rejects.toThrow()
+    await expect(
+      env.DB.prepare(
+        `INSERT INTO sms_gateway_mms_matches (
+           downloaded_mo_key, received_mo_key, matched_at
+         ) VALUES ('downloaded-2', 'received-1', 2)`,
       ).run(),
     ).rejects.toThrow()
   })

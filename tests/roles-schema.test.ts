@@ -32,7 +32,7 @@ const USER_DATA_TABLES = [
 ] as const
 
 const APPLICATION_TABLES_IN_DROP_ORDER = [
-  'sms_gateway_mms_downloaded',
+  'sms_gateway_mms_matches',
   'sms_gateway_mms_pending',
   'outbound_attachment_uploads',
   'message_attachments',

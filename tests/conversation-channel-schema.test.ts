@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 const NOW = 1_785_240_000_000
 
 const APPLICATION_TABLES_IN_DROP_ORDER = [
-  'sms_gateway_mms_downloaded',
+  'sms_gateway_mms_matches',
   'sms_gateway_mms_pending',
   'outbound_attachment_uploads',
   'message_attachments',

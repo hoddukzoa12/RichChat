@@ -22,7 +22,6 @@ import { normalizeKoreanPhoneValue } from '../lib/phone'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
 import {
   recordPendingMmsHeader,
-  resolvePendingMmsHeader,
 } from '../sms-gateway-mms-diagnostics'
 
 const SIGNATURE_HEADER = 'X-Signature'
@@ -1252,15 +1251,6 @@ async function handleMmsInbound(
         },
       },
       ctx,
-    )
-    await resolvePendingMmsHeader(
-      env.DB,
-      {
-        customerPhoneE164,
-        deviceId: received.deviceId,
-        downloadedAt: receivedAt,
-        idempotencyKey,
-      },
     )
     await discardReplacedMmsObjects(
       env.ATTACHMENTS,

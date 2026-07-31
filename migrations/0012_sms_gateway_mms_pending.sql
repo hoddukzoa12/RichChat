@@ -13,21 +13,10 @@ CREATE TABLE sms_gateway_mms_pending (
 CREATE INDEX ix_sms_gateway_mms_pending_match
   ON sms_gateway_mms_pending(device_id, sender_e164, first_at);
 
--- consumed=0은 downloaded-first 역순 호출의 헤더를 기다린다. consumed=1은
--- 매칭한 received_mo_key를 가진 재생 방지 tombstone이며, 둘 다 시간 만료로만
--- 조용히 지운다.
-CREATE TABLE sms_gateway_mms_downloaded (
-  mo_key TEXT PRIMARY KEY,
-  device_id TEXT NOT NULL,
-  sender_e164 TEXT NOT NULL,
-  downloaded_at INTEGER NOT NULL,
-  consumed INTEGER NOT NULL DEFAULT 0 CHECK (consumed IN (0, 1)),
-  received_mo_key TEXT UNIQUE,
-  CHECK (
-    (consumed = 0 AND received_mo_key IS NULL)
-    OR (consumed = 1 AND received_mo_key IS NOT NULL)
-  )
+-- downloaded 도착의 영구 정본은 messages다. 한 downloaded가 헤더 하나만
+-- 해소했다는 영구 권리만 원장에 남겨 재생과 시간 만료가 다시 소비하지 못하게 한다.
+CREATE TABLE sms_gateway_mms_matches (
+  downloaded_mo_key TEXT PRIMARY KEY,
+  received_mo_key TEXT NOT NULL UNIQUE,
+  matched_at INTEGER NOT NULL
 ) STRICT;
-
-CREATE INDEX ix_sms_gateway_mms_downloaded_match
-  ON sms_gateway_mms_downloaded(device_id, sender_e164, downloaded_at);
