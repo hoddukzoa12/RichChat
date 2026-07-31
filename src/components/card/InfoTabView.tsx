@@ -8,7 +8,7 @@ import { TASK_KIND_VIEW } from '../../theme'
 import { Avatar, Card } from '../ui'
 
 const inputClass =
-  'w-full text-[13.5px] text-ink border border-line-strong rounded-[7px] px-2 py-[5px] outline-none focus:border-brand'
+  'border border-line-strong rounded-[7px] px-2 py-[5px] outline-none focus:border-brand'
 
 export interface InfoTabViewProps {
   conversationId: string
@@ -94,7 +94,7 @@ function TaskForm({
           })
         }
         placeholder="업무 이름"
-        className={`${inputClass} font-semibold mb-1.5`}
+        className={`w-full text-[13.5px] text-ink ${inputClass} font-semibold mb-1.5`}
       />
       <input
         value={draft.sub}
@@ -105,7 +105,7 @@ function TaskForm({
           })
         }
         placeholder="기한 · 메모"
-        className={`${inputClass} text-[12.5px] text-ink-700`}
+        className={`w-full text-[12.5px] text-ink-700 ${inputClass}`}
       />
       <div className="mt-2 flex gap-[5px]">
         {TASK_KINDS.map((kind) => (
@@ -355,7 +355,7 @@ export function InfoTabView({
                     })
                   }
                   placeholder="고객명"
-                  className={`${inputClass} text-sm font-semibold mb-[5px]`}
+                  className={`w-full text-sm text-ink ${inputClass} font-semibold mb-[5px]`}
                 />
                 <div className="grid grid-cols-2 gap-1.5">
                   <input
@@ -368,7 +368,7 @@ export function InfoTabView({
                     }
                     placeholder="상호"
                     aria-label="상호"
-                    className={`${inputClass} text-[12.5px] text-ink-700`}
+                    className={`w-full text-[12.5px] text-ink-700 ${inputClass}`}
                   />
                   <input
                     value={edit.roleTitle}
@@ -380,7 +380,7 @@ export function InfoTabView({
                     }
                     placeholder="직함"
                     aria-label="직함"
-                    className={`${inputClass} text-[12.5px] text-ink-700`}
+                    className={`w-full text-[12.5px] text-ink-700 ${inputClass}`}
                   />
                 </div>
               </>
@@ -423,7 +423,7 @@ export function InfoTabView({
                       })
                     }
                     aria-label="세무 정보 항목"
-                    className={`${inputClass} w-[92px] flex-none text-[12.5px] text-ink-500`}
+                    className={`w-[92px] flex-none text-[12.5px] text-ink-500 ${inputClass}`}
                   />
                   <input
                     value={field.value}
@@ -435,7 +435,7 @@ export function InfoTabView({
                       })
                     }
                     aria-label={`${field.key || '새 항목'} 값`}
-                    className={`${inputClass} flex-1 min-w-0 font-medium`}
+                    className={`flex-1 min-w-0 text-[13.5px] text-ink ${inputClass} font-medium`}
                   />
                   <button
                     type="button"

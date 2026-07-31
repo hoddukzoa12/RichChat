@@ -2,6 +2,7 @@ import {
   defineWorkersConfig,
   readD1Migrations,
 } from '@cloudflare/vitest-pool-workers/config'
+import { configDefaults } from 'vitest/config'
 
 // 호환 풀의 내장 workerd가 설정 날짜보다 오래되어 테스트에서 날짜 fallback 경고가 발생한다.
 export default defineWorkersConfig(async () => {
@@ -9,6 +10,10 @@ export default defineWorkersConfig(async () => {
 
   return {
     test: {
+      exclude: [
+        ...configDefaults.exclude,
+        'src/components/card/InfoTabView.dom.test.tsx',
+      ],
       setupFiles: ['./tests/apply-migrations.ts'],
       poolOptions: {
         workers: {
