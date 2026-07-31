@@ -41,5 +41,12 @@ describe('SMS Gateway MMS pending migration', () => {
          WHERE name = 'sms_gateway_mms_downloaded'`,
       ).first(),
     ).toEqual({ strict: 1 })
+    expect(
+      await env.DB.prepare(
+        `SELECT "notnull", dflt_value
+         FROM pragma_table_info('sms_gateway_mms_downloaded')
+         WHERE name = 'consumed'`,
+      ).first(),
+    ).toEqual({ dflt_value: '0', notnull: 1 })
   })
 })

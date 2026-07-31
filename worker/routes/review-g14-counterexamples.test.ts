@@ -176,4 +176,46 @@ describe('G14 review counterexamples', () => {
       ),
     })
   })
+
+  it('does not let one replayed download resolve two same-sender headers', async () => {
+    await seed()
+    const firstReceivedId = 'transaction-first'
+    const missingReceivedId = 'transaction-missing'
+    const downloaded = body('mms:downloaded', '3301')
+
+    await expectSuccess(body('mms:received', firstReceivedId))
+    await expectSuccess(body('mms:received', missingReceivedId))
+    await expectSuccess(downloaded)
+
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
+      ).first(),
+    ).toEqual({ count: 1 })
+
+    await expectSuccess(downloaded)
+
+    const pendingAfterReplay = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
+    ).first<{ count: number }>()
+
+    await promoteStaleMmsHeaders(
+      env.DB,
+      Date.now() + MMS_DOWNLOAD_WAIT_MS + 1_000,
+    )
+    const promotedFailures = await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM mo_failures
+         WHERE error_text = ?`,
+      )
+        .bind(MMS_DOWNLOAD_MISSING_ERROR_TEXT)
+        .first<{ count: number }>()
+    expect({
+      pendingAfterReplay: pendingAfterReplay?.count,
+      promotedFailures: promotedFailures?.count,
+    }).toEqual({
+      pendingAfterReplay: 1,
+      promotedFailures: 1,
+    })
+  })
 })

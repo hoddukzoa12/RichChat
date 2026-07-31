@@ -22,7 +22,6 @@ interface PendingMmsHeaderInput extends MmsHeaderIdentity {
 interface DownloadedMmsInput extends MmsHeaderIdentity {
   downloadedAt: number
   idempotencyKey: string
-  rememberDownloaded: boolean
 }
 
 interface MmsHeaderPromotionSummary {
@@ -45,6 +44,7 @@ export async function recordPendingMmsHeader(
          FROM sms_gateway_mms_downloaded
          WHERE device_id = ?
            AND sender_e164 = ?
+           AND consumed = 0
            AND downloaded_at BETWEEN ? AND ?
          ORDER BY
            ABS(downloaded_at - ?),
@@ -91,64 +91,61 @@ export async function recordPendingMmsHeader(
 /**
  * ID가 다른 두 이벤트를 고객 메시지에 추측으로 병합하지 않는다. 이 삭제는
  * 진단 대기열만 정리하므로 같은 기기·발신자의 가장 가까운 헤더를 휴리스틱으로
- * 골라도 잘못된 고객 본문이나 사진이 섞일 수 없다.
+ * 골라도 잘못된 고객 본문이나 사진이 섞일 수 없다. 성공 표식 INSERT와 삭제를
+ * 한 D1 batch에 넣고 changes()로 묶어, 최초 커밋만 헤더 하나를 해소한다.
+ * 표식은 크론 정리 전까지 tombstone으로 남아 재생이 다른 헤더를 지우지 못한다.
  */
 export async function resolvePendingMmsHeader(
   db: D1Database,
   input: DownloadedMmsInput,
 ): Promise<boolean> {
-  if (input.rememberDownloaded) {
-    await db
+  const [, result] = await db.batch([
+    db
       .prepare(
         `INSERT INTO sms_gateway_mms_downloaded (
-           mo_key, device_id, sender_e164, downloaded_at
+           mo_key, device_id, sender_e164, downloaded_at, consumed
          )
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(mo_key) DO UPDATE SET
-           downloaded_at = excluded.downloaded_at`,
+         VALUES (?, ?, ?, ?, 0)
+         ON CONFLICT(mo_key) DO NOTHING`,
       )
       .bind(
         input.idempotencyKey,
         input.deviceId,
         input.customerPhoneE164,
         input.downloadedAt,
-      )
-      .run()
-  }
-
-  const result = await db
-    .prepare(
-      `DELETE FROM sms_gateway_mms_pending
-       WHERE mo_key = (
-         SELECT mo_key
-         FROM sms_gateway_mms_pending
-         WHERE device_id = ?
-           AND sender_e164 = ?
-           AND first_at BETWEEN ? AND ?
-         ORDER BY ABS(first_at - ?), first_at, mo_key
-         LIMIT 1
-       )`,
-    )
-    .bind(
-      input.deviceId,
-      input.customerPhoneE164,
-      input.downloadedAt - MMS_DOWNLOAD_WAIT_MS,
-      input.downloadedAt + MMS_DOWNLOAD_WAIT_MS,
-      input.downloadedAt,
-    )
-    .run()
-
-  const resolved = changes(result) === 1
-  if (resolved && input.rememberDownloaded) {
-    await db
+      ),
+    db
       .prepare(
-        `DELETE FROM sms_gateway_mms_downloaded
-         WHERE mo_key = ?`,
+        `DELETE FROM sms_gateway_mms_pending
+         WHERE changes() = 1
+           AND mo_key = (
+             SELECT mo_key
+             FROM sms_gateway_mms_pending
+             WHERE device_id = ?
+               AND sender_e164 = ?
+               AND first_at BETWEEN ? AND ?
+             ORDER BY ABS(first_at - ?), first_at, mo_key
+             LIMIT 1
+           )`,
       )
-      .bind(input.idempotencyKey)
-      .run()
-  }
-  return resolved
+      .bind(
+        input.deviceId,
+        input.customerPhoneE164,
+        input.downloadedAt - MMS_DOWNLOAD_WAIT_MS,
+        input.downloadedAt + MMS_DOWNLOAD_WAIT_MS,
+        input.downloadedAt,
+      ),
+    db
+      .prepare(
+        `UPDATE sms_gateway_mms_downloaded
+         SET consumed = 1
+         WHERE mo_key = ?
+           AND changes() = 1`,
+      )
+      .bind(input.idempotencyKey),
+  ])
+
+  return changes(result) === 1
 }
 
 export async function promoteStaleMmsHeaders(

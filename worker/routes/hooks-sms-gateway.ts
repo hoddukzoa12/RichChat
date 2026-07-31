@@ -1260,7 +1260,6 @@ async function handleMmsInbound(
         deviceId: received.deviceId,
         downloadedAt: receivedAt,
         idempotencyKey,
-        rememberDownloaded: stored.created,
       },
     )
     await discardReplacedMmsObjects(
