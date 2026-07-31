@@ -48,5 +48,19 @@ describe('SMS Gateway MMS pending migration', () => {
          WHERE name = 'consumed'`,
       ).first(),
     ).toEqual({ dflt_value: '0', notnull: 1 })
+    expect(
+      await env.DB.prepare(
+        `SELECT "notnull", dflt_value
+         FROM pragma_table_info('sms_gateway_mms_downloaded')
+         WHERE name = 'received_mo_key'`,
+      ).first(),
+    ).toEqual({ dflt_value: null, notnull: 0 })
+    await expect(
+      env.DB.prepare(
+        `INSERT INTO sms_gateway_mms_downloaded (
+           mo_key, device_id, sender_e164, downloaded_at, consumed
+         ) VALUES ('invalid-consumed', 'device', '+821000000000', 1, 1)`,
+      ).run(),
+    ).rejects.toThrow()
   })
 })

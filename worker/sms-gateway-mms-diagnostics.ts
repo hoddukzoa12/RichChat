@@ -31,59 +31,86 @@ interface MmsHeaderPromotionSummary {
 /**
  * downloaded가 먼저 처리된 역순 호출이면 이미 저장된 MMS를 진단 범위에서만
  * 휴리스틱으로 결합한다. 고객 메시지 병합에는 이 추측을 절대 사용하지 않는다.
+ * 표식은 삭제하지 않고 같은 D1 batch에서 consumed=0 → 1로 전이하며, 매칭된
+ * received 키를 보존해 양쪽 이벤트의 재생이 새 진단 행을 만들지 못하게 한다.
  */
 export async function recordPendingMmsHeader(
   db: D1Database,
   input: PendingMmsHeaderInput,
 ): Promise<boolean> {
-  const matched = await db
-    .prepare(
-      `DELETE FROM sms_gateway_mms_downloaded
-       WHERE mo_key = (
-         SELECT mo_key
-         FROM sms_gateway_mms_downloaded
-         WHERE device_id = ?
-           AND sender_e164 = ?
-           AND consumed = 0
-           AND downloaded_at BETWEEN ? AND ?
-         ORDER BY
-           ABS(downloaded_at - ?),
-           downloaded_at,
-           mo_key
-         LIMIT 1
-       )`,
-    )
-    .bind(
-      input.deviceId,
-      input.customerPhoneE164,
-      input.receivedAt - MMS_DOWNLOAD_WAIT_MS,
-      input.receivedAt + MMS_DOWNLOAD_WAIT_MS,
-      input.receivedAt,
-    )
-    .run()
-  if (changes(matched) === 1) return false
-
-  const result = await db
-    .prepare(
-      `INSERT INTO sms_gateway_mms_pending (
-         mo_key, device_id, sender_e164, raw_json,
-         attempts, first_at, last_at
-       )
-       VALUES (?, ?, ?, ?, 1, ?, ?)
-       ON CONFLICT(mo_key) DO UPDATE SET
-         raw_json = excluded.raw_json,
-         attempts = sms_gateway_mms_pending.attempts + 1,
-         last_at = excluded.last_at`,
-    )
-    .bind(
-      input.idempotencyKey,
-      input.deviceId,
-      input.customerPhoneE164,
-      input.rawBody,
-      input.receivedAt,
-      input.receivedAt,
-    )
-    .run()
+  const [, , result] = await db.batch([
+    db
+      .prepare(
+        `UPDATE sms_gateway_mms_downloaded
+         SET consumed = 1,
+             received_mo_key = ?
+         WHERE consumed = 0
+           AND NOT EXISTS (
+             SELECT 1
+             FROM sms_gateway_mms_downloaded
+             WHERE received_mo_key = ?
+           )
+           AND mo_key = (
+             SELECT mo_key
+             FROM sms_gateway_mms_downloaded
+             WHERE device_id = ?
+               AND sender_e164 = ?
+               AND consumed = 0
+               AND downloaded_at BETWEEN ? AND ?
+             ORDER BY
+               ABS(downloaded_at - ?),
+               downloaded_at,
+               mo_key
+             LIMIT 1
+           )`,
+      )
+      .bind(
+        input.idempotencyKey,
+        input.idempotencyKey,
+        input.deviceId,
+        input.customerPhoneE164,
+        input.receivedAt - MMS_DOWNLOAD_WAIT_MS,
+        input.receivedAt + MMS_DOWNLOAD_WAIT_MS,
+        input.receivedAt,
+      ),
+    db
+      .prepare(
+        `DELETE FROM sms_gateway_mms_pending
+         WHERE mo_key = ?
+           AND EXISTS (
+             SELECT 1
+             FROM sms_gateway_mms_downloaded
+             WHERE received_mo_key = ?
+           )`,
+      )
+      .bind(input.idempotencyKey, input.idempotencyKey),
+    db
+      .prepare(
+        `INSERT INTO sms_gateway_mms_pending (
+           mo_key, device_id, sender_e164, raw_json,
+           attempts, first_at, last_at
+         )
+         SELECT ?, ?, ?, ?, 1, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM sms_gateway_mms_downloaded
+           WHERE received_mo_key = ?
+         )
+         ON CONFLICT(mo_key) DO UPDATE SET
+           raw_json = excluded.raw_json,
+           attempts = sms_gateway_mms_pending.attempts + 1,
+           last_at = excluded.last_at`,
+      )
+      .bind(
+        input.idempotencyKey,
+        input.deviceId,
+        input.customerPhoneE164,
+        input.rawBody,
+        input.receivedAt,
+        input.receivedAt,
+        input.idempotencyKey,
+      ),
+  ])
 
   return changes(result) === 1
 }
@@ -99,7 +126,7 @@ export async function resolvePendingMmsHeader(
   db: D1Database,
   input: DownloadedMmsInput,
 ): Promise<boolean> {
-  const [, result] = await db.batch([
+  const [, , result] = await db.batch([
     db
       .prepare(
         `INSERT INTO sms_gateway_mms_downloaded (
@@ -116,16 +143,27 @@ export async function resolvePendingMmsHeader(
       ),
     db
       .prepare(
-        `DELETE FROM sms_gateway_mms_pending
-         WHERE changes() = 1
-           AND mo_key = (
-             SELECT mo_key
+        `UPDATE sms_gateway_mms_downloaded
+         SET consumed = 1,
+             received_mo_key = (
+               SELECT mo_key
+               FROM sms_gateway_mms_pending
+               WHERE device_id = ?
+                 AND sender_e164 = ?
+                 AND first_at BETWEEN ? AND ?
+               ORDER BY ABS(first_at - ?), first_at, mo_key
+               LIMIT 1
+             )
+         WHERE mo_key = ?
+           AND consumed = 0
+           AND changes() = 1
+           AND received_mo_key IS NULL
+           AND EXISTS (
+             SELECT 1
              FROM sms_gateway_mms_pending
              WHERE device_id = ?
                AND sender_e164 = ?
                AND first_at BETWEEN ? AND ?
-             ORDER BY ABS(first_at - ?), first_at, mo_key
-             LIMIT 1
            )`,
       )
       .bind(
@@ -134,13 +172,21 @@ export async function resolvePendingMmsHeader(
         input.downloadedAt - MMS_DOWNLOAD_WAIT_MS,
         input.downloadedAt + MMS_DOWNLOAD_WAIT_MS,
         input.downloadedAt,
+        input.idempotencyKey,
+        input.deviceId,
+        input.customerPhoneE164,
+        input.downloadedAt - MMS_DOWNLOAD_WAIT_MS,
+        input.downloadedAt + MMS_DOWNLOAD_WAIT_MS,
       ),
     db
       .prepare(
-        `UPDATE sms_gateway_mms_downloaded
-         SET consumed = 1
-         WHERE mo_key = ?
-           AND changes() = 1`,
+        `DELETE FROM sms_gateway_mms_pending
+         WHERE changes() = 1
+           AND mo_key = (
+             SELECT received_mo_key
+             FROM sms_gateway_mms_downloaded
+             WHERE mo_key = ?
+           )`,
       )
       .bind(input.idempotencyKey),
   ])
