@@ -268,6 +268,28 @@ export const STATUS_BADGE: Record<Status, string> = {
 
 ---
 
+## 도메인 제약 (Android SMS Gateway — 업무폰)
+
+전부 운영 실측이다. 앱 소스를 읽는 것으로도 부족했다 — 실제 웹훅이 정본이다.
+
+- **장문 발신은 연결 SMS다.** 앱에 LMS/MMS 발신이 없어(`sendMultimediaMessage`
+  0건) `divideMessage`로 쪼개 재조립 꼬리표(UDH)를 붙여 보낸다. **받는 폰이
+  아이폰이면 조각난 채로, 안드로이드면 한 통으로 표시된다** (2026-07-31 실측.
+  표본이 작아 통신사 축은 미확정). 한 통 보장이 필요하면 LGU+ LMS 경로다.
+- **MMS 두 수신 이벤트의 ID가 서로 다르다.** `mms:received`의 `messageId`는
+  transactionId 폴백(`ZxqUf3r1`형), `mms:downloaded`는 프로바이더 숫자
+  id(`2249`형)로 와서 **절대 같아지지 않는다.** 앱 소스의
+  `message.messageId ?: message.transactionId`만 읽고 같다고 가정하면 모든
+  MMS가 유령 행 하나를 남긴다 — 실제로 그렇게 됐다. 인박스 행은
+  `mms:downloaded`만 만들고, 헤더는 진단 대기 테이블로만 간다.
+- **통신사가 MMS subject를 자동 생성한다.** 실측 세 형태 — `제목없음`,
+  `[제목없음]`, 본문 앞부분을 자른 사본. 본문 접두사인 제목은 사용자 제목이라도
+  버린다(구분 불가능하고 정보가 본문에 이미 있다). 의도된 계약이다.
+- **`sms:delivered`는 통신사 배달 리포트가 있어야 온다.** 안 오면 `전송중`이
+  사실상 최종 상태다.
+- 발신 폰이 RCS(채팅+)로 보낸 메시지는 SMS 콘텐츠 프로바이더에 안 잡혀
+  **게이트웨이에 아예 보이지 않는다.**
+
 ## 디자인 원본
 
 UI 원본은 Claude Design 프로젝트다. 이 저장소의 `design/prototype.dc.html`이
