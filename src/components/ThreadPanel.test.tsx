@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
+import type { DeliveryStatus } from '../types'
 import type { ConversationMessage } from '../../shared/wire/message'
 import type { ThreadMessage } from '../state/thread'
 import {
@@ -84,6 +85,29 @@ describe('thread presentation', () => {
 
     expect(markup).toContain('>실패<')
     expect(markup).toContain('실패 사유: 수신번호 오류')
+  })
+
+  it('renders delivery status labels without changing stored values', () => {
+    const statusLabels: readonly [DeliveryStatus, string][] = [
+      ['수신', '수신'],
+      ['대기', '대기'],
+      ['접수', '접수'],
+      ['전송중', '발송됨'],
+      ['완료', '완료'],
+      ['실패', '실패'],
+    ]
+
+    for (const [deliveryStatus, label] of statusLabels) {
+      const markup = renderToStaticMarkup(
+        <MessageBubble
+          customerInitial="이"
+          message={message({ deliveryStatus })}
+          onRetry={vi.fn()}
+        />,
+      )
+
+      expect(markup).toContain(`>${label}<`)
+    }
   })
 
   it('renders an image inline and keeps a separate download link', () => {

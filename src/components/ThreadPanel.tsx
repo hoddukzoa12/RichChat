@@ -20,7 +20,10 @@ import {
   type ThreadFailure,
   type ThreadMessage,
 } from '../state/thread'
-import { DELIVERY_STATUS_BADGE } from '../theme'
+import {
+  DELIVERY_STATUS_BADGE,
+  DELIVERY_STATUS_LABEL,
+} from '../theme'
 import { LMS_MAX_BYTES } from '../../shared/sms'
 import { initialOf } from '../../shared/text'
 import type { MessageAttachment } from '../../shared/wire/message'
@@ -225,7 +228,7 @@ export function MessageBubble({
               DELIVERY_STATUS_BADGE[message.deliveryStatus]
             }`}
           >
-            {message.deliveryStatus}
+            {DELIVERY_STATUS_LABEL[message.deliveryStatus]}
           </span>
           {message.direction === 'out' && (
             <span>{message.channel}</span>

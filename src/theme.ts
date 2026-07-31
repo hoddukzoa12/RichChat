@@ -35,6 +35,15 @@ export const DELIVERY_STATUS_BADGE: Record<DeliveryStatus, string> = {
   실패: 'text-open-fg bg-open-bg',
 }
 
+export const DELIVERY_STATUS_LABEL: Record<DeliveryStatus, string> = {
+  수신: '수신',
+  대기: '대기',
+  접수: '접수',
+  전송중: '발송됨',
+  완료: '완료',
+  실패: '실패',
+}
+
 export const MEMBER_STATUS_VIEW: Record<
   UserStatus,
   {
