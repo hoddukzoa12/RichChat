@@ -9,6 +9,7 @@ export interface InboundAttachment {
   byteSize: number | null
   mimeType: string | null
   contentUrl: string | null
+  contentIndex?: number
 }
 
 export interface InboundMessageInput {
@@ -19,10 +20,33 @@ export interface InboundMessageInput {
   title: string | null
   body: string
   occurredAt: number
+  occurredAtCanonical: boolean
   receivedAt: number
   idempotencyKey: string
   attachments?: readonly InboundAttachment[]
+  contentFingerprint?: string
+  expectedContentFingerprint?: string | null
+  mergeExistingBody?: boolean
+  mergeExistingOccurredAt?: boolean
+  mergeExistingTitle?: boolean
+  replaceExistingAttachments?: boolean
   eventMetadata?: Readonly<Record<string, JsonValue>>
+}
+
+export interface StoredInboundMessage {
+  id: string
+  conversationId: string
+  attachmentCandidates: Array<{
+    contentIndex: number
+    id: string
+  }>
+  attachmentsUpdated: boolean
+  contentUpdated: boolean
+  created: boolean
+  replacedAttachments: Array<{
+    id: string
+    r2Key: string | null
+  }>
 }
 
 /**
@@ -33,12 +57,17 @@ export async function storeInboundMessage(
   env: Env,
   input: InboundMessageInput,
   ctx?: ExecutionContext,
-): Promise<void> {
+): Promise<StoredInboundMessage> {
   const db = env.DB
   const customerId = createId()
   const conversationId = createId()
   const messageId = createId()
   const attachments = input.attachments ?? []
+  const hasContentFingerprint =
+    input.contentFingerprint === undefined ? 0 : 1
+  const contentFingerprint = input.contentFingerprint ?? null
+  const expectedContentFingerprint =
+    input.expectedContentFingerprint ?? null
 
   const statements: D1PreparedStatement[] = [
     db
@@ -121,10 +150,12 @@ export async function storeInboundMessage(
         `INSERT INTO messages (
            id, office_id, conversation_id, direction, channel, title, body,
            sender_user_id, occurred_at, created_at, mo_key, client_key,
-           msg_key, delivery_status
+           msg_key, delivery_status, occurred_at_canonical,
+           inbound_fingerprint
          )
          SELECT
-           ?, ?, id, 'in', ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, '수신'
+           ?, ?, id, 'in', ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, '수신',
+           ?, ?
          FROM conversations
          WHERE office_id = ?
            AND customer_id = (
@@ -143,6 +174,8 @@ export async function storeInboundMessage(
         input.occurredAt,
         input.receivedAt,
         input.idempotencyKey,
+        input.occurredAtCanonical ? 1 : 0,
+        contentFingerprint,
         input.officeId,
         input.officeId,
         input.customerPhoneE164,
@@ -150,8 +183,149 @@ export async function storeInboundMessage(
       ),
   ]
   const messageInsertIndex = statements.length - 1
+  statements.push(
+    db
+      .prepare(
+        `UPDATE messages
+         SET
+           channel = CASE WHEN ? = 1 THEN ? ELSE channel END,
+           title = CASE
+             WHEN ? = 1 THEN COALESCE(title, ?)
+             ELSE title
+           END,
+           body = CASE WHEN ? = 1 AND ? <> '' THEN ? ELSE body END,
+           occurred_at = CASE
+             WHEN ? = 1 AND ? = 1 AND occurred_at_canonical = 0
+             THEN ?
+             ELSE occurred_at
+           END,
+           occurred_at_canonical = CASE
+             WHEN ? = 1 AND ? = 1 AND occurred_at_canonical = 0
+             THEN 1
+             ELSE occurred_at_canonical
+           END,
+           inbound_fingerprint = CASE
+             WHEN ? = 1 THEN ?
+             ELSE inbound_fingerprint
+           END
+         WHERE mo_key = ?
+           AND direction = 'in'
+           AND (? = 0 OR inbound_fingerprint IS ?)
+           AND (
+             (? = 1 AND title IS NULL AND ? IS NOT NULL)
+             OR (? = 1 AND channel <> ?)
+             OR (? = 1 AND ? <> '' AND body <> ?)
+             OR (? = 1 AND ? = 1 AND occurred_at_canonical = 0)
+             OR (? = 1 AND inbound_fingerprint IS NOT ?)
+           )`,
+      )
+      .bind(
+        input.mergeExistingBody ? 1 : 0,
+        input.channel,
+        input.mergeExistingTitle ? 1 : 0,
+        input.title,
+        input.mergeExistingBody ? 1 : 0,
+        input.body,
+        input.body,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
+        input.occurredAt,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
+        hasContentFingerprint,
+        contentFingerprint,
+        input.idempotencyKey,
+        hasContentFingerprint,
+        expectedContentFingerprint,
+        input.mergeExistingTitle ? 1 : 0,
+        input.title,
+        input.mergeExistingBody ? 1 : 0,
+        input.channel,
+        input.mergeExistingBody ? 1 : 0,
+        input.body,
+        input.body,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
+        hasContentFingerprint,
+        contentFingerprint,
+      ),
+  )
+  const contentUpdateIndex = statements.length - 1
+  statements.push(
+    db
+      .prepare(
+        `WITH target AS (
+           SELECT conversation_id
+           FROM messages
+           WHERE mo_key = ?
+             AND id <> ?
+             AND ? = 1
+             AND ? = 1
+             AND occurred_at_canonical = 1
+             AND occurred_at = ?
+             AND (? = 0 OR inbound_fingerprint IS ?)
+         ),
+         latest AS (
+           SELECT id, occurred_at
+           FROM messages
+           WHERE conversation_id = (SELECT conversation_id FROM target)
+           ORDER BY occurred_at DESC, id DESC
+           LIMIT 1
+         )
+         UPDATE conversations
+         SET
+           last_message_id = (SELECT id FROM latest),
+           last_message_at = (SELECT occurred_at FROM latest),
+           version = version + 1,
+           updated_at = ?
+         WHERE id = (SELECT conversation_id FROM target)
+           AND (
+             last_message_id IS NOT (SELECT id FROM latest)
+             OR last_message_at IS NOT (SELECT occurred_at FROM latest)
+           )`,
+      )
+      .bind(
+        input.idempotencyKey,
+        messageId,
+        input.mergeExistingOccurredAt ? 1 : 0,
+        input.occurredAtCanonical ? 1 : 0,
+        input.occurredAt,
+        hasContentFingerprint,
+        contentFingerprint,
+        input.receivedAt,
+      ),
+  )
 
-  for (const [contentIndex, attachment] of attachments.entries()) {
+  let replacedAttachmentIndex: number | null = null
+  if (input.replaceExistingAttachments) {
+    statements.push(
+      db
+        .prepare(
+          `DELETE FROM message_attachments
+           WHERE message_id = (
+             SELECT id
+             FROM messages
+             WHERE mo_key = ?
+               AND (? = 0 OR inbound_fingerprint IS ?)
+           )
+           RETURNING id, r2_key`,
+        )
+        .bind(
+          input.idempotencyKey,
+          hasContentFingerprint,
+          contentFingerprint,
+        ),
+    )
+    replacedAttachmentIndex = statements.length - 1
+  }
+
+  const attachmentCandidates: StoredInboundMessage['attachmentCandidates'] =
+    []
+  const attachmentInsertIndexes: number[] = []
+  for (const [position, attachment] of attachments.entries()) {
+    const contentIndex = attachment.contentIndex ?? position
+    const attachmentId = createId()
+    attachmentCandidates.push({ contentIndex, id: attachmentId })
     statements.push(
       db
         .prepare(
@@ -163,6 +337,7 @@ export async function storeInboundMessage(
            SELECT ?, ?, messages.id, ?, ?, ?, NULL, '대기', ?, ?, ?
            FROM messages
            WHERE messages.mo_key = ?
+             AND (? = 0 OR messages.inbound_fingerprint IS ?)
              AND NOT EXISTS (
                SELECT 1
                FROM message_attachments
@@ -171,7 +346,7 @@ export async function storeInboundMessage(
              )`,
         )
         .bind(
-          createId(),
+          attachmentId,
           input.officeId,
           attachment.originalFilename,
           attachment.byteSize,
@@ -180,16 +355,22 @@ export async function storeInboundMessage(
           contentIndex,
           attachment.contentUrl,
           input.idempotencyKey,
+          hasContentFingerprint,
+          contentFingerprint,
           contentIndex,
         ),
     )
+    attachmentInsertIndexes.push(statements.length - 1)
     statements.push(
       db
         .prepare(
           `UPDATE message_attachments
            SET content_url = ?
            WHERE message_id = (
-             SELECT id FROM messages WHERE mo_key = ?
+             SELECT id
+             FROM messages
+             WHERE mo_key = ?
+               AND (? = 0 OR inbound_fingerprint IS ?)
            )
              AND content_index = ?
              AND download_status = '대기'`,
@@ -197,6 +378,8 @@ export async function storeInboundMessage(
         .bind(
           attachment.contentUrl,
           input.idempotencyKey,
+          hasContentFingerprint,
+          contentFingerprint,
           contentIndex,
         ),
     )
@@ -288,13 +471,41 @@ export async function storeInboundMessage(
     ctx,
     env,
   )
-  if (changes(results[messageInsertIndex]) === 1) return
+  const created = changes(results[messageInsertIndex]) === 1
+  const contentUpdated = changes(results[contentUpdateIndex]) === 1
+  const replacedAttachments =
+    replacedAttachmentIndex === null
+      ? []
+      : (
+          results[replacedAttachmentIndex]?.results as Array<{
+            id: string
+            r2_key: string | null
+          }>
+        ).map(({ id, r2_key }) => ({ id, r2Key: r2_key }))
+  const attachmentsUpdated =
+    replacedAttachments.length > 0 ||
+    attachmentInsertIndexes.some(
+      (index) => changes(results[index]) === 1,
+    )
 
   const duplicate = await db
-    .prepare('SELECT id FROM messages WHERE mo_key = ?')
+    .prepare(
+      `SELECT id, conversation_id
+       FROM messages
+       WHERE mo_key = ?`,
+    )
     .bind(input.idempotencyKey)
-    .first<{ id: string }>()
+    .first<{ id: string; conversation_id: string }>()
   if (!duplicate) {
     throw new Error('수신 메시지가 커밋되지 않았습니다.')
+  }
+  return {
+    id: duplicate.id,
+    conversationId: duplicate.conversation_id,
+    attachmentCandidates,
+    attachmentsUpdated,
+    contentUpdated,
+    created,
+    replacedAttachments,
   }
 }

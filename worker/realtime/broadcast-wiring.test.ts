@@ -505,6 +505,90 @@ describe('Broadcast wiring', () => {
     expect((await catchup(fixture)).events).toHaveLength(1)
   })
 
+  it('fans out MMS creation and downloaded-content completion to an open thread', async () => {
+    const fixture = await seedFixture()
+    await env.DB.prepare(
+      `UPDATE office_channels
+       SET device_id = ?, signing_key = ?
+       WHERE office_id = ?`,
+    )
+      .bind(
+        fixture.deviceId,
+        fixture.gatewaySigningKey,
+        fixture.officeId,
+      )
+      .run()
+    const socket = await openSocket(fixture.token)
+    const received = frames(socket, 2)
+    const messageId = `gateway-mms-${fixture.officeId}`
+    const body = JSON.stringify({
+      deviceId: fixture.deviceId,
+      event: 'mms:downloaded',
+      id: `gateway-downloaded-${messageId}`,
+      webhookId: 'gateway-broadcast-webhook',
+      payload: {
+        messageId,
+        sender: fixture.customerPhone.replace('+82', '0'),
+        recipient: '01099998888',
+        simNumber: 1,
+        transactionId: `transaction-${messageId}`,
+        subject: null,
+        size: 3,
+        contentClass: 'personal',
+        body: '사진을 확인해 주세요.',
+        attachments: [
+          {
+            partId: 'photo',
+            contentType: 'image/jpeg',
+            name: 'receipt.jpg',
+            size: 3,
+            data: 'AQID',
+          },
+        ],
+        receivedAt: '2026-07-30T14:00:00+09:00',
+      },
+    })
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = await testSmsGatewaySignature(
+      body,
+      timestamp,
+      fixture.gatewaySigningKey,
+    )
+
+    const response = await SELF.fetch(
+      `${ORIGIN}/api/hooks/sms-gateway`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-signature': signature,
+          'x-timestamp': timestamp,
+        },
+        body,
+      },
+    )
+
+    expect(response.status).toBe(204)
+    const framesReceived = (await received).map(
+      (raw) =>
+        JSON.parse(raw) as {
+          conversationId: string
+          type: string
+        },
+    )
+    expect(framesReceived).toEqual([
+      expect.objectContaining({
+        conversationId: null,
+        type: 'message.created',
+      }),
+      expect.objectContaining({
+        conversationId: fixture.conversationId,
+        type: 'message.updated',
+      }),
+    ])
+    expect((await catchup(fixture)).events).toHaveLength(2)
+  })
+
   it('does not fan out a publication from a rolled-back batch', async () => {
     const fixture = await seedFixture()
     const socket = await openSocket(fixture.token)
