@@ -1,6 +1,10 @@
 import type {
+  ConversationComposeOptionsResponse,
   ConversationListParams,
+  ConversationListItem,
   ConversationListResponse,
+  ConversationStartRequest,
+  ConversationStartResponse,
   ConversationWriteResponse,
   ConversationWriteState,
 } from '../../../shared/wire/conversation'
@@ -31,6 +35,63 @@ export function getConversations(
 
   const suffix = query.size > 0 ? `?${query}` : ''
   return apiRequest(`/api/conversations${suffix}`, { signal })
+}
+
+export function getConversationComposeOptions(
+  query: string,
+  signal?: AbortSignal,
+): Promise<ConversationComposeOptionsResponse> {
+  const search = new URLSearchParams()
+  const normalizedQuery = query.trim()
+  if (normalizedQuery) search.set('q', normalizedQuery)
+  const suffix = search.size > 0 ? `?${search}` : ''
+
+  return apiRequest(`/api/conversations/compose${suffix}`, { signal })
+}
+
+async function findStartedConversation(
+  response: ConversationStartResponse,
+  archived: boolean,
+  signal?: AbortSignal,
+): Promise<ConversationListItem | undefined> {
+  const list = await getConversations(
+    {
+      archived,
+      scope: 'all',
+      status: '전체',
+      q: response.customerPhoneE164,
+      limit: 100,
+    },
+    signal,
+  )
+  return list.conversations.find(
+    ({ id }) => id === response.conversationId,
+  )
+}
+
+export async function startConversation(
+  request: ConversationStartRequest,
+  signal?: AbortSignal,
+): Promise<ConversationListItem> {
+  const response = await jsonMutation<
+    ConversationStartResponse,
+    Record<string, unknown>
+  >(
+    '/api/conversations',
+    'POST',
+    { ...request },
+    signal,
+  )
+  const active = await findStartedConversation(response, false, signal)
+  if (active) return active
+
+  const archived = await findStartedConversation(response, true, signal)
+  if (archived) return archived
+
+  throw new ApiRequestError(
+    'server',
+    '연 대화를 목록에서 불러오지 못했습니다.',
+  )
 }
 
 export function patchConversation(

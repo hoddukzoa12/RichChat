@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useInbox } from '../state/InboxContext'
 import {
   assigneeLabel,
@@ -14,6 +15,7 @@ import {
 } from '../../shared/wire/conversation'
 import { useConversationList } from '../hooks/useConversationList'
 import { formatRelativeTime } from '../lib/time'
+import { ComposeConversationModal } from './ComposeConversationModal'
 
 const SCOPE_LABELS: Record<ConversationScope, string> = {
   all: '전체 담당',
@@ -115,6 +117,7 @@ function Row({ conv }: { conv: ConversationListItem }) {
 
 export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
   const { state, dispatch } = useInbox()
+  const [composeOpen, setComposeOpen] = useState(false)
   const { loadMore, retry } = useConversationList(state, dispatch)
   const list = visibleConversations(state)
   const counts = state.facets.status
@@ -137,6 +140,14 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
           <span className="text-[19px] font-bold tracking-[-0.4px] flex-none whitespace-nowrap mr-0.5">
             대화
           </span>
+
+          <button
+            type="button"
+            onClick={() => setComposeOpen(true)}
+            className="h-[29px] rounded-lg bg-brand px-2.5 text-[12.5px] font-semibold text-white shadow-[0_1px_2px_rgba(16,24,40,.1)] hover:bg-brand-hover"
+          >
+            ＋ 새 메시지
+          </button>
 
           <div className="relative">
             <button
@@ -270,6 +281,16 @@ export function ConversationList({ breakpoint }: { breakpoint: Breakpoint }) {
           </div>
         )}
       </div>
+
+      {composeOpen && (
+        <ComposeConversationModal
+          onClose={() => setComposeOpen(false)}
+          onStarted={(conversation) => {
+            dispatch({ type: 'conversationStarted', conversation })
+            setComposeOpen(false)
+          }}
+        />
+      )}
     </div>
   )
 }

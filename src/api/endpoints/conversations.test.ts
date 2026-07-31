@@ -5,8 +5,10 @@ import type {
 } from '../../../shared/wire/conversation'
 import {
   conversationVersionConflict,
+  getConversationComposeOptions,
   getConversations,
   patchConversation,
+  startConversation,
 } from './conversations'
 
 const RESPONSE: ConversationListResponse = {
@@ -95,6 +97,80 @@ describe('conversation list endpoint', () => {
     await getConversations({})
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/conversations')
+  })
+
+  it('loads compose options through the conversations endpoint', async () => {
+    const options = {
+      phones: [
+        {
+          id: 'phone-1',
+          label: '상담실',
+          value: '01012345678',
+        },
+      ],
+      customers: [RESPONSE.conversations[0].customer],
+    }
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(Response.json(options)),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await getConversationComposeOptions(' 김리치 ')
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/conversations/compose?q=%EA%B9%80%EB%A6%AC%EC%B9%98',
+    )
+    expect(result).toEqual(options)
+  })
+
+  it('creates then loads the conversation list item', async () => {
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          return Promise.resolve(
+            Response.json(
+              {
+                conversationId: 'conversation-1',
+                customerPhoneE164: '+821012345678',
+              },
+              { status: 201 },
+            ),
+          )
+        }
+        return Promise.resolve(Response.json(RESPONSE))
+      },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await startConversation({
+      officeChannelId: 'office-channel-1',
+      phone: '010-1234-5678',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [postPath, postInit] = fetchMock.mock.calls[0]
+    expect(postPath).toBe('/api/conversations')
+    expect(postInit).toMatchObject({
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    expect(JSON.parse(String(postInit?.body))).toEqual({
+      officeChannelId: 'office-channel-1',
+      phone: '010-1234-5678',
+    })
+    const listUrl = new URL(
+      String(fetchMock.mock.calls[1][0]),
+      'https://richchat.test',
+    )
+    expect(Object.fromEntries(listUrl.searchParams)).toEqual({
+      archived: 'false',
+      scope: 'all',
+      status: '전체',
+      q: '+821012345678',
+      limit: '100',
+    })
+    expect(result).toEqual(RESPONSE.conversations[0])
   })
 
   it('sends the version and requested fields in a PATCH request', async () => {

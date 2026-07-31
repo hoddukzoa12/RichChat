@@ -68,6 +68,23 @@ export interface ConversationListResponse {
   facets: ConversationListFacets
 }
 
+export interface ConversationComposeOptionsResponse {
+  phones: ConversationOfficeChannel[]
+  customers: ConversationListCustomer[]
+}
+
+export type ConversationStartRequest = {
+  officeChannelId: string
+} & (
+  | { customerId: string; phone?: never }
+  | { customerId?: never; phone: string }
+)
+
+export interface ConversationStartResponse {
+  conversationId: string
+  customerPhoneE164: string
+}
+
 export interface ConversationCustomerField {
   id: string
   key: string

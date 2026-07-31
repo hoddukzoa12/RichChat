@@ -5,10 +5,13 @@ import {
   CONVERSATION_STATUS_FILTERS,
   type ConversationArchiveFilter,
   type ConversationListAssignee,
+  type ConversationComposeOptionsResponse,
+  type ConversationListCustomer,
   type ConversationListFacets,
   type ConversationListItem,
   type ConversationListResponse,
   type ConversationScope,
+  type ConversationStartResponse,
   type ConversationStatusFilter,
 } from '../../shared/wire/conversation'
 import type { Status } from '../../shared/domain'
@@ -16,11 +19,18 @@ import {
   conversationOfficeChannelFromRow,
   type ConversationOfficeChannelRow,
 } from '../conversation-office-channel'
-import { executeBatch } from '../db/d1'
+import { changes, executeBatch } from '../db/d1'
+import { publish } from '../db/events'
 import { error } from '../http/error'
 import { json } from '../http/respond'
 import type { Route } from '../http/router'
 import { requireSession, type SessionContext } from '../http/session'
+import { createId } from '../lib/ids'
+import {
+  koreanPhoneSearchDigits,
+  normalizeKoreanPhoneValue,
+} from '../lib/phone'
+import { executeBatchAndBroadcast } from '../realtime/broadcast'
 
 type BindValue = string | number | null
 
@@ -35,7 +45,7 @@ export interface ConversationListQuery {
 }
 
 interface Cursor {
-  lastMessageAt: number | null
+  sortAt: number
   id: string
 }
 
@@ -57,6 +67,7 @@ interface PageRow extends ConversationOfficeChannelRow {
   customer_phone_e164: string
   preview: string
   last_message_at: number | null
+  sort_at: number
   unread_count: number
   assignees_json: string
   status: Status
@@ -81,7 +92,36 @@ interface ArchiveCountRow {
   count: number
 }
 
+interface ComposePhoneRow {
+  id: string
+  label: string
+  value: string
+}
+
+interface ComposeCustomerRow {
+  id: string
+  name: string
+  company: string
+  phone_e164: string
+}
+
+interface StartedConversationRow {
+  id: string
+  phone_e164: string
+}
+
+interface StartConversationInput {
+  officeChannelId: string
+  customerId: string | null
+  phoneE164: string | null
+}
+
 const EMPTY_FRAGMENT: SqlFragment = { sql: '', values: [] }
+const COMPOSE_SEARCH_LIMIT = 8
+const COMPOSE_QUERY_MAX_LENGTH = 100
+const CONVERSATION_CREATED_EVENT = 'conversation.created'
+const CONVERSATION_SORT_AT_SQL =
+  'COALESCE(c.last_message_at, c.created_at)'
 
 const ARCHIVE_SOURCE: Record<
   ConversationArchiveFilter,
@@ -145,10 +185,7 @@ function isMember<Value extends string>(
 }
 
 function phoneSearchValue(search: string): string {
-  const digits = search.replaceAll(/\D/g, '')
-  if (!digits) return ''
-
-  return digits.startsWith('0') ? `82${digits.slice(1)}` : digits
+  return koreanPhoneSearchDigits(search)
 }
 
 function decodeCursor(encoded: string): Cursor | undefined {
@@ -163,25 +200,25 @@ function decodeCursor(encoded: string): Cursor | undefined {
       return undefined
     }
 
-    const lastMessageAt = value[1]
+    const sortAt = value[1]
     const id = value[2]
     if (
-      (lastMessageAt !== null &&
-        (!Number.isSafeInteger(lastMessageAt) || lastMessageAt < 0)) ||
+      !Number.isSafeInteger(sortAt) ||
+      sortAt < 0 ||
       typeof id !== 'string' ||
       id.length === 0
     ) {
       return undefined
     }
 
-    return { lastMessageAt, id }
+    return { sortAt, id }
   } catch {
     return undefined
   }
 }
 
 function encodeCursor(cursor: Cursor): string {
-  const base64 = btoa(JSON.stringify([1, cursor.lastMessageAt, cursor.id]))
+  const base64 = btoa(JSON.stringify([1, cursor.sortAt, cursor.id]))
   return base64
     .replaceAll('+', '-')
     .replaceAll('/', '_')
@@ -294,25 +331,20 @@ function filteredWhere(
   fragments.push(searchFragment(filters))
 
   if (options.includeCursor && filters.cursor) {
-    if (filters.cursor.lastMessageAt === null) {
-      fragments.push({
-        sql: '(c.last_message_at IS NULL AND c.id < ?)',
-        values: [filters.cursor.id],
-      })
-    } else {
-      fragments.push({
-        sql: `(
-          c.last_message_at < ?
-          OR c.last_message_at IS NULL
-          OR (c.last_message_at = ? AND c.id < ?)
-        )`,
-        values: [
-          filters.cursor.lastMessageAt,
-          filters.cursor.lastMessageAt,
-          filters.cursor.id,
-        ],
-      })
-    }
+    fragments.push({
+      sql: `(
+        ${CONVERSATION_SORT_AT_SQL} < ?
+        OR (
+          ${CONVERSATION_SORT_AT_SQL} = ?
+          AND c.id < ?
+        )
+      )`,
+      values: [
+        filters.cursor.sortAt,
+        filters.cursor.sortAt,
+        filters.cursor.id,
+      ],
+    })
   }
 
   const active = fragments.filter((fragment) => fragment.sql !== '')
@@ -345,6 +377,7 @@ export function buildConversationPageQuery(
       customer.phone_e164 AS customer_phone_e164,
       COALESCE(last_message.body, '') AS preview,
       c.last_message_at,
+      ${CONVERSATION_SORT_AT_SQL} AS sort_at,
       MAX(
         c.inbound_count - COALESCE(conversation_read.read_inbound_count, 0),
         0
@@ -374,7 +407,7 @@ export function buildConversationPageQuery(
       ON conversation_read.conversation_id = c.id
       AND conversation_read.user_id = ?
     WHERE ${where.sql}
-    ORDER BY c.last_message_at DESC, c.id DESC
+    ORDER BY ${CONVERSATION_SORT_AT_SQL} DESC, c.id DESC
     LIMIT ?`,
     values: [session.userId, ...where.values, filters.limit + 1],
   }
@@ -519,6 +552,323 @@ function itemFromRow(row: PageRow): ConversationListItem {
   }
 }
 
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value)
+  )
+}
+
+async function readStartConversation(
+  request: Request,
+): Promise<StartConversationInput | Response> {
+  let value: unknown
+  try {
+    value = await request.json()
+  } catch {
+    return error('BAD_REQUEST', '올바른 JSON 본문이 필요합니다.')
+  }
+
+  if (!isJsonObject(value)) {
+    return error('BAD_REQUEST', 'JSON 객체가 필요합니다.')
+  }
+
+  const keys = Object.keys(value)
+  const hasCustomerId = Object.hasOwn(value, 'customerId')
+  const hasPhone = Object.hasOwn(value, 'phone')
+  if (
+    keys.length !== 2 ||
+    !keys.includes('officeChannelId') ||
+    hasCustomerId === hasPhone ||
+    typeof value.officeChannelId !== 'string' ||
+    value.officeChannelId.trim() === ''
+  ) {
+    return error(
+      'BAD_REQUEST',
+      '보내는 폰과 받는 사람을 확인해 주세요.',
+    )
+  }
+
+  if (
+    hasCustomerId &&
+    (
+      typeof value.customerId !== 'string' ||
+      value.customerId.trim() === ''
+    )
+  ) {
+    return error('BAD_REQUEST', '받는 고객을 확인해 주세요.')
+  }
+
+  if (hasPhone && typeof value.phone !== 'string') {
+    return error('BAD_REQUEST', '받는 사람의 전화번호를 확인해 주세요.')
+  }
+
+  const phoneE164 = hasPhone
+    ? normalizeKoreanPhoneValue(value.phone as string)
+    : null
+  if (hasPhone && phoneE164 === null) {
+    return error(
+      'BAD_REQUEST',
+      '전화번호를 010-1234-5678 형식으로 입력해 주세요.',
+    )
+  }
+
+  return {
+    officeChannelId: value.officeChannelId.trim(),
+    customerId: hasCustomerId
+      ? (value.customerId as string).trim()
+      : null,
+    phoneE164,
+  }
+}
+
+async function composeOptions(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const session = await requireSession(request, env)
+  if (session instanceof Response) return session
+
+  const query = (new URL(request.url).searchParams.get('q') ?? '').trim()
+  if (query.length > COMPOSE_QUERY_MAX_LENGTH) {
+    return error('BAD_REQUEST', '고객 검색어가 너무 깁니다.')
+  }
+
+  const phoneSearch = koreanPhoneSearchDigits(query)
+  const normalizedPhone = normalizeKoreanPhoneValue(query) ?? ''
+  const results = await executeBatch(env.DB, [
+    env.DB.prepare(
+      `SELECT id, label, value
+       FROM office_channels
+       WHERE office_id = ?
+         AND active = 1
+         AND device_id IS NOT NULL
+       ORDER BY created_at, id`,
+    ).bind(session.officeId),
+    env.DB.prepare(
+      `SELECT id, name, company, phone_e164
+       FROM customers
+       WHERE office_id = ?
+         AND ? <> ''
+         AND (
+           instr(name, ?) > 0
+           OR (
+             ? <> ''
+             AND instr(replace(phone_e164, '+', ''), ?) > 0
+           )
+         )
+       ORDER BY
+         CASE WHEN phone_e164 = ? THEN 0 ELSE 1 END,
+         name,
+         id
+       LIMIT ?`,
+    ).bind(
+      session.officeId,
+      query,
+      query,
+      phoneSearch,
+      phoneSearch,
+      normalizedPhone,
+      COMPOSE_SEARCH_LIMIT,
+    ),
+  ])
+
+  const phones = (
+    results[0].results as unknown as ComposePhoneRow[]
+  ).map(({ id, label, value }) => ({ id, label, value }))
+  const customers: ConversationListCustomer[] = (
+    results[1].results as unknown as ComposeCustomerRow[]
+  ).map((customer) => ({
+    id: customer.id,
+    name: customer.name,
+    company: customer.company,
+    phoneE164: customer.phone_e164,
+  }))
+
+  return json({
+    phones,
+    customers,
+  } satisfies ConversationComposeOptionsResponse)
+}
+
+async function startConversation(
+  request: Request,
+  env: Env,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await requireSession(request, env)
+  if (session instanceof Response) return session
+
+  const input = await readStartConversation(request)
+  if (input instanceof Response) return input
+
+  const customerId = createId()
+  const conversationId = createId()
+  const now = Date.now()
+  const customerInsert = env.DB.prepare(
+    `INSERT INTO customers (
+       id, office_id, phone_e164, name, created_at, updated_at
+     )
+     SELECT ?, ?, ?, ?, ?, ?
+     FROM office_channels AS selected_channel
+     WHERE selected_channel.id = ?
+       AND selected_channel.office_id = ?
+       AND selected_channel.active = 1
+       AND selected_channel.device_id IS NOT NULL
+       AND ? IS NOT NULL
+     ON CONFLICT(office_id, phone_e164) DO NOTHING`,
+  ).bind(
+    customerId,
+    session.officeId,
+    input.phoneE164,
+    input.phoneE164,
+    now,
+    now,
+    input.officeChannelId,
+    session.officeId,
+    input.phoneE164,
+  )
+  const conversationInsert = env.DB.prepare(
+    `INSERT INTO conversations (
+       id, office_id, customer_id, office_channel_id, status,
+       last_message_id, last_message_at, created_at, updated_at
+     )
+     SELECT
+       ?, ?, customer.id, selected_channel.id, '처리중',
+       NULL, NULL, ?, ?
+     FROM customers AS customer
+     INNER JOIN office_channels AS selected_channel
+       ON selected_channel.id = ?
+       AND selected_channel.office_id = customer.office_id
+       AND selected_channel.active = 1
+       AND selected_channel.device_id IS NOT NULL
+     WHERE customer.office_id = ?
+       AND (
+         (? IS NOT NULL AND customer.id = ?)
+         OR (? IS NOT NULL AND customer.phone_e164 = ?)
+       )
+     ON CONFLICT(office_id, customer_id, office_channel_id) DO NOTHING`,
+  ).bind(
+    conversationId,
+    session.officeId,
+    now,
+    now,
+    input.officeChannelId,
+    session.officeId,
+    input.customerId,
+    input.customerId,
+    input.phoneE164,
+    input.phoneE164,
+  )
+  const publication = publish(
+    env.DB,
+    {
+      officeId: session.officeId,
+      type: CONVERSATION_CREATED_EVENT,
+      entity: 'conversation',
+      entityId: conversationId,
+      conversationId,
+      actorKind: 'user',
+      actorId: session.userId,
+      payload: {
+        officeChannelId: input.officeChannelId,
+        status: '처리중',
+      },
+      createdAt: now,
+    },
+    { query: 'SELECT 1 WHERE changes() = 1' },
+  )
+  const assigneeInsert = env.DB.prepare(
+    `INSERT INTO conversation_assignees (
+       conversation_id, office_id, user_id, assigned_at, assigned_by
+     )
+     SELECT id, office_id, ?, ?, ?
+     FROM conversations
+     WHERE id = ?
+     ON CONFLICT(conversation_id, user_id) DO NOTHING`,
+  ).bind(
+    session.userId,
+    now,
+    session.userId,
+    conversationId,
+  )
+
+  let results: D1Result[]
+  try {
+    results = await executeBatchAndBroadcast(
+      env.DB,
+      [
+        customerInsert,
+        conversationInsert,
+        ...publication,
+        assigneeInsert,
+      ],
+      [publication],
+      ctx,
+      env,
+    )
+  } catch {
+    return error('INTERNAL_ERROR', '새 대화를 만들지 못했습니다.')
+  }
+
+  const started = await env.DB.prepare(
+    `SELECT conversation.id, customer.phone_e164
+     FROM conversations AS conversation
+     INNER JOIN customers AS customer
+       ON customer.id = conversation.customer_id
+       AND customer.office_id = conversation.office_id
+     WHERE conversation.office_id = ?
+       AND conversation.office_channel_id = ?
+       AND (
+         (? IS NOT NULL AND customer.id = ?)
+         OR (? IS NOT NULL AND customer.phone_e164 = ?)
+       )`,
+  )
+    .bind(
+      session.officeId,
+      input.officeChannelId,
+      input.customerId,
+      input.customerId,
+      input.phoneE164,
+      input.phoneE164,
+    )
+    .first<StartedConversationRow>()
+
+  if (!started) {
+    const channel = await env.DB.prepare(
+      `SELECT active, device_id
+       FROM office_channels
+       WHERE id = ? AND office_id = ?`,
+    )
+      .bind(input.officeChannelId, session.officeId)
+      .first<{ active: number; device_id: string | null }>()
+    if (!channel) {
+      return error('BAD_REQUEST', '보내는 업무폰을 찾을 수 없습니다.')
+    }
+    if (channel.active !== 1 || channel.device_id === null) {
+      return error(
+        'CONFLICT',
+        '활성 상태인 업무폰을 선택해 주세요.',
+      )
+    }
+    if (input.customerId !== null) {
+      return error('NOT_FOUND', '받는 고객을 찾을 수 없습니다.')
+    }
+    return error('INTERNAL_ERROR', '새 대화를 불러오지 못했습니다.')
+  }
+
+  const response: ConversationStartResponse = {
+    conversationId: started.id,
+    customerPhoneE164: started.phone_e164,
+  }
+  return json(response, {
+    status: changes(results[1]) === 1 ? 201 : 200,
+  })
+}
+
 export async function listConversations(
   request: Request,
   env: Env,
@@ -547,7 +897,7 @@ export async function listConversations(
     conversations: visibleRows.map(itemFromRow),
     nextCursor: pageRows.length > filters.limit && lastVisible
       ? encodeCursor({
-          lastMessageAt: lastVisible.last_message_at,
+          sortAt: lastVisible.sort_at,
           id: lastVisible.id,
         })
       : null,
@@ -568,6 +918,17 @@ export async function listConversations(
 }
 
 export const routes: Route[] = [
+  {
+    method: 'GET',
+    path: '/api/conversations/compose',
+    handler: composeOptions,
+  },
+  {
+    method: 'POST',
+    path: '/api/conversations',
+    handler: (request, env, _params, ctx) =>
+      startConversation(request, env, ctx),
+  },
   {
     method: 'GET',
     path: '/api/conversations',
