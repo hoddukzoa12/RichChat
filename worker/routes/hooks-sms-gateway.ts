@@ -314,6 +314,27 @@ function optionalString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
+function normalizedMmsSubject(value: string): string {
+  let normalized = value.trim().replace(/\s+/gu, '')
+  while (
+    normalized.startsWith('[') &&
+    normalized.endsWith(']')
+  ) {
+    normalized = normalized.slice(1, -1)
+  }
+  return normalized
+}
+
+function mmsTitle(subject: string | null, body: string): string | null {
+  if (subject === null || normalizedMmsSubject(subject) === '제목없음') {
+    return null
+  }
+
+  const normalizedSubject = subject.trim().replace(/\s+/gu, ' ')
+  const normalizedBody = body.trim().replace(/\s+/gu, ' ')
+  return normalizedBody.startsWith(normalizedSubject) ? null : subject
+}
+
 function optionalNonNegativeInteger(value: unknown): number | null {
   return typeof value === 'number' &&
     Number.isSafeInteger(value) &&
@@ -664,6 +685,21 @@ async function recordGatewayReportFailure(
     throw new Error('SMS Gateway 리포트 원문을 격리하지 못했습니다.')
   }
   return failure.attempts
+}
+
+async function recordMmsReceivedDiagnostic(
+  db: D1Database,
+  idempotencyKey: string,
+  rawBody: string,
+  now: number,
+): Promise<void> {
+  await recordGatewayReportFailure(db, {
+    errorText:
+      'MMS 헤더를 수신했으며 다운로드 이벤트를 기다리고 있습니다.',
+    failureKey: idempotencyKey,
+    now,
+    rawBody,
+  })
 }
 
 const putMmsAttachment: PutMmsAttachment = async (
@@ -1154,6 +1190,16 @@ async function handleMmsInbound(
   )
   try {
     const downloaded = MMS_INBOUND_EVENT[event].downloaded
+    if (!downloaded) {
+      await recordMmsReceivedDiagnostic(
+        env.DB,
+        idempotencyKey,
+        rawBody,
+        receivedAt,
+      )
+      return successResponse()
+    }
+
     const contentFingerprint = downloaded
       ? await rawBodyDigest(rawBody)
       : undefined
@@ -1181,7 +1227,10 @@ async function handleMmsInbound(
         officeChannelId: officeChannel.id,
         customerPhoneE164,
         channel: 'MMS',
-        title: received.payload.subject,
+        title: mmsTitle(
+          received.payload.subject,
+          received.payload.body,
+        ),
         body: received.payload.body,
         occurredAt: received.payload.occurredAt,
         occurredAtCanonical:

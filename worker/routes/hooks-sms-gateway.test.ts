@@ -374,18 +374,30 @@ describe('Android SMS Gateway webhook', () => {
     expect(message?.body).toBe('부가세 문의드려요')
   })
 
-  it('merges received then downloaded MMS and stores one R2 attachment once', async () => {
+  it('records the received header and stores only the downloaded MMS', async () => {
     await insertOfficeChannels()
-    const messageId = 'gateway-mms-forward'
-    const received = mmsWebhookBody('mms:received', messageId)
-    const downloaded = mmsWebhookBody('mms:downloaded', messageId)
+    const receivedMessageId = 'ZxqUf3r1'
+    const downloadedMessageId = '2249'
+    const received = mmsWebhookBody(
+      'mms:received',
+      receivedMessageId,
+      { transactionId: receivedMessageId },
+    )
+    const downloaded = mmsWebhookBody(
+      'mms:downloaded',
+      downloadedMessageId,
+      { transactionId: null },
+    )
 
     await expectSuccess(await post(received))
     await expectSuccess(await post(downloaded))
     await expectSuccess(await post(downloaded))
     await expectSuccess(await post(downloaded))
 
-    const key = smsGatewayIdempotencyKey(DEVICE_ID, messageId)
+    const key = smsGatewayIdempotencyKey(
+      DEVICE_ID,
+      downloadedMessageId,
+    )
     const message = await env.DB.prepare(
       `SELECT id, body, title, channel
        FROM messages
@@ -403,6 +415,11 @@ describe('Android SMS Gateway webhook', () => {
       channel: 'MMS',
       title: '세금계산서 사진',
     })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM messages',
+      ).first(),
+    ).toEqual({ count: 1 })
 
     const attachments = await env.DB.prepare(
       `SELECT id, byte_size, mime_type, r2_key, download_status
@@ -449,11 +466,28 @@ describe('Android SMS Gateway webhook', () => {
         .bind(message?.id)
         .first(),
     ).toEqual({ count: 2 })
+    const diagnostic = await env.DB.prepare(
+      `SELECT attempts, raw_json
+       FROM mo_failures
+       WHERE mo_key = ?`,
+    )
+      .bind(
+        smsGatewayIdempotencyKey(DEVICE_ID, receivedMessageId),
+      )
+      .first<{ attempts: number; raw_json: string }>()
+    expect(diagnostic?.attempts).toBe(1)
+    expect(JSON.parse(diagnostic!.raw_json)).toMatchObject({
+      event: 'mms:received',
+      payload: {
+        messageId: receivedMessageId,
+        transactionId: receivedMessageId,
+      },
+    })
   })
 
-  it('keeps downloaded content when received arrives later and filters duplicate text', async () => {
+  it('stores a downloaded-only MMS and ignores a later received header', async () => {
     await insertOfficeChannels()
-    const messageId = 'gateway-mms-reversed'
+    const messageId = '2251'
     const before = Date.now()
     const downloaded = mmsWebhookBody('mms:downloaded', messageId, {
       subject: null,
@@ -501,7 +535,8 @@ describe('Android SMS Gateway webhook', () => {
 
     await expectSuccess(
       await post(
-        mmsWebhookBody('mms:received', messageId, {
+        mmsWebhookBody('mms:received', 'ZaqUfdE0', {
+          transactionId: 'ZaqUfdE0',
           subject: '나중에 도착한 제목',
           receivedAt: 1_785_386_400,
           productCode: 'unknown-field',
@@ -520,8 +555,20 @@ describe('Android SMS Gateway webhook', () => {
     ).toEqual({
       body: '순서가 바뀐 문의',
       channel: 'MMS',
-      title: '나중에 도착한 제목',
+      title: null,
     })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM messages',
+      ).first(),
+    ).toEqual({ count: 1 })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM mo_failures WHERE mo_key = ?',
+      )
+        .bind(smsGatewayIdempotencyKey(DEVICE_ID, 'ZaqUfdE0'))
+        .first(),
+    ).toEqual({ count: 1 })
     const attachments = await env.DB.prepare(
       `SELECT byte_size, download_status, r2_key
        FROM message_attachments
@@ -544,6 +591,93 @@ describe('Android SMS Gateway webhook', () => {
       attachments.results[0]!.r2_key,
     )
     expect(object?.size).toBe(0)
+  })
+
+  it('keeps a received-only MMS out of the inbox with one diagnostic row', async () => {
+    await insertOfficeChannels()
+    const messageId = 'AEqUnzOZ'
+
+    await expectSuccess(
+      await post(
+        mmsWebhookBody('mms:received', messageId, {
+          transactionId: messageId,
+          subject: '[제목없음]',
+        }),
+      ),
+    )
+
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM messages',
+      ).first(),
+    ).toEqual({ count: 0 })
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM mo_failures
+         WHERE mo_key = ?`,
+      )
+        .bind(smsGatewayIdempotencyKey(DEVICE_ID, messageId))
+        .first(),
+    ).toEqual({ count: 1 })
+  })
+
+  it('filters carrier-generated MMS subjects and keeps a user title', async () => {
+    await insertOfficeChannels()
+    const cases = [
+      {
+        messageId: '2301',
+        subject: '제목없음',
+        body: '첫 번째 실제 본문',
+        title: null,
+      },
+      {
+        messageId: '2302',
+        subject: '[제목없음]',
+        body: '두 번째 실제 본문',
+        title: null,
+      },
+      {
+        messageId: '2303',
+        subject: '안녕하세요. 한국오에이렌',
+        body: '안녕하세요. 한국오에이렌입니다. 문의드립니다.',
+        title: null,
+      },
+      {
+        messageId: '2304',
+        subject: '세금계산서 사진',
+        body: '첨부 자료를 확인해 주세요.',
+        title: '세금계산서 사진',
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      await expectSuccess(
+        await post(
+          mmsWebhookBody('mms:downloaded', testCase.messageId, {
+            transactionId: null,
+            subject: testCase.subject,
+            body: testCase.body,
+            attachments: [],
+          }),
+        ),
+      )
+    }
+
+    for (const testCase of cases) {
+      expect(
+        await env.DB.prepare(
+          'SELECT title FROM messages WHERE mo_key = ?',
+        )
+          .bind(
+            smsGatewayIdempotencyKey(
+              DEVICE_ID,
+              testCase.messageId,
+            ),
+          )
+          .first(),
+      ).toEqual({ title: testCase.title })
+    }
   })
 
   it('keeps the MMS body and quarantines the raw webhook when an attachment exceeds the limit', async () => {
