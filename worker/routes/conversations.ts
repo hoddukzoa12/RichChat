@@ -45,7 +45,7 @@ export interface ConversationListQuery {
 }
 
 interface Cursor {
-  lastMessageAt: number | null
+  sortAt: number
   id: string
 }
 
@@ -67,6 +67,7 @@ interface PageRow extends ConversationOfficeChannelRow {
   customer_phone_e164: string
   preview: string
   last_message_at: number | null
+  sort_at: number
   unread_count: number
   assignees_json: string
   status: Status
@@ -119,6 +120,8 @@ const EMPTY_FRAGMENT: SqlFragment = { sql: '', values: [] }
 const COMPOSE_SEARCH_LIMIT = 8
 const COMPOSE_QUERY_MAX_LENGTH = 100
 const CONVERSATION_CREATED_EVENT = 'conversation.created'
+const CONVERSATION_SORT_AT_SQL =
+  'COALESCE(c.last_message_at, c.created_at)'
 
 const ARCHIVE_SOURCE: Record<
   ConversationArchiveFilter,
@@ -197,25 +200,25 @@ function decodeCursor(encoded: string): Cursor | undefined {
       return undefined
     }
 
-    const lastMessageAt = value[1]
+    const sortAt = value[1]
     const id = value[2]
     if (
-      (lastMessageAt !== null &&
-        (!Number.isSafeInteger(lastMessageAt) || lastMessageAt < 0)) ||
+      !Number.isSafeInteger(sortAt) ||
+      sortAt < 0 ||
       typeof id !== 'string' ||
       id.length === 0
     ) {
       return undefined
     }
 
-    return { lastMessageAt, id }
+    return { sortAt, id }
   } catch {
     return undefined
   }
 }
 
 function encodeCursor(cursor: Cursor): string {
-  const base64 = btoa(JSON.stringify([1, cursor.lastMessageAt, cursor.id]))
+  const base64 = btoa(JSON.stringify([1, cursor.sortAt, cursor.id]))
   return base64
     .replaceAll('+', '-')
     .replaceAll('/', '_')
@@ -328,25 +331,20 @@ function filteredWhere(
   fragments.push(searchFragment(filters))
 
   if (options.includeCursor && filters.cursor) {
-    if (filters.cursor.lastMessageAt === null) {
-      fragments.push({
-        sql: '(c.last_message_at IS NULL AND c.id < ?)',
-        values: [filters.cursor.id],
-      })
-    } else {
-      fragments.push({
-        sql: `(
-          c.last_message_at < ?
-          OR c.last_message_at IS NULL
-          OR (c.last_message_at = ? AND c.id < ?)
-        )`,
-        values: [
-          filters.cursor.lastMessageAt,
-          filters.cursor.lastMessageAt,
-          filters.cursor.id,
-        ],
-      })
-    }
+    fragments.push({
+      sql: `(
+        ${CONVERSATION_SORT_AT_SQL} < ?
+        OR (
+          ${CONVERSATION_SORT_AT_SQL} = ?
+          AND c.id < ?
+        )
+      )`,
+      values: [
+        filters.cursor.sortAt,
+        filters.cursor.sortAt,
+        filters.cursor.id,
+      ],
+    })
   }
 
   const active = fragments.filter((fragment) => fragment.sql !== '')
@@ -379,6 +377,7 @@ export function buildConversationPageQuery(
       customer.phone_e164 AS customer_phone_e164,
       COALESCE(last_message.body, '') AS preview,
       c.last_message_at,
+      ${CONVERSATION_SORT_AT_SQL} AS sort_at,
       MAX(
         c.inbound_count - COALESCE(conversation_read.read_inbound_count, 0),
         0
@@ -408,7 +407,7 @@ export function buildConversationPageQuery(
       ON conversation_read.conversation_id = c.id
       AND conversation_read.user_id = ?
     WHERE ${where.sql}
-    ORDER BY c.last_message_at DESC, c.id DESC
+    ORDER BY ${CONVERSATION_SORT_AT_SQL} DESC, c.id DESC
     LIMIT ?`,
     values: [session.userId, ...where.values, filters.limit + 1],
   }
@@ -898,7 +897,7 @@ export async function listConversations(
     conversations: visibleRows.map(itemFromRow),
     nextCursor: pageRows.length > filters.limit && lastVisible
       ? encodeCursor({
-          lastMessageAt: lastVisible.last_message_at,
+          sortAt: lastVisible.sort_at,
           id: lastVisible.id,
         })
       : null,

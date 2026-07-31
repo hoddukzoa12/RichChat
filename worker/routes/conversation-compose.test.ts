@@ -7,11 +7,13 @@ import {
   expect,
   it,
 } from 'vitest'
-import type {
-  ConversationComposeOptionsResponse,
-  ConversationListResponse,
-  ConversationStartResponse,
+import {
+  CONVERSATION_LIST_DEFAULT_LIMIT,
+  type ConversationComposeOptionsResponse,
+  type ConversationListResponse,
+  type ConversationStartResponse,
 } from '../../shared/wire/conversation'
+import { storeInboundMessage } from '../inbound-message'
 import {
   createSession,
   SESSION_COOKIE_NAME,
@@ -400,6 +402,157 @@ describe('Conversation compose API', () => {
         lastMessageAt: null,
       }),
     ])
+  })
+
+  it('keeps a refreshed empty conversation on a full first page', async () => {
+    const fixture = await seedFixture()
+    const now = Date.now() - 60_000
+    const statements: D1PreparedStatement[] = [
+      env.DB.prepare(
+        `UPDATE conversations
+         SET archived_at = ?
+         WHERE id = ?`,
+      ).bind(now, fixture.existingConversationId),
+    ]
+    for (
+      let index = 0;
+      index < CONVERSATION_LIST_DEFAULT_LIMIT;
+      index += 1
+    ) {
+      const customerId =
+        `compose-page-customer-${fixtureSequence}-${index}`
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO customers (
+             id, office_id, phone_e164, name, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          customerId,
+          fixture.officeId,
+          `+82109000${String(index).padStart(4, '0')}`,
+          `기존 고객 ${index}`,
+          now - index,
+          now - index,
+        ),
+        env.DB.prepare(
+          `INSERT INTO conversations (
+             id, office_id, customer_id, office_channel_id, status,
+             last_message_at, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, '완료', ?, ?, ?)`,
+        ).bind(
+          `compose-page-conversation-${fixtureSequence}-${index}`,
+          fixture.officeId,
+          customerId,
+          fixture.phoneBId,
+          now - index,
+          now - index,
+          now - index,
+        ),
+      )
+    }
+    await env.DB.batch(statements)
+
+    const response = await startConversation(
+      {
+        officeChannelId: fixture.phoneBId,
+        phone: '010-4444-5555',
+      },
+      fixture.token,
+    )
+    const started = await response.json<ConversationStartResponse>()
+    expect(response.status).toBe(201)
+
+    const listResponse = await SELF.fetch(
+      `${ORIGIN}/api/conversations`,
+      { headers: { cookie: cookie(fixture.token) } },
+    )
+    const list = await listResponse.json<ConversationListResponse>()
+
+    expect(list.conversations).toHaveLength(
+      CONVERSATION_LIST_DEFAULT_LIMIT,
+    )
+    expect(list.conversations[0]).toEqual(
+      expect.objectContaining({
+        id: started.conversationId,
+        lastMessageAt: null,
+        preview: '',
+      }),
+    )
+    expect(list.nextCursor).not.toBeNull()
+  })
+
+  it('promotes an empty conversation when its first inbound message arrives', async () => {
+    const fixture = await seedFixture()
+    const targetResponse = await startConversation(
+      {
+        officeChannelId: fixture.phoneBId,
+        phone: '010-1111-9999',
+      },
+      fixture.token,
+    )
+    const rivalResponse = await startConversation(
+      {
+        officeChannelId: fixture.phoneBId,
+        phone: '010-2222-9999',
+      },
+      fixture.token,
+    )
+    const target = await targetResponse.json<ConversationStartResponse>()
+    const rival = await rivalResponse.json<ConversationStartResponse>()
+    const baseTime = Date.now() - 10_000
+    await env.DB.batch([
+      env.DB.prepare(
+        'UPDATE conversations SET created_at = ? WHERE id = ?',
+      ).bind(baseTime, target.conversationId),
+      env.DB.prepare(
+        'UPDATE conversations SET created_at = ? WHERE id = ?',
+      ).bind(baseTime + 1, rival.conversationId),
+    ])
+
+    const beforeResponse = await SELF.fetch(
+      `${ORIGIN}/api/conversations`,
+      { headers: { cookie: cookie(fixture.token) } },
+    )
+    const before = await beforeResponse.json<ConversationListResponse>()
+    const beforeIds = before.conversations.map(({ id }) => id)
+    expect(beforeIds.indexOf(rival.conversationId)).toBeLessThan(
+      beforeIds.indexOf(target.conversationId),
+    )
+
+    const occurredAt = Date.now() + 1_000
+    await storeInboundMessage(env, {
+      officeId: fixture.officeId,
+      officeChannelId: fixture.phoneBId,
+      customerPhoneE164: '+821011119999',
+      channel: 'SMS',
+      title: null,
+      body: '처음 도착한 고객 문의',
+      occurredAt,
+      occurredAtCanonical: true,
+      receivedAt: Date.now(),
+      idempotencyKey: `compose-first-inbound-${fixtureSequence}`,
+    })
+
+    const afterResponse = await SELF.fetch(
+      `${ORIGIN}/api/conversations`,
+      { headers: { cookie: cookie(fixture.token) } },
+    )
+    const after = await afterResponse.json<ConversationListResponse>()
+    expect(after.conversations[0]).toEqual(
+      expect.objectContaining({
+        id: target.conversationId,
+        lastMessageAt: occurredAt,
+        preview: '처음 도착한 고객 문의',
+      }),
+    )
+    const stored = await env.DB.prepare(
+      `SELECT last_message_at
+       FROM conversations
+       WHERE id = ?`,
+    )
+      .bind(target.conversationId)
+      .first<{ last_message_at: number | null }>()
+    expect(stored?.last_message_at).toBe(occurredAt)
   })
 
   it('opens an existing customer conversation without changing it', async () => {

@@ -413,13 +413,25 @@ describe('Conversation list API', () => {
     expect(archived.facets.archive).toEqual({ active: 0, archived: 1 })
   })
 
-  it('paginates equal sort keys without duplicates or omissions', async () => {
+  it('paginates effective sort keys without duplicates or omissions', async () => {
     const fixture = await seedFixture()
     const seeded = await Promise.all([
-      seedConversation(fixture, { key: 'a', lastMessageAt: 500 }),
-      seedConversation(fixture, { key: 'b', lastMessageAt: 400 }),
-      seedConversation(fixture, { key: 'c', lastMessageAt: 400 }),
-      seedConversation(fixture, { key: 'd', lastMessageAt: 100 }),
+      seedConversation(fixture, {
+        key: 'a',
+        lastMessageAt: fixture.baseTime + 500,
+      }),
+      seedConversation(fixture, {
+        key: 'b',
+        lastMessageAt: fixture.baseTime + 400,
+      }),
+      seedConversation(fixture, {
+        key: 'c',
+        lastMessageAt: fixture.baseTime + 400,
+      }),
+      seedConversation(fixture, {
+        key: 'd',
+        lastMessageAt: fixture.baseTime - 100,
+      }),
       seedConversation(fixture, { key: 'e', lastMessageAt: null }),
       seedConversation(fixture, { key: 'f', lastMessageAt: null }),
     ])
@@ -440,9 +452,21 @@ describe('Conversation list API', () => {
       `conversation-${fixture.key}-a`,
       `conversation-${fixture.key}-c`,
       `conversation-${fixture.key}-b`,
-      `conversation-${fixture.key}-d`,
       `conversation-${fixture.key}-f`,
       `conversation-${fixture.key}-e`,
+      `conversation-${fixture.key}-d`,
+    ])
+    expect(
+      received.filter(
+        (id) =>
+          !id.endsWith('-e') &&
+          !id.endsWith('-f'),
+      ),
+    ).toEqual([
+      `conversation-${fixture.key}-a`,
+      `conversation-${fixture.key}-c`,
+      `conversation-${fixture.key}-b`,
+      `conversation-${fixture.key}-d`,
     ])
   })
 
