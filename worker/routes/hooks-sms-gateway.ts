@@ -20,6 +20,10 @@ import {
 import type { Clock } from '../lib/ids'
 import { normalizeKoreanPhoneValue } from '../lib/phone'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
+import {
+  recordPendingMmsHeader,
+  resolvePendingMmsHeader,
+} from '../sms-gateway-mms-diagnostics'
 
 const SIGNATURE_HEADER = 'X-Signature'
 const TIMESTAMP_HEADER = 'X-Timestamp'
@@ -332,6 +336,8 @@ function mmsTitle(subject: string | null, body: string): string | null {
 
   const normalizedSubject = subject.trim().replace(/\s+/gu, ' ')
   const normalizedBody = body.trim().replace(/\s+/gu, ' ')
+  // 통신사 사본과 사용자가 직접 쓴 접두사 제목은 페이로드만으로 구별할 수 없다.
+  // 접두사는 본문에 정보가 남으므로 사용자 제목의 오탐 삭제를 감수하고 중복을 없앤다.
   return normalizedBody.startsWith(normalizedSubject) ? null : subject
 }
 
@@ -685,21 +691,6 @@ async function recordGatewayReportFailure(
     throw new Error('SMS Gateway 리포트 원문을 격리하지 못했습니다.')
   }
   return failure.attempts
-}
-
-async function recordMmsReceivedDiagnostic(
-  db: D1Database,
-  idempotencyKey: string,
-  rawBody: string,
-  now: number,
-): Promise<void> {
-  await recordGatewayReportFailure(db, {
-    errorText:
-      'MMS 헤더를 수신했으며 다운로드 이벤트를 기다리고 있습니다.',
-    failureKey: idempotencyKey,
-    now,
-    rawBody,
-  })
 }
 
 const putMmsAttachment: PutMmsAttachment = async (
@@ -1191,11 +1182,15 @@ async function handleMmsInbound(
   try {
     const downloaded = MMS_INBOUND_EVENT[event].downloaded
     if (!downloaded) {
-      await recordMmsReceivedDiagnostic(
+      await recordPendingMmsHeader(
         env.DB,
-        idempotencyKey,
-        rawBody,
-        receivedAt,
+        {
+          customerPhoneE164,
+          deviceId: received.deviceId,
+          idempotencyKey,
+          rawBody,
+          receivedAt,
+        },
       )
       return successResponse()
     }
@@ -1257,6 +1252,16 @@ async function handleMmsInbound(
         },
       },
       ctx,
+    )
+    await resolvePendingMmsHeader(
+      env.DB,
+      {
+        customerPhoneE164,
+        deviceId: received.deviceId,
+        downloadedAt: receivedAt,
+        idempotencyKey,
+        rememberDownloaded: stored.created,
+      },
     )
     await discardReplacedMmsObjects(
       env.ATTACHMENTS,

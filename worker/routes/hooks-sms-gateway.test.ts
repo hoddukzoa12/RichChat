@@ -466,23 +466,16 @@ describe('Android SMS Gateway webhook', () => {
         .bind(message?.id)
         .first(),
     ).toEqual({ count: 2 })
-    const diagnostic = await env.DB.prepare(
-      `SELECT attempts, raw_json
-       FROM mo_failures
-       WHERE mo_key = ?`,
-    )
-      .bind(
-        smsGatewayIdempotencyKey(DEVICE_ID, receivedMessageId),
-      )
-      .first<{ attempts: number; raw_json: string }>()
-    expect(diagnostic?.attempts).toBe(1)
-    expect(JSON.parse(diagnostic!.raw_json)).toMatchObject({
-      event: 'mms:received',
-      payload: {
-        messageId: receivedMessageId,
-        transactionId: receivedMessageId,
-      },
-    })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
+      ).first(),
+    ).toEqual({ count: 0 })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM mo_failures',
+      ).first(),
+    ).toEqual({ count: 0 })
   })
 
   it('stores a downloaded-only MMS and ignores a later received header', async () => {
@@ -564,11 +557,14 @@ describe('Android SMS Gateway webhook', () => {
     ).toEqual({ count: 1 })
     expect(
       await env.DB.prepare(
-        'SELECT COUNT(*) AS count FROM mo_failures WHERE mo_key = ?',
-      )
-        .bind(smsGatewayIdempotencyKey(DEVICE_ID, 'ZaqUfdE0'))
-        .first(),
-    ).toEqual({ count: 1 })
+        'SELECT COUNT(*) AS count FROM sms_gateway_mms_pending',
+      ).first(),
+    ).toEqual({ count: 0 })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM mo_failures',
+      ).first(),
+    ).toEqual({ count: 0 })
     const attachments = await env.DB.prepare(
       `SELECT byte_size, download_status, r2_key
        FROM message_attachments
@@ -593,7 +589,7 @@ describe('Android SMS Gateway webhook', () => {
     expect(object?.size).toBe(0)
   })
 
-  it('keeps a received-only MMS out of the inbox with one diagnostic row', async () => {
+  it('keeps a received-only MMS out of the inbox with one pending header', async () => {
     await insertOfficeChannels()
     const messageId = 'AEqUnzOZ'
 
@@ -614,12 +610,17 @@ describe('Android SMS Gateway webhook', () => {
     expect(
       await env.DB.prepare(
         `SELECT COUNT(*) AS count
-         FROM mo_failures
+         FROM sms_gateway_mms_pending
          WHERE mo_key = ?`,
       )
         .bind(smsGatewayIdempotencyKey(DEVICE_ID, messageId))
         .first(),
     ).toEqual({ count: 1 })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM mo_failures',
+      ).first(),
+    ).toEqual({ count: 0 })
   })
 
   it('filters carrier-generated MMS subjects and keeps a user title', async () => {

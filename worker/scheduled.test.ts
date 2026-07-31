@@ -10,6 +10,10 @@ import {
 } from 'vitest'
 import type { LguFetch } from './lgu/protocol'
 import {
+  MMS_DOWNLOAD_MISSING_ERROR_TEXT,
+  MMS_DOWNLOAD_WAIT_MS,
+} from './sms-gateway-mms-diagnostics'
+import {
   ATTACHMENT_DOWNLOAD_LEASE_MS,
   LGU_ATTACHMENT_RECOVERY_WINDOW_MS,
   runAttachmentDownloads,
@@ -577,5 +581,62 @@ describe('Attachment scheduled download', () => {
 
     expect(calls).toEqual(['failed', 'completed'])
     expect(error).toHaveBeenCalledOnce()
+  })
+
+  it('promotes only stale pending MMS headers and cleans successful markers', async () => {
+    const staleAt = Date.now() - MMS_DOWNLOAD_WAIT_MS - 1_000
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          `INSERT INTO sms_gateway_mms_pending (
+             mo_key, device_id, sender_e164, raw_json,
+             attempts, first_at, last_at
+           ) VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        )
+        .bind(
+          'sms-gateway/device/missing',
+          'device',
+          '+821022334455',
+          '{"event":"mms:received"}',
+          staleAt,
+          staleAt,
+        ),
+      env.DB
+        .prepare(
+          `INSERT INTO sms_gateway_mms_downloaded (
+             mo_key, device_id, sender_e164, downloaded_at
+           ) VALUES (?, ?, ?, ?)`,
+        )
+        .bind(
+          'sms-gateway/device/completed',
+          'device',
+          '+821022334455',
+          staleAt,
+        ),
+    ])
+
+    await runScheduledTasks(env)
+
+    expect(
+      await env.DB.prepare(
+        `SELECT mo_key, error_text
+         FROM mo_failures`,
+      ).first(),
+    ).toEqual({
+      error_text: MMS_DOWNLOAD_MISSING_ERROR_TEXT,
+      mo_key: 'sms-gateway/device/missing',
+    })
+    expect(
+      await env.DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM sms_gateway_mms_pending)
+             AS pending_count,
+           (SELECT COUNT(*) FROM sms_gateway_mms_downloaded)
+             AS downloaded_count`,
+      ).first(),
+    ).toEqual({
+      downloaded_count: 0,
+      pending_count: 0,
+    })
   })
 })

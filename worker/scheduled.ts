@@ -9,6 +9,7 @@ import {
 } from './lgu/report'
 import type { LguTokenProvider } from './lgu/token'
 import { executeBatchAndBroadcast } from './realtime/broadcast'
+import { promoteStaleMmsHeaders } from './sms-gateway-mms-diagnostics'
 
 export const LGU_ATTACHMENT_RECOVERY_WINDOW_MS =
   24 * 60 * 60 * 1_000
@@ -95,6 +96,7 @@ export type ScheduledTask = (
 ) => Promise<unknown>
 
 const SCHEDULED_TASKS: readonly ScheduledTask[] = [
+  (env) => promoteStaleMmsHeaders(env.DB),
   (env, ctx) => runDeliveryReportReconciliation(env, {}, ctx),
   (env, ctx) => runAttachmentDownloads(env, {}, ctx),
 ]
