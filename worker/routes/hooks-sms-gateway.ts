@@ -20,6 +20,9 @@ import {
 import type { Clock } from '../lib/ids'
 import { normalizeKoreanPhoneValue } from '../lib/phone'
 import { executeBatchAndBroadcast } from '../realtime/broadcast'
+import {
+  recordPendingMmsHeader,
+} from '../sms-gateway-mms-diagnostics'
 
 const SIGNATURE_HEADER = 'X-Signature'
 const TIMESTAMP_HEADER = 'X-Timestamp'
@@ -312,6 +315,29 @@ function isMmsInboundEvent(value: string): value is MmsInboundEvent {
 
 function optionalString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function normalizedMmsSubject(value: string): string {
+  let normalized = value.trim().replace(/\s+/gu, '')
+  while (
+    normalized.startsWith('[') &&
+    normalized.endsWith(']')
+  ) {
+    normalized = normalized.slice(1, -1)
+  }
+  return normalized
+}
+
+function mmsTitle(subject: string | null, body: string): string | null {
+  if (subject === null || normalizedMmsSubject(subject) === '제목없음') {
+    return null
+  }
+
+  const normalizedSubject = subject.trim().replace(/\s+/gu, ' ')
+  const normalizedBody = body.trim().replace(/\s+/gu, ' ')
+  // 통신사 사본과 사용자가 직접 쓴 접두사 제목은 페이로드만으로 구별할 수 없다.
+  // 접두사는 본문에 정보가 남으므로 사용자 제목의 오탐 삭제를 감수하고 중복을 없앤다.
+  return normalizedBody.startsWith(normalizedSubject) ? null : subject
 }
 
 function optionalNonNegativeInteger(value: unknown): number | null {
@@ -1154,6 +1180,20 @@ async function handleMmsInbound(
   )
   try {
     const downloaded = MMS_INBOUND_EVENT[event].downloaded
+    if (!downloaded) {
+      await recordPendingMmsHeader(
+        env.DB,
+        {
+          customerPhoneE164,
+          deviceId: received.deviceId,
+          idempotencyKey,
+          rawBody,
+          receivedAt,
+        },
+      )
+      return successResponse()
+    }
+
     const contentFingerprint = downloaded
       ? await rawBodyDigest(rawBody)
       : undefined
@@ -1181,7 +1221,10 @@ async function handleMmsInbound(
         officeChannelId: officeChannel.id,
         customerPhoneE164,
         channel: 'MMS',
-        title: received.payload.subject,
+        title: mmsTitle(
+          received.payload.subject,
+          received.payload.body,
+        ),
         body: received.payload.body,
         occurredAt: received.payload.occurredAt,
         occurredAtCanonical:

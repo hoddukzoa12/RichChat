@@ -10,6 +10,10 @@ import {
 } from 'vitest'
 import type { LguFetch } from './lgu/protocol'
 import {
+  MMS_DOWNLOAD_MISSING_ERROR_TEXT,
+  MMS_DOWNLOAD_WAIT_MS,
+} from './sms-gateway-mms-diagnostics'
+import {
   ATTACHMENT_DOWNLOAD_LEASE_MS,
   LGU_ATTACHMENT_RECOVERY_WINDOW_MS,
   runAttachmentDownloads,
@@ -577,5 +581,61 @@ describe('Attachment scheduled download', () => {
 
     expect(calls).toEqual(['failed', 'completed'])
     expect(error).toHaveBeenCalledOnce()
+  })
+
+  it('promotes stale MMS headers without deleting permanent matches', async () => {
+    const staleAt = Date.now() - MMS_DOWNLOAD_WAIT_MS - 1_000
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          `INSERT INTO sms_gateway_mms_pending (
+             mo_key, device_id, sender_e164, raw_json,
+             attempts, first_at, last_at
+           ) VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        )
+        .bind(
+          'sms-gateway/device/missing',
+          'device',
+          '+821022334455',
+          '{"event":"mms:received"}',
+          staleAt,
+          staleAt,
+        ),
+      env.DB
+        .prepare(
+          `INSERT INTO sms_gateway_mms_matches (
+             downloaded_mo_key, received_mo_key, matched_at
+           ) VALUES (?, ?, ?)`,
+        )
+        .bind(
+          'sms-gateway/device/completed',
+          'sms-gateway/device/completed-header',
+          staleAt,
+        ),
+    ])
+
+    await runScheduledTasks(env)
+
+    expect(
+      await env.DB.prepare(
+        `SELECT mo_key, error_text
+         FROM mo_failures`,
+      ).first(),
+    ).toEqual({
+      error_text: MMS_DOWNLOAD_MISSING_ERROR_TEXT,
+      mo_key: 'sms-gateway/device/missing',
+    })
+    expect(
+      await env.DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM sms_gateway_mms_pending)
+             AS pending_count,
+           (SELECT COUNT(*) FROM sms_gateway_mms_matches)
+             AS match_count`,
+      ).first(),
+    ).toEqual({
+      match_count: 1,
+      pending_count: 0,
+    })
   })
 })

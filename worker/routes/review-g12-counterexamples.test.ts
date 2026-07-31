@@ -205,24 +205,28 @@ describe('G12 review counterexamples', () => {
 
   it('produces the same occurrence time in either webhook order', async () => {
     await seed()
-    const firstId = 'timestamp-received-first'
-    const secondId = 'timestamp-downloaded-first'
-    const receivedFirst = body('mms:received', firstId, {
+    const firstDownloadedId = '2249'
+    const secondDownloadedId = '2251'
+    const receivedFirst = body('mms:received', 'ZxqUf3r1', {
       receivedAt: 'invalid',
+      transactionId: 'ZxqUf3r1',
     })
-    const downloadedFirst = body('mms:downloaded', secondId, {
+    const downloadedFirst = body('mms:downloaded', secondDownloadedId, {
       receivedAt: '2026-07-01T14:00:00+09:00',
     })
 
     await invoke(receivedFirst)
     await invoke(
-      body('mms:downloaded', firstId, {
+      body('mms:downloaded', firstDownloadedId, {
         receivedAt: '2026-07-01T14:00:00+09:00',
       }),
     )
     await invoke(downloadedFirst)
     await invoke(
-      body('mms:received', secondId, { receivedAt: 'invalid' }),
+      body('mms:received', 'ZaqUfdE0', {
+        receivedAt: 'invalid',
+        transactionId: 'ZaqUfdE0',
+      }),
     )
 
     const rows = await env.DB.prepare(
@@ -232,19 +236,25 @@ describe('G12 review counterexamples', () => {
        ORDER BY mo_key`,
     )
       .bind(
-        smsGatewayIdempotencyKey(DEVICE_ID, firstId),
-        smsGatewayIdempotencyKey(DEVICE_ID, secondId),
+        smsGatewayIdempotencyKey(DEVICE_ID, firstDownloadedId),
+        smsGatewayIdempotencyKey(DEVICE_ID, secondDownloadedId),
       )
       .all<{ mo_key: string; occurred_at: number }>()
 
     const canonicalTime = Date.UTC(2026, 6, 1, 5)
     expect(rows.results).toEqual([
       {
-        mo_key: smsGatewayIdempotencyKey(DEVICE_ID, secondId),
+        mo_key: smsGatewayIdempotencyKey(
+          DEVICE_ID,
+          firstDownloadedId,
+        ),
         occurred_at: canonicalTime,
       },
       {
-        mo_key: smsGatewayIdempotencyKey(DEVICE_ID, firstId),
+        mo_key: smsGatewayIdempotencyKey(
+          DEVICE_ID,
+          secondDownloadedId,
+        ),
         occurred_at: canonicalTime,
       },
     ])
