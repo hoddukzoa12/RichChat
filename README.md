@@ -30,10 +30,6 @@
     <td>Durable Objects WebSocket으로 새 문의 즉시 수신</td>
   </tr>
   <tr>
-    <td><b>📡 LGU+ 메시지허브 연동</b></td>
-    <td>SMS/LMS/MMS 발송·수신·리포트 자동 처리</td>
-  </tr>
-  <tr>
     <td><b>📱 업무폰 SMS 게이트웨이</b></td>
     <td>Android 기기를 통한 직접 문자 송수신</td>
   </tr>
@@ -74,8 +70,7 @@ shared/           # 프론트와 워커가 함께 쓰는 도메인 타입·순�
 worker/           # Cloudflare Worker 백엔드 (서버 전용)
   routes/         # HTTP 라우트 핸들러
   db/             # D1 데이터베이스 접근
-  gateway/        # 외부 API 어댑터 (LGU+, SMS Gateway)
-  lgu/            # LGU+ 메시지허브 연동
+  gateway/        # 외부 API 어댑터 (SMS Gateway)
   works/          # 네이버웍스 OIDC 연동
   realtime/       # Durable Objects, WebSocket
 migrations/       # D1 스키마 마이그레이션 (스키마의 유일한 정의)
@@ -98,6 +93,6 @@ npm run build && npx wrangler deploy
 | 백엔드 | Cloudflare Workers (정적 자산 + API 단일 Worker) |
 | 데이터베이스 | Cloudflare D1 (SQLite) |
 | 실시간 | Durable Objects (WebSocket 푸시) |
-| 메시징 | LGU+ 메시지허브 API, Android SMS Gateway |
+| 메시징 | Android SMS Gateway |
 | 인증 | 네이버웍스 OIDC |
 | 테스트 | Vitest (`@cloudflare/vitest-pool-workers`) |
